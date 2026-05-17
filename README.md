@@ -38,7 +38,7 @@ Then in Claude Code just say things like:
 ## Use the verifier directly (no Claude needed)
 
 ```bash
-pip install -r requirements.txt
+pip install --user -r requirements.txt
 
 # Single address
 python3 verify_email.py "jane.doe@acme.com"

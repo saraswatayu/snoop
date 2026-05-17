@@ -1,6 +1,6 @@
 ---
 name: snoop
-description: Use when the user wants to find, guess, or verify someone's email address. Triggers include "snoop", "snoop <name> at <company>", "find this person's email", "what's <name>'s email at <company>", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify this email address". Generates a ranked candidate list from name patterns + light research, then verifies the whole list in ONE batched SMTP call and reports a verified hit or the best guess.
+description: Use when the user wants to find, guess, or verify someone's email address. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify this email address". Generates a ranked candidate list from name patterns plus light research, then verifies the whole list in ONE batched SMTP call and reports a verified hit or the best guess.
 ---
 
 # snoop
@@ -69,14 +69,22 @@ hyphenated. Add candidates on every plausible domain. Cap ~15–25 total.
 
 ## Step 3 — One batched verification call
 
-Write the list to a temp file (one per line) and call once:
+`verify_email.py` is bundled in **this skill's own directory** (the
+directory this SKILL.md lives in). Resolve that directory and call the
+script there — do not hardcode an absolute path, the skill may be installed
+personally (`~/.claude/skills/`) or per-project (`.claude/skills/`).
+
+You already know this skill's directory — it's where you read this
+SKILL.md from. Use that path. Write the candidate list to a temp file
+(one per line) and call once, e.g.:
 
 ```bash
-python3 ~/.claude/skills/snoop/verify_email.py --file /tmp/snoop_candidates.txt
+python3 "<this-skill-dir>/verify_email.py" --file /tmp/snoop_candidates.txt
 ```
 
-(or pass them as args). Needs `dnspython` — `pip install dnspython` if the
-script says it's missing.
+(or pass candidates as args instead of `--file`). Requires `dnspython`; if
+the script reports it missing, install it for the current user only
+(`pip install --user dnspython`) — do not install packages globally.
 
 The script returns one JSON object: `result`
 (`verified` | `catch_all` | `inconclusive` | `exhausted`), `hit` (the
