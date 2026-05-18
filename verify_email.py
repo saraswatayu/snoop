@@ -149,6 +149,94 @@ def score_confidence(verdict, catch_all, provider, smtp_code,
     return score, "; ".join(facts)
 
 
+# ---- #2: infer a company's name->localpart format from known addresses ----
+# Simple and explicit: a fixed set of common templates. If known company
+# addresses agree on one, predict the target's address with it and corroborate
+# the matching candidate. No provenance plumbing, no probabilistic modelling.
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z]", "", (s or "").lower())
+
+
+def _split_name(name: str):
+    parts = [p for p in re.split(r"\s+", (name or "").strip()) if p]
+    if len(parts) < 2:
+        return None
+    return _norm(parts[0]), _norm(parts[-1])
+
+
+def _templates(first: str, last: str):
+    f, l = first[:1], last[:1]
+    return {
+        "first.last": f"{first}.{last}",
+        "firstlast": f"{first}{last}",
+        "flast": f"{f}{last}",
+        "firstl": f"{first}{l}",
+        "f.last": f"{f}.{last}",
+        "first_last": f"{first}_{last}",
+        "first-last": f"{first}-{last}",
+        "last.first": f"{last}.{first}",
+        "lastfirst": f"{last}{first}",
+        "lastf": f"{last}{f}",
+        "first": f"{first}",
+        "fl": f"{f}{l}",
+    }
+
+
+def infer_patterns(localpart: str, first: str, last: str):
+    """Template names whose output equals this localpart (may be >1)."""
+    if not first or not last:
+        return []
+    lp = localpart.lower()
+    return [name for name, val in _templates(first, last).items() if val == lp]
+
+
+def predict(template: str, first: str, last: str) -> str:
+    return _templates(first, last).get(template, "")
+
+
+def rank_candidates(emails, known, target_name):
+    """Reorder `emails` so addresses matching the company's known pattern
+    come first; return (ordered_emails, {email: corroborating_known_count}).
+
+    known: list of (email, "First Last" | None). Only knowns on the SAME
+    domain as a candidate, with a parseable name, vote. Tolerant: any bad
+    input just yields no reordering.
+    """
+    tn = _split_name(target_name or "")
+    if not tn:
+        return list(emails), {}
+    tf, tl = tn
+
+    votes = {}  # domain -> {template: count}
+    for kemail, kname in known or []:
+        kn = _split_name(kname or "")
+        if not kn or "@" not in (kemail or ""):
+            continue
+        klp, kdom = kemail.rsplit("@", 1)
+        for t in infer_patterns(klp, *kn):
+            votes.setdefault(kdom.lower(), {})
+            votes[kdom.lower()][t] = votes[kdom.lower()].get(t, 0) + 1
+
+    match, predicted = {}, []
+    for dom in {e.rsplit("@", 1)[1].lower() for e in emails if "@" in e}:
+        for t, n in votes.get(dom, {}).items():
+            pred = f"{predict(t, tf, tl)}@{dom}"
+            predicted.append((n, pred))
+            match[pred] = max(match.get(pred, 0), n)
+
+    order, seen = [], set()
+    for _, pred in sorted(predicted, key=lambda x: -x[0]):
+        if pred not in seen:
+            order.append(pred)
+            seen.add(pred)
+    for e in emails:
+        if e not in seen:
+            order.append(e)
+            seen.add(e)
+    return order, match
+
+
 class DomainProbe:
     """One MX lookup + one catch-all sentinel + one reused SMTP connection."""
 
@@ -229,7 +317,8 @@ class DomainProbe:
             self._server = None
 
 
-def run_single(email: str, mail_from: str, timeout: int) -> int:
+def run_single(email: str, mail_from: str, timeout: int,
+               known=None, target=None) -> int:
     result = {"email": email, "verdict": None, "mx": None, "provider": None,
               "catch_all": None, "smtp_code": None, "detail": None,
               "score": None, "evidence": None}
@@ -239,18 +328,21 @@ def run_single(email: str, mail_from: str, timeout: int) -> int:
                       score=s, evidence=ev)
         print(json.dumps(result))
         return VERDICT_EXIT["bad_syntax"]
+    _, match = rank_candidates([email], known, target)
     domain = email.rsplit("@", 1)[1]
     probe = DomainProbe(domain, mail_from, timeout)
-    r = probe.test(email)
+    r = probe.test(email, match.get(email, 0))
     probe.close()
     print(json.dumps(r))
     return VERDICT_EXIT.get(r["verdict"], 3)
 
 
-def run_batch(emails, mail_from: str, timeout: int) -> int:
+def run_batch(emails, mail_from: str, timeout: int,
+              known=None, target=None) -> int:
     """Test a ranked list. Stop globally on the first `verified` hit.
     A catch-all / no-MX domain is marked dead and its remaining
     candidates are skipped (probing them is pointless)."""
+    emails, match = rank_candidates(emails, known, target)
     probes = {}
     tested = []
     hit = None
@@ -274,7 +366,7 @@ def run_batch(emails, mail_from: str, timeout: int) -> int:
             continue
         if domain not in probes:
             probes[domain] = DomainProbe(domain, mail_from, timeout)
-        r = probes[domain].test(email)
+        r = probes[domain].test(email, match.get(email, 0))
         tested.append(r)
         if r["verdict"] in ("catch_all", "no_mx"):
             dead_domains.add(domain)
@@ -310,7 +402,18 @@ def main() -> int:
     ap.add_argument("--file", help="Read candidates one-per-line ('-' = stdin).")
     ap.add_argument("--from", dest="mail_from", default="verify@example.com")
     ap.add_argument("--timeout", type=int, default=10)
+    ap.add_argument("--known", action="append", metavar="EMAIL[=First Last]",
+                    help="A known address at the company (repeatable). With "
+                         "a name, used to infer the company's email format.")
+    ap.add_argument("--for", dest="target", metavar="First Last",
+                    help="The person the candidates are for (enables #2 "
+                         "pattern inference from --known).")
     args = ap.parse_args()
+
+    known = []
+    for k in args.known or []:
+        kemail, _, kname = k.partition("=")
+        known.append((kemail.strip(), kname.strip() or None))
 
     emails = list(args.emails)
     if args.file:
@@ -322,8 +425,10 @@ def main() -> int:
         ap.error("provide at least one email, or --file")
 
     if len(emails) == 1 and not args.file:
-        return run_single(emails[0], args.mail_from, args.timeout)
-    return run_batch(emails, args.mail_from, args.timeout)
+        return run_single(emails[0], args.mail_from, args.timeout,
+                          known, args.target)
+    return run_batch(emails, args.mail_from, args.timeout,
+                     known, args.target)
 
 
 if __name__ == "__main__":
