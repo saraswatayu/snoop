@@ -75,16 +75,20 @@ script there — do not hardcode an absolute path, the skill may be installed
 personally (`~/.claude/skills/`) or per-project (`.claude/skills/`).
 
 You already know this skill's directory — it's where you read this
-SKILL.md from. Use that path. Write the candidate list to a temp file
-(one per line) and call once, e.g.:
+SKILL.md from. Use that path. Pipe the ranked list straight into the
+script over **stdin** (`--file -`), one per line. Do NOT write a temp
+file — a fixed path collides if two snoop runs happen in parallel, and
+stdin needs no cleanup:
 
 ```bash
-python3 "<this-skill-dir>/verify_email.py" --file /tmp/snoop_candidates.txt
+printf '%s\n' \
+  jane.doe@acme.com jdoe@acme.com j.doe@acme.com \
+  | python3 "<this-skill-dir>/verify_email.py" --file -
 ```
 
-(or pass candidates as args instead of `--file`). Requires `dnspython`; if
-the script reports it missing, install it for the current user only
-(`pip install --user dnspython`) — do not install packages globally.
+(or pass candidates as positional args — also fine, also no temp file).
+Requires `dnspython`; if the script reports it missing, install it for
+the current user only (`pip install --user dnspython`) — never globally.
 
 The script returns one JSON object: `result`
 (`verified` | `catch_all` | `inconclusive` | `exhausted`), `hit` (the
