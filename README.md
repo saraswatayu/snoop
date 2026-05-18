@@ -18,6 +18,7 @@ legitimate outreach and verification only.
 |---|---|
 | `SKILL.md` | The skill itself — instructions Claude Code loads. |
 | `verify_email.py` | Standalone verifier. Single-address or batched. |
+| `test_snoop.py` | Pure-logic tests (`python3 -m unittest`, no network). |
 | `requirements.txt` | One dependency: `dnspython`. |
 
 ## Install (as a Claude Code skill)
@@ -47,12 +48,28 @@ python3 verify_email.py "jane.doe@acme.com"
 python3 verify_email.py a@acme.com b@acme.com c@acme.dev
 python3 verify_email.py --file candidates.txt        # one per line
 printf 'a@acme.com\nb@acme.com\n' | python3 verify_email.py --file -
+
+# Infer the company format from a known address and corroborate the match
+python3 verify_email.py jsmith@acme.com jane.smith@acme.com \
+    --for "Jane Smith" --known "bdoe@acme.com=Bob Doe"
 ```
 
 Single mode prints one JSON verdict and its exit code mirrors the verdict
 (`0` verified, `1` invalid, `2` catch_all, `3` inconclusive, `4` bad_syntax,
 `5` no_mx). Batch mode prints one JSON summary (`result`, `hit`, `tested`)
 and exits `0` only if a verified hit was found.
+
+Every result carries a **`score`** (0–1) and a one-line **`evidence`**
+string. The score is a transparent hand-weighted heuristic over named
+signals (RCPT result, catch-all, provider, count of known-address pattern
+corroborations) — it is a defensible *confidence score*, **not** a
+calibrated probability (there is no labelled dataset behind it). Treat
+`0.45` as "more than a coin-flip, far from certain", not as "45% true".
+
+`--known EMAIL[=First Last]` (repeatable) + `--for "First Last"` infer the
+company's `name → localpart` format from real same-domain addresses, push
+the predicted match to the front, and raise its score. Same-domain knowns
+only; bad input is ignored, never fatal.
 
 ## How verification works
 

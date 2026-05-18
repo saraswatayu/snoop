@@ -52,6 +52,10 @@ Spend at most ~1–2 searches to re-rank, not to be exhaustive:
   block RCPT → expect to land on best-guess; don't over-invest.
 - Capture name spelling variants (hyphenated surnames, anglicized first
   names, middle names, diacritics → ascii).
+- **Grab any real known address at the company** with the person's name
+  (e.g. a press/staff email `jdoe@acme.com` for "John Doe"). Even one or
+  two lets the script infer the company's format and corroborate a
+  candidate — the single biggest accuracy lever. Pass these via `--known`.
 
 Then stop researching and move on.
 
@@ -83,18 +87,24 @@ stdin needs no cleanup:
 ```bash
 printf '%s\n' \
   jane.doe@acme.com jdoe@acme.com j.doe@acme.com \
-  | python3 "<this-skill-dir>/verify_email.py" --file -
+  | python3 "<this-skill-dir>/verify_email.py" --file - \
+      --for "Jane Doe" --known "bsmith@acme.com=Bob Smith"
 ```
 
-(or pass candidates as positional args — also fine, also no temp file).
-Requires `dnspython`; if the script reports it missing, install it for
-the current user only (`pip install --user dnspython`) — never globally.
+`--for "First Last"` names the target; `--known "EMAIL=First Last"`
+(repeatable) feeds any real same-domain address you found in Step 1. The
+script infers the company format from those, pushes the predicted match
+to the front, and raises its confidence. Omit both if you found no known
+address — it still works, just without that boost. (Candidates can also
+be positional args — also fine, also no temp file.) Requires `dnspython`;
+if missing, `pip install --user dnspython` — never globally.
 
 The script returns one JSON object: `result`
 (`verified` | `catch_all` | `inconclusive` | `exhausted`), `hit` (the
-verified address or null), and `tested` (per-candidate verdicts). It already
-does the catch-all sentinel, connection reuse, early-stop on verified, and
-skips dead domains. Do not re-run it candidate-by-candidate.
+verified address or null), and `tested` (per-candidate verdicts, each with
+a `score` 0–1 and a one-line `evidence` string). It already does the
+catch-all sentinel, connection reuse, early-stop on verified, pattern
+ranking, and skips dead domains. Do not re-run it candidate-by-candidate.
 
 Only make a second call if the result is `exhausted` AND you have a
 genuinely different, better-researched candidate set — not to retry the
@@ -106,17 +116,19 @@ same patterns.
 `jane.doe@acme.com — Verified`.
 
 **If no single answer is obvious** (catch-all / inconclusive / exhausted):
-a table, one row per plausible candidate, ranked best first:
+a table, one row per plausible candidate, ranked by the script's `score`
+(highest first):
 
 | Email | Confidence |
 |---|---|
-| jane.doe@acme.com | High |
-| jdoe@acme.com | Medium |
-| j.doe@acme.com | Low |
+| jsmith@acme.com | 0.57 |
+| jane.smith@acme.com | 0.45 |
+| jsmith2@acme.com | 0.35 |
 
-Confidence ∈ **Verified** / **High** / **Medium** / **Low**. No MX, no SMTP
-codes, no ruled-out list, no prose — unless the user asks. Never label a
-guess "Verified".
+Confidence is the script's `score` verbatim (or **Verified** for a hit).
+Use the script's number — do not invent your own. No MX, no SMTP codes,
+no ruled-out list, no prose, no `evidence` string — unless the user asks.
+Never label a guess "Verified".
 
 ## Notes
 
