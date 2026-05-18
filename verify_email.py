@@ -99,6 +99,56 @@ def classify(target_code, catch_all: bool, provider: str):
     return "inconclusive", note
 
 
+# Transparent, hand-weighted. NOT a calibrated probability (no labelled
+# data) -- a defensible confidence score. Every number here is explainable.
+_VERDICT_BASE = {
+    "verified": 0.85,
+    "catch_all": 0.45,
+    "inconclusive": 0.35,
+    "invalid": 0.02,
+    "no_mx": 0.0,
+    "bad_syntax": 0.0,
+}
+
+
+def score_confidence(verdict, catch_all, provider, smtp_code,
+                     pattern_matches: int = 0):
+    """Return (score 0-1, one-line evidence string) from named signals.
+
+    pattern_matches = how many known company addresses corroborate this
+    address's name->localpart format (0 if no pattern evidence).
+    """
+    base = _VERDICT_BASE.get(verdict, 0.3)
+    facts = []
+
+    if verdict == "verified":
+        base += 0.05  # clean RCPT accept on a non-catch-all domain
+        facts.append("RCPT accepted, non-catch-all")
+    elif verdict == "catch_all":
+        facts.append("domain is catch-all (mailbox itself unconfirmable)")
+    elif verdict == "inconclusive":
+        if provider in ("google", "microsoft"):
+            facts.append(f"{provider.title()} blocks RCPT verification")
+        else:
+            facts.append("RCPT inconclusive")
+    elif verdict == "invalid":
+        facts.append("RCPT rejected")
+    elif verdict == "no_mx":
+        facts.append("no usable MX")
+    elif verdict == "bad_syntax":
+        facts.append("invalid syntax")
+
+    if pattern_matches > 0 and verdict not in ("invalid", "no_mx",
+                                               "bad_syntax"):
+        bonus = min(0.04 * pattern_matches, 0.12)
+        base += bonus
+        facts.append(f"matches company pattern from {pattern_matches} "
+                     f"known address{'es' if pattern_matches > 1 else ''}")
+
+    score = round(max(0.0, min(1.0, base)), 2)
+    return score, "; ".join(facts)
+
+
 class DomainProbe:
     """One MX lookup + one catch-all sentinel + one reused SMTP connection."""
 
@@ -150,18 +200,25 @@ class DomainProbe:
         except Exception:  # noqa: BLE001
             return None
 
-    def test(self, email: str):
+    def test(self, email: str, pattern_matches: int = 0):
         if self._server is None and self.error is None:
             self._connect()
         if self.error:
+            score, evidence = score_confidence("no_mx", None,
+                                               self.provider, None)
             return {"email": email, "verdict": "no_mx", "mx": self.mx,
                     "provider": self.provider, "catch_all": None,
-                    "smtp_code": None, "detail": self.error}
+                    "smtp_code": None, "detail": self.error,
+                    "score": score, "evidence": evidence}
         code = self._rcpt(email)
         verdict, detail = classify(code, self.catch_all, self.provider)
+        score, evidence = score_confidence(verdict, self.catch_all,
+                                           self.provider, code,
+                                           pattern_matches)
         return {"email": email, "verdict": verdict, "mx": self.mx,
                 "provider": self.provider, "catch_all": self.catch_all,
-                "smtp_code": code, "detail": detail}
+                "smtp_code": code, "detail": detail,
+                "score": score, "evidence": evidence}
 
     def close(self):
         if self._server is not None:
@@ -174,9 +231,12 @@ class DomainProbe:
 
 def run_single(email: str, mail_from: str, timeout: int) -> int:
     result = {"email": email, "verdict": None, "mx": None, "provider": None,
-              "catch_all": None, "smtp_code": None, "detail": None}
+              "catch_all": None, "smtp_code": None, "detail": None,
+              "score": None, "evidence": None}
     if not SYNTAX_RE.match(email):
-        result.update(verdict="bad_syntax", detail="Fails email syntax check.")
+        s, ev = score_confidence("bad_syntax", None, None, None)
+        result.update(verdict="bad_syntax", detail="Fails email syntax check.",
+                      score=s, evidence=ev)
         print(json.dumps(result))
         return VERDICT_EXIT["bad_syntax"]
     domain = email.rsplit("@", 1)[1]
@@ -200,14 +260,17 @@ def run_batch(emails, mail_from: str, timeout: int) -> int:
         if not email:
             continue
         if not SYNTAX_RE.match(email):
+            s, ev = score_confidence("bad_syntax", None, None, None)
             tested.append({"email": email, "verdict": "bad_syntax",
-                           "detail": "Fails syntax check."})
+                           "detail": "Fails syntax check.",
+                           "score": s, "evidence": ev})
             continue
         domain = email.rsplit("@", 1)[1]
         if domain in dead_domains:
             tested.append({"email": email, "verdict": "skipped",
                            "detail": f"{domain} already unverifiable; "
-                                     "skipped to save probes."})
+                                     "skipped to save probes.",
+                           "score": None, "evidence": None})
             continue
         if domain not in probes:
             probes[domain] = DomainProbe(domain, mail_from, timeout)
