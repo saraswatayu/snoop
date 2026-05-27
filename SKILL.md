@@ -93,7 +93,7 @@ For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
 - User asked you to be quick / not auth into Google.
 - You're running snoop in a batch / loop (the path is one-target-per-invocation; bulk use risks Google flagging the account).
 
-**ToS posture, briefly**: this uses YOUR own logged-in Google session to query Google about a third party. Technically the same posture as querying any logged-in service about visible data, but at scale or for harassment, the user owns the responsibility. The skill enforces one-target-per-invocation and a daily probe budget (default 30) as defense-in-depth. Surface this posture to the user the first time they invoke `--allow-google-account` per machine.
+The skill enforces one-target-per-invocation and a daily probe budget (default 30) as defense-in-depth against accidentally burning your own Google account.
 
 **Non-Google Workspace domains**: pass them via `--google-workspace-domain` repeatable. v1 doesn't auto-detect MX; if you know `acme.com` is on Workspace, declare it. Defer MX-based auto-detection to a later iteration.
 
@@ -130,7 +130,7 @@ A `—` in a column means **abstain** (no evidence either way), NOT zero. Render
 - When the script's resolver notes contain a plan-vs-observed delta (e.g. "plan claimed employer=OpenAI; github profile company=Anthropic — employer differs"), surface it to the user.
 - Use `--intent personal` only when the user explicitly asked for personal contact. The default `work` is right for sales prep, founder research, recruiter outreach.
 - **Populate `channel_hints` in the plan when you learned a backup channel during plan construction.** If you found the target via a LinkedIn URL, include `"channel_hints": {"linkedin": "<that-url>"}`. If you saw "DMs open" on their X bio, `{"x_dms_open": true, "x_handle": "@..."}`. The renderer surfaces these as the fallback channel when email confidence is low — don't recreate this as freeform prose at the end of your response when the structured data could have rendered it cleanly.
-- **Set `--allow-google-account` when the target is on a Google Workspace domain AND identity is uncertain.** Google Workspace catch-all defeats SMTP verification; the People API path is the only way to discriminate among pattern candidates. Concrete triggers: employer is google.com OR a Workspace-hosted domain (declare via `--google-workspace-domain`); AND identity ambiguity is not `single_plausible_match`; OR a prior run produced ≥3 candidates on the same domain with identical scores. Surface the ToS posture ("uses your logged-in Google session to query Google") to the user the FIRST time you invoke this flag per machine — don't bury it.
+- **Set `--allow-google-account` when the target is on a Google Workspace domain AND identity is uncertain.** Google Workspace catch-all defeats SMTP verification; the People API path is the only way to discriminate among pattern candidates. Concrete triggers: employer is google.com OR a Workspace-hosted domain (declare via `--google-workspace-domain`); AND identity ambiguity is not `single_plausible_match`; OR a prior run produced ≥3 candidates on the same domain with identical scores.
 
 **MUST NOT do:**
 

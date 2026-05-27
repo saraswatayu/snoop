@@ -83,12 +83,7 @@ definitively verified — those are reported honestly as best-guess, never as
 This uses SMTP `RCPT` + catch-all detection, deliberately *not* the
 unreliable and widely disabled SMTP `VRFY` command.
 
-## Responsible use
-
-This tool probes mail servers. Probe only addresses you have a legitimate
-reason to contact, keep volume low (it is sequential by design), and respect
-the target's terms of service and applicable law. It is not for bulk
-scraping or spam.
+Sequential by design — one target per invocation. Not built for bulk.
 
 ## License
 

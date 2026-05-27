@@ -108,7 +108,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Use Google's People API to verify candidate existence on Google-"
             "hosted domains. Reads cookies from your logged-in Chrome session. "
-            "ToS-edgy at high volume; default is OFF. See SKILL.md."
+            "Default OFF — high volume can get your Google account flagged."
         ),
     )
     p.add_argument(
