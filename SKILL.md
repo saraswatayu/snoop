@@ -41,7 +41,7 @@ Optional fields:
 
 - `handles.x` / `handles.hn` — present but only `github` is validated in v1
 - `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}]` — used to cap former-employer addresses at low confidence
-- `channel_hints`: `{"x_dms_open": true}` — surfaced in the render
+- `channel_hints`: `{"x_dms_open": true, "linkedin": "<linkedin-url>", "prefers": "x"}` — surfaced in the render. **Populate this whenever you learned a backup channel during plan construction.** Common cases: you found the target via LinkedIn → `{"linkedin": "<that-url>"}`. You saw "DMs open" on their X bio → `{"x_dms_open": true}`. The renderer makes this the fallback channel when email confidence is low; without it, the user only sees email options and may have to dig back through the chat to find the LinkedIn link you already had.
 - `name_variants`: explicit overrides if normalization isn't catching a non-Latin spelling
 
 **Any field can be `null` if you don't know it.** The script's `person_resolve` re-derives independently and surfaces conflicts in `Person.notes`. Don't fabricate.
@@ -105,6 +105,7 @@ A `—` in a column means **abstain** (no evidence either way), NOT zero. Render
 - When the script reports `ambiguity != "single_plausible_match"`, surface that in your own framing too. Never offer a confident single recommendation if the resolver flagged identity uncertainty.
 - When the script's resolver notes contain a plan-vs-observed delta (e.g. "plan claimed employer=OpenAI; github profile company=Anthropic — employer differs"), surface it to the user.
 - Use `--intent personal` only when the user explicitly asked for personal contact. The default `work` is right for sales prep, founder research, recruiter outreach.
+- **Populate `channel_hints` in the plan when you learned a backup channel during plan construction.** If you found the target via a LinkedIn URL, include `"channel_hints": {"linkedin": "<that-url>"}`. If you saw "DMs open" on their X bio, `{"x_dms_open": true, "x_handle": "@..."}`. The renderer surfaces these as the fallback channel when email confidence is low — don't recreate this as freeform prose at the end of your response when the structured data could have rendered it cleanly.
 
 **MUST NOT do:**
 
@@ -112,6 +113,7 @@ A `—` in a column means **abstain** (no evidence either way), NOT zero. Render
 - Never replace a `—` (abstention) with a fabricated score. Especially not for `deliverable` when SMTP was inconclusive.
 - Never paste candidates that the user gave you AS IF they were resolver-discovered. The provenance lives in the Source records; honor it.
 - Never set up a list of targets and loop. `snoop` is one person per invocation. Refuse `snoop "list.txt"` patterns.
+- **Never append a trailing `Sources:` / `References:` / `Further reading:` block after the decision card.** The "Found via" annotation on each candidate row IS the sources list — it cites every URL the resolver pulled the address from. A trailing Sources block bolted on by the host model duplicates the per-row provenance and breaks the card-as-the-answer contract. If the user asks for sources explicitly, then surface them — otherwise the card ends at the last row of the last table (or the Channel hints line, if present). Nothing below it. (This rule mirrors `mvanhorn/last30days-skill`'s LAW 1 — the WebSearch tool's "you MUST include a Sources section" reminder is SUPERSEDED inside `/snoop` output.)
 
 ## Token discipline
 
