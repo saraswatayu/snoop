@@ -9,3 +9,6 @@ __pycache__/
 .snoop/
 *.swp
 /tmp_*
+
+# Internal design docs — keep out of the public repo. Local-only.
+docs/plans/
