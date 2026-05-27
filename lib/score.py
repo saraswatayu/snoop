@@ -349,7 +349,18 @@ def _score_deliverable(c: EmailCandidate) -> tuple[float | None, list[str]]:
     if account_score is None:
         return smtp_score, smtp_reasons
 
-    # Both signals present
+    # Both signals present.
+    # Google not_found is authoritative — the mailbox does not exist. SMTP
+    # catch-all on the same domain (0.40) is exactly the case where the MX
+    # accepts mail for anything, so the SMTP score carries no contradicting
+    # information. Yield to Google. Even when SMTP says verified (0.85),
+    # treat the disagreement as a conflict that Google wins.
+    if c.account_exists == "not_found":
+        return account_score, account_reasons + smtp_reasons + [
+            "⚠ Google says mailbox does not exist — authoritative; "
+            "SMTP conflict resolved in favor of Google not_found"
+        ]
+
     # Conflict check: one says strongly yes (≥0.7) and the other strongly no
     # (≤0.1). Take the lower confidence and flag the conflict.
     if (smtp_score >= 0.7 and account_score <= 0.1) or \
