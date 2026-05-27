@@ -418,6 +418,10 @@ def fetch_google_account(
         # Account exists. Was profile visible?
         if result["profile_visible"]:
             c.account_exists = "verified"
+            # Store display name on the candidate so the scorer can compare
+            # it against the target name without parsing the detail string.
+            if result["display_name"]:
+                c.account_display_name = result["display_name"]
             detail_parts = ["Google account confirmed"]
             if result["gaia_id"]:
                 detail_parts.append(f"Gaia {result['gaia_id'][:8]}…")

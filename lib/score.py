@@ -37,6 +37,7 @@ from .schema import EmailCandidate, Person, Source
 # sources adds on top (see _score_belongs).
 SOURCE_WEIGHTS: dict[str, float] = {
     "manual_known":     0.65,  # user-supplied ground truth — highest trust
+    "google_account":   0.65,  # Google API confirmed existence (cookie-jar gated)
     "git_commit":       0.55,  # demonstrably used; age-decayed below
     "gh_profile":       0.55,  # explicit public profile email
     "hn_profile":       0.55,  # explicit HN public profile email
@@ -106,6 +107,16 @@ def _score_belongs(
     now: datetime,
 ) -> tuple[float | None, list[str]]:
     """How confident is this address owned by `person`?"""
+    # Google said "not found" — strong negative regardless of other signals.
+    # Pattern_gen may have produced this candidate; the Google API directly
+    # contradicts it. Cap hard.
+    if c.account_exists == "not_found":
+        reasons = [
+            "Google account lookup: address not found — strong negative; "
+            "pattern guess overridden"
+        ]
+        return 0.05, reasons
+
     if not c.sources:
         return None, []
 
@@ -135,6 +146,41 @@ def _score_belongs(
             f"corroborated by {len(non_pattern)} independent sources (+{bonus:.2f})"
         )
 
+    # Google account verified + name match → strongest signal we have.
+    # This is the categorical Google-Workspace unlock: pattern-only candidates
+    # that pass the Google check get lifted ABOVE the pattern-only cap.
+    if c.account_exists == "verified":
+        # Delayed import to avoid circular: name_match lives in person_resolve.
+        from .person_resolve import name_match
+        if c.account_display_name and name_match(c.account_display_name, person.name):
+            base = max(base, 0.75)
+            reasons.append(
+                f"Google account display name '{c.account_display_name}' "
+                f"matches target — strong identity bind"
+            )
+        elif c.account_display_name:
+            # Account exists but name doesn't match → could be someone else at
+            # this address. Cap below the name-match level; flag the delta.
+            base = min(base, 0.40)
+            reasons.append(
+                f"Google account exists but display name "
+                f"'{c.account_display_name}' differs from target "
+                f"'{person.name}' — could be a different person (capped at 0.40)"
+            )
+        else:
+            # Verified existence with no display name returned (rare). Treat as
+            # observational but not as a name anchor.
+            base = max(base, 0.50)
+            reasons.append("Google account confirmed (no display name to verify)")
+    elif c.account_exists == "exists_unverifiable":
+        # Workspace visibility-restricted: account exists but we can't see
+        # who. Moderate belongs evidence; lift above pattern-only cap.
+        base = max(base, 0.45)
+        reasons.append(
+            "Google account exists but profile not visible to querying "
+            "account (Workspace visibility-restricted)"
+        )
+
     # Generic-localpart downrank
     local = _localpart(c.address).lower()
     if local in _GENERIC_LOCALPARTS:
@@ -145,8 +191,9 @@ def _score_belongs(
                 f"generic localpart '{local}' — may be a shared inbox (capped at 0.35)"
             )
 
-    # Pattern-only candidates capped (no observational evidence)
-    if len(non_pattern) == 0:
+    # Pattern-only candidates capped (no observational evidence) — UNLESS a
+    # Google account check lifted them, which is observational.
+    if len(non_pattern) == 0 and c.account_exists not in ("verified", "exists_unverifiable"):
         base = min(base, 0.30)
         reasons.append("pattern-only candidate — no observational evidence (capped)")
 
@@ -228,12 +275,8 @@ def _score_current_work(
 # ---- deliverable ------------------------------------------------------------
 
 
-def _score_deliverable(c: EmailCandidate) -> tuple[float | None, list[str]]:
-    """Will a message sent here reach someone?
-
-    Driven by SMTP verdict. Per Codex c1, inconclusive is zero information
-    (None), not a low confidence floor.
-    """
+def _smtp_signal(c: EmailCandidate) -> tuple[float | None, list[str]]:
+    """SMTP-side deliverable evidence."""
     if c.smtp_verdict == "verified":
         return 0.85, ["SMTP RCPT accepted on non-catch-all domain"]
     if c.smtp_verdict == "invalid":
@@ -248,14 +291,69 @@ def _score_deliverable(c: EmailCandidate) -> tuple[float | None, list[str]]:
             f"SMTP inconclusive{provider_hint} — provider blocks RCPT; "
             f"verdict carries zero information either way"
         ]
-    # "unprobed" — never tested. Could be deliberate (personal provider,
-    # budget exhausted) or just not yet scored.
+    # "unprobed"
     if c.is_personal_provider:
         return None, [
             "not probed (personal-provider domain) — major providers are "
             "generally deliverable IF the mailbox exists; we have no evidence either way"
         ]
-    return None, ["not probed"]
+    return None, ["not probed (SMTP)"]
+
+
+def _account_signal(c: EmailCandidate) -> tuple[float | None, list[str]]:
+    """Google-account-side deliverable evidence. Independent of SMTP."""
+    if c.account_exists == "verified":
+        return 0.85, ["Google account confirmed — address routes to a real mailbox"]
+    if c.account_exists == "exists_unverifiable":
+        # Workspace visibility-restricted: existence confirmed, mailbox real.
+        return 0.75, [
+            "Google account exists (profile visibility-restricted) — "
+            "address routes to a real mailbox"
+        ]
+    if c.account_exists == "not_found":
+        return 0.05, ["Google account lookup: address not found"]
+    return None, []  # "unprobed"
+
+
+def _score_deliverable(c: EmailCandidate) -> tuple[float | None, list[str]]:
+    """Will a message sent here reach someone?
+
+    Merges two independent signals: SMTP RCPT verdict and Google People API
+    existence verdict. Either positive signal lifts deliverable; conflicts
+    (one positive, one definitive-negative) collapse to the lower.
+
+    Per Codex c1, SMTP inconclusive carries zero information — it returns
+    None and the account_exists signal (if present) becomes authoritative.
+    """
+    smtp_score, smtp_reasons = _smtp_signal(c)
+    account_score, account_reasons = _account_signal(c)
+
+    # No signals at all → abstain
+    if smtp_score is None and account_score is None:
+        # Both signals abstained; surface the more informative reason
+        # (account check skipped vs SMTP inconclusive vs personal provider)
+        reasons = smtp_reasons + account_reasons
+        return None, reasons
+
+    # Single signal → use it
+    if smtp_score is None:
+        return account_score, account_reasons
+    if account_score is None:
+        return smtp_score, smtp_reasons
+
+    # Both signals present
+    # Conflict check: one says strongly yes (≥0.7) and the other strongly no
+    # (≤0.1). Take the lower confidence and flag the conflict.
+    if (smtp_score >= 0.7 and account_score <= 0.1) or \
+       (account_score >= 0.7 and smtp_score <= 0.1):
+        return min(smtp_score, account_score), smtp_reasons + account_reasons + [
+            "⚠ SMTP and Google account signals conflict — take the lower"
+        ]
+
+    # No conflict — take max signal
+    if smtp_score >= account_score:
+        return smtp_score, smtp_reasons
+    return account_score, account_reasons
 
 
 # ---- public API -------------------------------------------------------------

@@ -102,7 +102,7 @@ def _default_gh_caller() -> GhCaller | None:
 # ---- name/string comparison helpers ----------------------------------------
 
 
-def _name_match(observed_name: str | None, target_name: str) -> bool:
+def name_match(observed_name: str | None, target_name: str) -> bool:
     """Loose equality on names — folded ASCII, drop punctuation, compare
     set-of-tokens to handle "John A. Smith" vs "John Smith"."""
     if not observed_name or not target_name:
@@ -273,7 +273,7 @@ def resolve_person(
     if profile is not None:
         # Anchor 1: name match
         observed_name = profile.get("name")
-        if _name_match(observed_name, name):
+        if name_match(observed_name, name):
             bound_anchors.append(("github_name_match", observed_name or ""))
         elif observed_name:
             notes.append(

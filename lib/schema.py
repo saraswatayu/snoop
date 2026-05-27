@@ -117,6 +117,11 @@ class EmailCandidate:
     # merges signals from both smtp_verdict AND account_exists; either positive
     # signal lifts deliverable. Set by lib.google_account.fetch_google_account.
     account_exists: AccountExistsVerdict = "unprobed"
+    # When account_exists=="verified" AND Google returned a profile name, this
+    # holds the display name as Google sees it. The scorer compares against
+    # the target's name to bind the name_match anchor (or flag a delta if
+    # Google's name doesn't match the target's).
+    account_display_name: str | None = None
 
     # Domain-level facts
     employer_match: bool = False           # address domain ∈ resolved current employer.domains
