@@ -131,6 +131,10 @@ class Person:
     # A handle in `handles` is an untrusted hint until ≥2 anchors bind.
     bound_anchors: list[tuple[str, str]] = field(default_factory=list)
 
+    # Validation notes from person_resolve: plan-vs-observed deltas, missing-
+    # anchor warnings, search ambiguity context. Surfaced by the renderer.
+    notes: list[str] = field(default_factory=list)
+
 
 @dataclass
 class ResolverResult:
