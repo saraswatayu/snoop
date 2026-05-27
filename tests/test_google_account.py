@@ -1,19 +1,21 @@
 """Tests for lib/google_account.py.
 
-Deterministic — cookie_loader and http_post are both injectable seams.
+Deterministic — cookie_loader and http_get are both injectable seams.
 The SAPISIDHASH algo is exercised with a known vector; the response
 parser is exercised with hand-crafted JSON fixtures matching the shape
-GHunt-style endpoints return.
+GHunt's people-pa endpoint returns.
 
 These tests don't exercise the LIVE Google API — that's a real-user
 verification step. The point is to confirm our state machine is correct
-GIVEN the API behaves the way we modeled it.
+GIVEN the API behaves the way we modeled it (mirrored from GHunt's
+apis/peoplepa.py and parsers/people.py).
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import urllib.parse
 from datetime import datetime, timezone
 
 import lib.google_account as ga
@@ -25,10 +27,10 @@ from lib.schema import EmailCandidate
 
 def test_sapisidhash_matches_known_vector():
     """SHA1("ts SAPISID origin") with our known inputs should produce
-    the right output. Cross-check against a hand-computed reference."""
+    the right output."""
     ts = 1700000000
     sapisid = "ABCdefGHI"
-    origin = "https://contacts.google.com"
+    origin = "https://photos.google.com"
     expected_digest = hashlib.sha1(
         f"{ts} {sapisid} {origin}".encode("utf-8")
     ).hexdigest()
@@ -36,8 +38,19 @@ def test_sapisidhash_matches_known_vector():
     assert result == f"SAPISIDHASH {ts}_{expected_digest}"
 
 
+def test_sapisidhash_default_origin_matches_photos():
+    """Default origin must match the photos API key — server validates
+    SAPISIDHASH against the origin registered to the API key. Pairing
+    the photos key with contacts.google.com origin (our v1 bug) silently
+    401s every request."""
+    result = ga.compute_sapisidhash("X", now=12345.0)
+    expected = hashlib.sha1(
+        b"12345 X https://photos.google.com"
+    ).hexdigest()
+    assert result == f"SAPISIDHASH 12345_{expected}"
+
+
 def test_sapisidhash_uses_current_time_when_now_none(monkeypatch):
-    """Production path: now=None pulls from time.time()."""
     monkeypatch.setattr(ga.time, "time", lambda: 12345.0)
     result = ga.compute_sapisidhash("X", origin="https://x.test")
     assert result.startswith("SAPISIDHASH 12345_")
@@ -46,12 +59,13 @@ def test_sapisidhash_uses_current_time_when_now_none(monkeypatch):
 # ---- _pick_sapisid_cookie --------------------------------------------------
 
 
-def test_pick_sapisid_prefers_modern_secure_variants():
+def test_pick_sapisid_prefers_legacy_when_present():
+    """GHunt's gen_sapisidhash uses legacy SAPISID exclusively, so we
+    match that preference order to keep behavior consistent."""
     cookies = {
         "SAPISID": "legacy",
         "__Secure-1PAPISID": "modern-1p",
     }
-    # SAPISID is first in the preference list
     assert ga._pick_sapisid_cookie(cookies) == "legacy"
 
 
@@ -61,23 +75,63 @@ def test_pick_sapisid_falls_back_to_secure_when_legacy_missing():
 
 
 def test_pick_sapisid_returns_none_when_no_sapisid_family():
-    cookies = {"SID": "s", "HSID": "h"}  # SAPISID-family entirely missing
+    cookies = {"SID": "s", "HSID": "h"}
     assert ga._pick_sapisid_cookie(cookies) is None
+
+
+# ---- _build_lookup_params --------------------------------------------------
+
+
+def test_build_params_includes_required_keys():
+    params = ga._build_lookup_params("foo@google.com")
+    keys = {k for k, _ in params}
+    assert "id" in keys
+    assert "type" in keys
+    assert "match_type" in keys
+    # Multi-valued
+    assert "request_mask.include_field.paths" in keys
+    assert "request_mask.include_container" in keys
+
+
+def test_build_params_uses_exact_email_match():
+    params = dict(ga._build_lookup_params("foo@google.com"))
+    assert params["id"] == "foo@google.com"
+    assert params["type"] == "EMAIL"
+    assert params["match_type"] == "EXACT"
+
+
+def test_build_params_repeats_multivalued_keys():
+    """request_mask.include_container must repeat for each value, not
+    comma-join — that's how Google's protojson-over-query expects it."""
+    params = ga._build_lookup_params("foo@google.com")
+    containers = [v for k, v in params if k == "request_mask.include_container"]
+    assert "PROFILE" in containers
+    # urlencode(doseq=True) round-trip survives the list
+    encoded = urllib.parse.urlencode(params, doseq=True)
+    assert encoded.count("request_mask.include_container=") == len(containers)
 
 
 # ---- _parse_lookup_response ------------------------------------------------
 
 
-def test_parse_verified_response_with_profile():
-    """Account exists AND profile is visible: verified state, gaia_id + name."""
-    body = json.dumps([[
-        {
-            "personId": "1234567890",
-            "name": [{"displayName": "Peter Steinberger"}],
-            "photo": [{"url": "https://lh3.googleusercontent.com/abc"}],
-        }
-    ]])
-    result = ga._parse_lookup_response(body.encode("utf-8"))
+def _people_response(person: dict) -> bytes:
+    """Wrap a single person record in the {"people": {<id>: <person>}}
+    envelope that people-pa returns."""
+    pid = person.get("personId") or "anonymous"
+    return json.dumps({"people": {pid: person}}).encode("utf-8")
+
+
+def test_parse_verified_response_with_full_profile():
+    """Account exists with personId AND a display name from
+    metadata.bestDisplayName — verified state with name available."""
+    body = _people_response({
+        "personId": "1234567890",
+        "metadata": {
+            "bestDisplayName": {"displayName": "Peter Steinberger"},
+        },
+        "photo": [{"url": "https://lh3.googleusercontent.com/abc"}],
+    })
+    result = ga._parse_lookup_response(body)
     assert result["exists"] is True
     assert result["profile_visible"] is True
     assert result["gaia_id"] == "1234567890"
@@ -87,50 +141,77 @@ def test_parse_verified_response_with_profile():
     assert result["parse_error"] is None
 
 
-def test_parse_exists_unverifiable_when_no_profile_details():
-    """Workspace visibility-restricted: response acknowledges existence but
-    profile fields are missing/empty. account_exists should be
-    exists_unverifiable downstream."""
-    # Match is an empty dict — exists but no fields visible
-    body = json.dumps([[{}]])
-    result = ga._parse_lookup_response(body.encode("utf-8"))
+def test_parse_verified_with_just_person_id():
+    """Post-2022, Google patched the name[] field — many responses come
+    back with personId only. Still verified (gaia_id is the strongest
+    existence signal), display_name just isn't populated."""
+    body = _people_response({"personId": "9999"})
+    result = ga._parse_lookup_response(body)
     assert result["exists"] is True
-    assert result["profile_visible"] is False
-    assert result["gaia_id"] is None
+    assert result["profile_visible"] is True
+    assert result["gaia_id"] == "9999"
     assert result["display_name"] is None
 
 
-def test_parse_not_found_when_no_matches():
-    body = json.dumps([[]])
-    result = ga._parse_lookup_response(body.encode("utf-8"))
+def test_parse_falls_back_to_name_array_when_best_display_name_absent():
+    body = _people_response({
+        "personId": "1",
+        "name": [{"displayName": "Fallback Name"}],
+    })
+    result = ga._parse_lookup_response(body)
+    assert result["display_name"] == "Fallback Name"
+
+
+def test_parse_exists_unverifiable_when_no_identifying_fields():
+    """An empty person record (no personId, no name) means Google
+    acknowledged the lookup but didn't return identifying info.
+    Workspace visibility-restricted profiles look like this."""
+    body = json.dumps({"people": {"anonymous": {}}}).encode("utf-8")
+    result = ga._parse_lookup_response(body)
+    assert result["exists"] is True
+    assert result["profile_visible"] is False
+    assert result["gaia_id"] is None
+
+
+def test_parse_not_found_when_people_dict_empty():
+    body = b'{"people": {}}'
+    result = ga._parse_lookup_response(body)
     assert result["exists"] is False
     assert result["profile_visible"] is False
 
 
-def test_parse_not_found_when_empty_response():
-    """Some shapes return entirely empty top-level array."""
-    result = ga._parse_lookup_response(b"[]")
+def test_parse_not_found_when_people_key_missing():
+    body = b"{}"
+    result = ga._parse_lookup_response(body)
     assert result["exists"] is False
 
 
-def test_parse_detects_rate_limit_error_in_body():
-    """Some Google APIs 200-respond with a RATE_LIMIT_EXCEEDED error
-    in the body. Make sure we catch this."""
+def test_parse_detects_rate_limit_in_error_object():
     body = json.dumps({
-        "error": {"code": "RATE_LIMIT_EXCEEDED", "message": "Quota exceeded"}
-    })
-    result = ga._parse_lookup_response(body.encode("utf-8"))
+        "error": {"code": 429, "status": "RESOURCE_EXHAUSTED",
+                  "message": "Quota exceeded"}
+    }).encode("utf-8")
+    result = ga._parse_lookup_response(body)
     assert result["rate_limited"] is True
     assert result["exists"] is False
+
+
+def test_parse_detects_legacy_rate_limit_string():
+    body = json.dumps({
+        "error": {"code": "RATE_LIMIT_EXCEEDED", "message": "slow down"}
+    }).encode("utf-8")
+    result = ga._parse_lookup_response(body)
+    assert result["rate_limited"] is True
 
 
 def test_parse_handles_other_api_errors_as_parse_error():
     """A non-rate-limit API error shouldn't be treated as 'not_found' —
     surface it as parse_error so the resolver leaves account_exists unprobed."""
     body = json.dumps({
-        "error": {"code": "INVALID_ARGUMENT", "message": "Bad request"}
-    })
-    result = ga._parse_lookup_response(body.encode("utf-8"))
+        "error": {"code": 400, "status": "INVALID_ARGUMENT",
+                  "message": "Bad request"}
+    }).encode("utf-8")
+    result = ga._parse_lookup_response(body)
     assert result["rate_limited"] is False
     assert result["exists"] is False
     assert "INVALID_ARGUMENT" in (result["parse_error"] or "") or \
@@ -143,15 +224,11 @@ def test_parse_handles_invalid_json():
     assert "json decode" in result["parse_error"]
 
 
-def test_parse_tolerant_of_alternative_field_names():
-    """The endpoint has used `personId` AND `id` historically. Either should
-    parse to gaia_id."""
-    body = json.dumps([[
-        {"id": "alt-id-123", "names": [{"value": "Alt Name Field"}]}
-    ]])
-    result = ga._parse_lookup_response(body.encode("utf-8"))
-    assert result["gaia_id"] == "alt-id-123"
-    assert result["display_name"] == "Alt Name Field"
+def test_parse_handles_non_object_top_level():
+    """If Google returns a bare array (old shape, or breakage), don't crash."""
+    result = ga._parse_lookup_response(b"[1, 2, 3]")
+    assert result["exists"] is False
+    assert result["parse_error"] is not None
 
 
 # ---- fetch_google_account: orchestration -----------------------------------
@@ -160,19 +237,18 @@ def test_parse_tolerant_of_alternative_field_names():
 NOW = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
 
 
-def make_http_post(routes: dict[str, tuple[int, bytes]]):
-    """Stub http_post. routes maps a substring → (status, body). The first
+def make_http_get(routes: dict[str, tuple[int, bytes]]):
+    """Stub http_get. routes maps a substring → (status, body). The first
     URL with a matching substring wins; otherwise raises AssertionError."""
-    def post(url, headers, body):
+    def get(url, params, headers):
         for sub, response in routes.items():
             if sub in url:
                 return response
-        raise AssertionError(f"unexpected POST url: {url}")
-    return post
+        raise AssertionError(f"unexpected GET url: {url}")
+    return get
 
 
 def make_cookies(sapisid="real-sapisid"):
-    """Stub cookie loader returning a usable cookie set."""
     def loader():
         return {
             "SID": "sid-val", "SSID": "ssid-val", "HSID": "hsid-val",
@@ -182,30 +258,42 @@ def make_cookies(sapisid="real-sapisid"):
 
 
 def test_fetch_marks_verified_when_account_exists_with_profile():
-    body = json.dumps([[{
+    body = _people_response({
         "personId": "1234567890",
-        "name": [{"displayName": "Peter Steinberger"}],
-    }]]).encode("utf-8")
-    http = make_http_post({"people/lookup": (200, body)})
+        "metadata": {"bestDisplayName": {"displayName": "Peter Steinberger"}},
+    })
+    http = make_http_get({"people/lookup": (200, body)})
     cands = [EmailCandidate(address="pete@google.com")]
     result = ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
     assert result.status == "ok"
     assert cands[0].account_exists == "verified"
-    src_types = [s.type for s in cands[0].sources]
-    assert "google_account" in src_types
-    # The source detail should include the display name
+    assert cands[0].account_display_name == "Peter Steinberger"
     src = next(s for s in cands[0].sources if s.type == "google_account")
     assert "Peter Steinberger" in src.detail
 
 
-def test_fetch_marks_exists_unverifiable_when_no_profile_returned():
-    body = json.dumps([[{}]]).encode("utf-8")
-    http = make_http_post({"people/lookup": (200, body)})
+def test_fetch_marks_verified_when_only_person_id_returned():
+    """Post-2022 patched-name case — still a strong existence verdict."""
+    body = _people_response({"personId": "9999"})
+    http = make_http_get({"people/lookup": (200, body)})
+    cands = [EmailCandidate(address="pete@google.com")]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+    )
+    assert cands[0].account_exists == "verified"
+    assert cands[0].account_display_name is None
+
+
+def test_fetch_marks_exists_unverifiable_when_no_identifying_fields():
+    """Person record present but stripped of personId/name —
+    visibility-restricted Workspace target."""
+    body = json.dumps({"people": {"anonymous": {}}}).encode("utf-8")
+    http = make_http_get({"people/lookup": (200, body)})
     cands = [EmailCandidate(address="restricted@google.com")]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
     assert cands[0].account_exists == "exists_unverifiable"
     src = next(s for s in cands[0].sources if s.type == "google_account")
@@ -214,63 +302,95 @@ def test_fetch_marks_exists_unverifiable_when_no_profile_returned():
 
 
 def test_fetch_marks_not_found():
-    body = b"[[]]"  # empty matches array
-    http = make_http_post({"people/lookup": (200, body)})
+    http = make_http_get({"people/lookup": (200, b'{"people": {}}')})
     cands = [EmailCandidate(address="ghost@google.com")]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
     assert cands[0].account_exists == "not_found"
 
 
 def test_fetch_returns_unavailable_when_no_cookies():
-    http = make_http_post({})  # shouldn't be called
+    http = make_http_get({})  # shouldn't be called
     cands = [EmailCandidate(address="x@google.com")]
     result = ga.fetch_google_account(
-        cands, cookie_loader=lambda: {}, http_post=http, now=NOW,
+        cands, cookie_loader=lambda: {}, http_get=http, now=NOW,
     )
     assert result.status == "unavailable"
     assert "SAPISID" in (result.error_detail or "")
-    # Candidate left untouched
     assert cands[0].account_exists == "unprobed"
 
 
 def test_fetch_returns_unavailable_when_cookie_loader_raises():
     def bombs():
         raise OSError("simulated cookie read failure")
-    http = make_http_post({})
+    http = make_http_get({})
     cands = [EmailCandidate(address="x@google.com")]
     result = ga.fetch_google_account(
-        cands, cookie_loader=bombs, http_post=http, now=NOW,
+        cands, cookie_loader=bombs, http_get=http, now=NOW,
     )
     assert result.status == "unavailable"
     assert "cookie loader" in (result.error_detail or "").lower()
 
 
 def test_fetch_only_probes_google_domain_by_default():
-    """Pattern_gen candidates often span multiple domains. We should only
-    probe google.com unless the caller broadens target_domains explicitly."""
     http_calls = []
-    def http(url, headers, body):
+    def http(url, params, headers):
         http_calls.append(url)
-        return (200, b"[[]]")
+        return (200, b'{"people": {}}')
     cands = [
         EmailCandidate(address="x@google.com"),
-        EmailCandidate(address="x@example.com"),  # NOT a Google domain
+        EmailCandidate(address="x@example.com"),
     ]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
-    # Only the google.com candidate triggered a probe
     assert len(http_calls) == 1
 
 
-def test_fetch_handles_rate_limit_and_short_circuits():
-    """When the first probe returns rate_limited, subsequent probes should
-    be skipped (mark unprobed) rather than firing more requests."""
-    body = json.dumps({"error": {"code": "RATE_LIMIT_EXCEEDED"}}).encode("utf-8")
+def test_fetch_short_circuits_on_first_verified_hit():
+    """One-person-per-run: a verified hit answers the question. Don't burn
+    the daily probe budget on additional candidates — mark them unprobed
+    rather than continuing to call Google."""
+    verified_body = _people_response({
+        "personId": "424242",
+        "metadata": {"bestDisplayName": {"displayName": "Real Person"}},
+    })
+    not_found_body = b'{"people": {}}'
     http_calls = []
-    def http(url, headers, body_in):
+
+    def http(url, params, headers):
+        http_calls.append(dict(params).get("id"))
+        # First candidate gets the verified response; others would get
+        # not_found if we ever called them — but we shouldn't.
+        if dict(params).get("id") == "first@google.com":
+            return (200, verified_body)
+        return (200, not_found_body)
+
+    cands = [
+        EmailCandidate(address="first@google.com"),
+        EmailCandidate(address="second@google.com"),
+        EmailCandidate(address="third@google.com"),
+    ]
+    result = ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+    )
+    assert result.status == "ok"
+    assert http_calls == ["first@google.com"]
+    assert cands[0].account_exists == "verified"
+    assert cands[0].account_display_name == "Real Person"
+    # Subsequent candidates abstained, not negated — scorer needs to know
+    # we didn't actually confirm they're absent.
+    assert cands[1].account_exists == "unprobed"
+    assert cands[2].account_exists == "unprobed"
+
+
+def test_fetch_handles_rate_limit_and_short_circuits():
+    body = json.dumps({
+        "error": {"status": "RESOURCE_EXHAUSTED"}
+    }).encode("utf-8")
+    http_calls = []
+    def http(url, params, headers):
         http_calls.append(url)
         return (200, body)
     cands = [
@@ -279,74 +399,84 @@ def test_fetch_handles_rate_limit_and_short_circuits():
         EmailCandidate(address="c@google.com"),
     ]
     result = ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
-    # Only the first probe happened
     assert len(http_calls) == 1
-    # All three candidates marked unprobed (the rate_limited verdict)
     for c in cands:
         assert c.account_exists == "unprobed"
-    # Status reflects the degradation
     assert result.status == "error"
     assert "rate" in (result.error_detail or "").lower()
 
 
 def test_fetch_handles_http_429():
-    """If the transport itself returns 429 (not embedded in body), still
-    short-circuit."""
     http_calls = []
-    def http(url, headers, body):
+    def http(url, params, headers):
         http_calls.append(url)
         return (429, b"")
     cands = [EmailCandidate(address="a@google.com"),
              EmailCandidate(address="b@google.com")]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
     assert len(http_calls) == 1
 
 
-def test_fetch_handles_http_500_as_parse_error():
-    """5xx is transient. Mark unprobed; subsequent candidates still try."""
+def test_fetch_handles_http_401_as_auth_failure():
+    """401/403 means SAPISIDHASH validation failed server-side (key/origin
+    mismatch or stale browser session). Surface as unprobed with a
+    descriptive parse_error in the logs."""
     http_calls = []
-    def http(url, headers, body):
+    def http(url, params, headers):
+        http_calls.append(url)
+        return (401, b"")
+    cands = [EmailCandidate(address="a@google.com"),
+             EmailCandidate(address="b@google.com")]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+    )
+    # Both probed (auth failure isn't transient — but we don't short-circuit
+    # because the second might succeed if cookies were partially racy).
+    assert len(http_calls) == 2
+    for c in cands:
+        assert c.account_exists == "unprobed"
+
+
+def test_fetch_handles_http_500_as_parse_error():
+    http_calls = []
+    def http(url, params, headers):
         http_calls.append(url)
         return (500, b"")
     cands = [EmailCandidate(address="a@google.com"),
              EmailCandidate(address="b@google.com")]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
-    # Both candidates probed (5xx doesn't short-circuit like rate-limit does)
     assert len(http_calls) == 2
     for c in cands:
         assert c.account_exists == "unprobed"
 
 
 def test_fetch_handles_http_transport_error():
-    """A network error should leave candidate unprobed with no crash."""
     import urllib.error
-    def bombs(url, headers, body):
+    def bombs(url, params, headers):
         raise urllib.error.URLError("network down")
     cands = [EmailCandidate(address="a@google.com")]
     result = ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=bombs, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=bombs, now=NOW,
     )
     assert cands[0].account_exists == "unprobed"
-    # Resolver status reflects empty result (all probes errored)
     assert result.status in ("empty", "error")
 
 
 def test_fetch_explicit_target_domains_broadens_to_workspace():
-    """For Workspace tenants whose MX is Google but whose domain isn't
-    literal 'google.com', the caller passes the explicit set."""
-    body = json.dumps([[{
-        "personId": "9999", "name": [{"displayName": "Worker Bee"}],
-    }]]).encode("utf-8")
-    http = make_http_post({"people/lookup": (200, body)})
+    body = _people_response({
+        "personId": "9999",
+        "metadata": {"bestDisplayName": {"displayName": "Worker Bee"}},
+    })
+    http = make_http_get({"people/lookup": (200, body)})
     cands = [EmailCandidate(address="worker@acme.com")]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http,
+        cands, cookie_loader=make_cookies(), http_get=http,
         target_domains=["acme.com"], now=NOW,
     )
     assert cands[0].account_exists == "verified"
@@ -355,34 +485,42 @@ def test_fetch_explicit_target_domains_broadens_to_workspace():
 # ---- the request shape -----------------------------------------------------
 
 
-def test_request_includes_authorization_and_cookie_headers():
-    """Verify the request we build includes SAPISIDHASH and the cookie header."""
+def test_request_includes_auth_headers_with_photos_origin():
+    """Verify the request we build includes SAPISIDHASH, X-Goog-Api-Key, and
+    photos.google.com as Origin/Referer. These are the three things that
+    have to be right together or the server 401s."""
     captured_headers = []
-    def http(url, headers, body):
+    def http(url, params, headers):
         captured_headers.append(headers)
-        return (200, b"[[]]")
+        return (200, b'{"people": {}}')
     cands = [EmailCandidate(address="x@google.com")]
     ga.fetch_google_account(
         cands, cookie_loader=make_cookies("test-sapisid"),
-        http_post=http, now=NOW,
+        http_get=http, now=NOW,
     )
     assert captured_headers
     h = captured_headers[0]
     assert h["Authorization"].startswith("SAPISIDHASH ")
     assert "SAPISID=test-sapisid" in h["Cookie"]
-    assert "google.com" in h["Origin"] or "contacts" in h["Origin"]
+    assert h["Origin"] == "https://photos.google.com"
+    assert h["Referer"].startswith("https://photos.google.com")
+    assert h["X-Goog-Api-Key"].startswith("AIza")
 
 
-def test_request_body_contains_target_email():
-    """The protojson request body must include the email we're looking up."""
-    captured_bodies = []
-    def http(url, headers, body):
-        captured_bodies.append(body)
-        return (200, b"[[]]")
+def test_request_url_and_params_contain_target_email():
+    """Email goes in the `id` query param, not a POST body."""
+    captured = []
+    def http(url, params, headers):
+        captured.append((url, params))
+        return (200, b'{"people": {}}')
     cands = [EmailCandidate(address="target@google.com")]
     ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_post=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
     )
-    assert captured_bodies
-    body_str = captured_bodies[0].decode("utf-8")
-    assert "target@google.com" in body_str
+    assert captured
+    url, params = captured[0]
+    assert "people-pa.clients6.google.com" in url
+    assert "/v2/people/lookup" in url
+    params_dict = {k: v for k, v in params}
+    assert params_dict.get("id") == "target@google.com"
+    assert params_dict.get("type") == "EMAIL"
