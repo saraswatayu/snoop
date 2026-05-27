@@ -329,7 +329,13 @@ def _google_account_candidates(
 
 def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[EmailCandidate]:
     """Pick the top candidates that are worth SMTP-probing: non-personal-provider,
-    at least one source, sorted by belongs_to_person descending."""
+    at least one source, not already known-dead via Google. Sorted by
+    belongs_to_person descending.
+
+    Google's 'not_found' verdict is authoritative — re-probing those addresses
+    over SMTP burns the per-domain daily budget and risks the user's MAIL FROM
+    getting rate-limited on a mailbox we already know doesn't exist.
+    """
     eligible = []
     for c in candidates:
         if "@" not in c.address:
@@ -338,6 +344,8 @@ def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[E
         if is_personal_provider(domain):
             continue
         if not c.sources:
+            continue
+        if c.account_exists == "not_found":
             continue
         eligible.append(c)
     eligible.sort(key=lambda c: -(c.belongs_to_person or 0))
