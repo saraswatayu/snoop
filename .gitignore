@@ -12,3 +12,8 @@ __pycache__/
 
 # Internal design docs — keep out of the public repo. Local-only.
 docs/plans/
+
+# Calibration fixture overrides may contain real targets' email addresses.
+# Local-only; never committed.
+tests/fixtures/calibration_targets.local.json
+tests/fixtures/calibration_report.md

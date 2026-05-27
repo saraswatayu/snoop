@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "description": "Calibration fixture for measuring resolver hit rate + precision. Per the plan's §Calibration section: estimates in SKILL.md should be replaced with measured numbers once a labeled set of real targets is built.",
+  "notes_for_user": "Ground-truth emails are intentionally null in the committed fixture (this repo is public — don't commit other people's addresses). Add your own targets and their known emails in `tests/fixtures/calibration_targets.local.json` (gitignored). The measurement harness merges the public fixture with the local overrides.",
+  "targets": [
+    {
+      "id": "public-dev-1",
+      "name": "Peter Steinberger",
+      "company": "OpenAI",
+      "person_plan": {
+        "handles": {"github": "steipete"},
+        "personal_domains": ["steipete.com"],
+        "employer": {"name": "OpenAI", "domains": ["openai.com"]},
+        "former_employers": [
+          {"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}
+        ]
+      },
+      "audience": "public-tech-developer",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      }
+    },
+    {
+      "id": "non-developer-1",
+      "name": "EXAMPLE Sales Manager",
+      "company": "EXAMPLE Corp",
+      "person_plan": {
+        "employer": {"name": "EXAMPLE Corp", "domains": ["example.com"]}
+      },
+      "audience": "non-developer",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Replace with a real non-developer target locally — sales/recruiting personas test whether the pipeline degrades gracefully for the not-on-GitHub majority."
+    },
+    {
+      "id": "accented-name-1",
+      "name": "Étienne Dupont",
+      "company": "EXAMPLE",
+      "person_plan": {
+        "employer": {"name": "EXAMPLE", "domains": ["example.fr"]}
+      },
+      "audience": "accent-fold-test",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Validates the normalize.py accent-folding path: etienne.dupont@... should pattern-generate."
+    },
+    {
+      "id": "eastern-order-1",
+      "name": "Wang Xiaoming",
+      "company": "EXAMPLE",
+      "person_plan": {
+        "employer": {"name": "EXAMPLE", "domains": ["example.cn"]}
+      },
+      "audience": "name-order-test",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Validates Eastern-order reversal: both wang.xiaoming@ and xiaoming.wang@ should appear as candidates."
+    }
+  ]
+}
