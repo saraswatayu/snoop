@@ -317,6 +317,7 @@ def fetch_google_account(
     cookie_loader: CookieLoader | None = None,
     http_post: HttpPost | None = None,
     target_domains: Iterable[str] | None = None,
+    budget: Any | None = None,  # lib.verify_smtp.ProbeBudget; optional defense-in-depth
     now: datetime | None = None,
 ) -> ResolverResult:
     """Probe each candidate against Google's People API.
@@ -389,6 +390,12 @@ def fetch_google_account(
             c.account_exists = "unprobed"
             continue
 
+        # Daily budget check (defense-in-depth; Google enforces its own
+        # rate limit, ours just caps us before we get there).
+        if budget is not None and not budget.allow("google_account"):
+            c.account_exists = "unprobed"
+            continue
+
         probed_any = True
         result = _lookup_one(c.address, cookies, sapisid, poster,
                              now=started.timestamp())
@@ -397,6 +404,10 @@ def fetch_google_account(
             rate_limited_seen = True
             c.account_exists = "unprobed"
             continue
+
+        # Successful probe — record it against the budget
+        if budget is not None:
+            budget.record("google_account")
 
         if result["parse_error"]:
             # Treat as transient error; don't poison belongs_to_person.

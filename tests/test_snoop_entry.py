@@ -363,6 +363,168 @@ def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
 # ---- run_pipeline timeout ---------------------------------------------------
 
 
+# ---- google_account integration ---------------------------------------------
+
+
+def test_google_account_candidates_filters_to_google_domains():
+    cands = [
+        EmailCandidate(address="x@google.com"),
+        EmailCandidate(address="x@example.com"),  # not Google
+        EmailCandidate(address="x@acme.com"),     # workspace domain
+    ]
+    out = snoop._google_account_candidates(cands, ["acme.com"])
+    addresses = {c.address for c in out}
+    assert addresses == {"x@google.com", "x@acme.com"}
+
+
+def test_google_account_candidates_skips_already_probed():
+    """Candidate already has a verdict set → don't re-probe."""
+    cand1 = EmailCandidate(address="a@google.com", account_exists="verified")
+    cand2 = EmailCandidate(address="b@google.com")  # default unprobed
+    out = snoop._google_account_candidates([cand1, cand2], [])
+    assert [c.address for c in out] == ["b@google.com"]
+
+
+def test_google_target_domains_always_includes_literal_google_com():
+    assert "google.com" in snoop._google_target_domains([])
+    assert snoop._google_target_domains(["acme.com"]) == {"google.com", "acme.com"}
+
+
+def test_google_target_domains_lowercases_and_strips():
+    assert snoop._google_target_domains(["  ACME.COM  ", "Other.Org"]) == {
+        "google.com", "acme.com", "other.org",
+    }
+
+
+def test_main_invokes_google_account_when_flag_set(monkeypatch, capsys):
+    """With --allow-google-account on and a Google-domain candidate, the
+    google_account resolver is invoked and feeds account_exists into the
+    final score."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name,
+        employer=Employer(name="Google", domains=["google.com"]),
+        ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    pattern_result = ResolverResult(
+        resolver="pattern_gen",
+        candidates=[
+            EmailCandidate(address="real@google.com",
+                           sources=[src("pattern")], employer_match=True),
+            EmailCandidate(address="phantom@google.com",
+                           sources=[src("pattern")], employer_match=True),
+        ],
+        status="ok",
+    )
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: pattern_result)
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+
+    # Capture google_account invocation and apply canned verdicts
+    google_calls = []
+    def fake_google(candidates, **kw):
+        google_calls.append(list(candidates))
+        for c in candidates:
+            if c.address == "real@google.com":
+                c.account_exists = "verified"
+                c.account_display_name = "Real Person"
+            else:
+                c.account_exists = "not_found"
+        return ResolverResult(
+            resolver="google_account", candidates=list(candidates), status="ok",
+        )
+    monkeypatch.setattr(snoop, "fetch_google_account", fake_google)
+
+    rc = snoop.main([
+        "Real Person",
+        "--allow-google-account",
+        "--no-smtp",
+    ])
+    assert rc == 0
+    # google_account was invoked
+    assert len(google_calls) == 1
+    out = capsys.readouterr().out
+    # The phantom should be capped low (rendered with very low belongs)
+    # and the real one should be the recommendation
+    assert "real@google.com" in out
+    # Decision line names the real one
+    decision_section = out.split("##")[1]
+    assert "real@google.com" in decision_section
+
+
+def test_main_skips_google_account_when_flag_not_set(monkeypatch, capsys):
+    """Without --allow-google-account, google_account is NEVER invoked,
+    even if Google-domain candidates exist."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name,
+        employer=Employer(name="Google", domains=["google.com"]),
+        ambiguity="single_plausible_match",
+    ))
+    pattern_result = ResolverResult(
+        resolver="pattern_gen",
+        candidates=[EmailCandidate(address="x@google.com",
+                                    sources=[src("pattern")],
+                                    employer_match=True)],
+        status="ok",
+    )
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: pattern_result)
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+
+    google_called = []
+    def fake_google(*a, **kw):
+        google_called.append(True)
+        return ResolverResult(resolver="google_account", candidates=[], status="ok")
+    monkeypatch.setattr(snoop, "fetch_google_account", fake_google)
+
+    rc = snoop.main(["X", "--no-smtp"])  # no --allow-google-account
+    assert rc == 0
+    assert google_called == []
+
+
+def test_main_workspace_domain_flag_broadens_targeting(monkeypatch, capsys):
+    """--google-workspace-domain acme.com tells the pipeline to probe
+    candidates on acme.com via the Google API too."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name,
+        employer=Employer(name="Acme", domains=["acme.com"]),
+        ambiguity="single_plausible_match",
+    ))
+    pattern_result = ResolverResult(
+        resolver="pattern_gen",
+        candidates=[EmailCandidate(address="x@acme.com",
+                                    sources=[src("pattern")],
+                                    employer_match=True)],
+        status="ok",
+    )
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: pattern_result)
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+
+    captured_targets = []
+    def fake_google(candidates, *, target_domains=None, **kw):
+        captured_targets.append(set(target_domains or []))
+        return ResolverResult(
+            resolver="google_account", candidates=list(candidates), status="ok",
+        )
+    monkeypatch.setattr(snoop, "fetch_google_account", fake_google)
+
+    snoop.main([
+        "X", "--allow-google-account", "--no-smtp",
+        "--google-workspace-domain", "acme.com",
+    ])
+    assert captured_targets == [{"google.com", "acme.com"}]
+
+
 def test_pipeline_marks_timed_out_resolvers(monkeypatch):
     """If a resolver takes longer than the per-resolver timeout, mark it
     as timeout and keep the pipeline running."""

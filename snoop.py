@@ -41,12 +41,13 @@ from typing import Any, Callable
 from lib import diagnose, render
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile
+from lib.google_account import fetch_google_account
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
 from lib.schema import EmailCandidate, Person, ResolverResult
 from lib.score import is_personal_provider, score_all
-from lib.verify_smtp import default_budget, verify_candidates
+from lib.verify_smtp import ProbeBudget, default_budget, verify_candidates
 
 
 _PER_RESOLVER_TIMEOUT_SEC = 5.0
@@ -100,6 +101,26 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=5,
         help="Maximum rows per Work / Personal / Other section (default 5).",
+    )
+    p.add_argument(
+        "--allow-google-account",
+        action="store_true",
+        help=(
+            "Use Google's People API to verify candidate existence on Google-"
+            "hosted domains. Reads cookies from your logged-in Chrome session. "
+            "ToS-edgy at high volume; default is OFF. See SKILL.md."
+        ),
+    )
+    p.add_argument(
+        "--google-workspace-domain",
+        action="append",
+        default=[],
+        metavar="DOMAIN",
+        help=(
+            "Repeatable. Treat DOMAIN as Google-Workspace-hosted (its MX is "
+            "aspmx.l.google.com). Required for non-literal-google.com domains "
+            "since v1 doesn't auto-detect MX. e.g. --google-workspace-domain acme.com"
+        ),
     )
     p.add_argument(
         "--diagnose",
@@ -273,6 +294,39 @@ def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
     return list(by_addr.values())
 
 
+_GOOGLE_NATIVE_DOMAIN = "google.com"
+
+
+def _google_target_domains(workspace_domains: list[str]) -> set[str]:
+    """Domains worth probing via the Google People API. Always includes the
+    literal google.com; user can add Workspace tenant domains explicitly."""
+    domains = {_GOOGLE_NATIVE_DOMAIN}
+    for d in workspace_domains or []:
+        if isinstance(d, str) and d.strip():
+            domains.add(d.strip().lower())
+    return domains
+
+
+def _google_account_candidates(
+    candidates: list[EmailCandidate],
+    workspace_domains: list[str],
+) -> list[EmailCandidate]:
+    """Filter candidates to those on Google-hosted domains worth probing.
+    Skip candidates that already have an account_exists verdict (don't
+    re-probe within one invocation)."""
+    domains = _google_target_domains(workspace_domains)
+    out: list[EmailCandidate] = []
+    for c in candidates:
+        if not c.address or "@" not in c.address:
+            continue
+        if c.account_exists != "unprobed":
+            continue
+        domain = c.address.rsplit("@", 1)[1].lower()
+        if domain in domains:
+            out.append(c)
+    return out
+
+
 def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[EmailCandidate]:
     """Pick the top candidates that are worth SMTP-probing: non-personal-provider,
     at least one source, sorted by belongs_to_person descending."""
@@ -368,8 +422,27 @@ def main(argv: list[str] | None = None) -> int:
             sys.stdout.write(render.render_decision_card(person, [], intent=args.intent))
         return 0
 
-    # Initial scoring (without SMTP signal yet)
+    # Initial scoring (without verification signals yet)
     score_all(candidates, person)
+
+    # Google account verification on Google-hosted candidates. Runs BEFORE
+    # SMTP so that not_found verdicts short-circuit SMTP probes on dead
+    # candidates (Google's view is authoritative when it returns a verdict).
+    if args.allow_google_account:
+        google_targets = _google_account_candidates(
+            candidates, args.google_workspace_domain,
+        )
+        if google_targets:
+            fetch_google_account(
+                google_targets,
+                target_domains=_google_target_domains(args.google_workspace_domain),
+                budget=ProbeBudget(
+                    per_domain=30,
+                    state_path=Path.home() / ".snoop" / "google-budget.json",
+                ),
+            )
+            # Re-score so account_exists feeds the next stage's top-K pick
+            score_all(candidates, person)
 
     # SMTP probe top-K work candidates
     if not args.no_smtp:
