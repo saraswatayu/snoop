@@ -361,9 +361,18 @@ def _get_cookies_linux(
 
 
 GOOGLE_SESSION_COOKIE_NAMES = [
+    # Legacy session + API auth cookies.
     "SID", "SSID", "HSID", "APISID", "SAPISID",
+    "LSID", "OSID",
+    # Modern (post-2020) session cookies. Required for the People API to
+    # accept the request — sending only the legacy set yields a 401
+    # SESSION_COOKIE_INVALID even when SAPISIDHASH and the API key/origin
+    # pairing are correct.
     "__Secure-1PSID", "__Secure-3PSID",
     "__Secure-1PAPISID", "__Secure-3PAPISID",
+    "__Secure-1PSIDTS", "__Secure-3PSIDTS",
+    "__Secure-1PSIDCC", "__Secure-3PSIDCC",
+    "__Secure-OSID",
 ]
 
 
