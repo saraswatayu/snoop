@@ -423,8 +423,11 @@ def fetch_google_account(
             continue
 
         probed_any = True
-        result = _lookup_one(c.address, cookies, sapisid, getter,
-                             now=started.timestamp())
+        # Don't pin `now` for SAPISIDHASH: every candidate in the batch must
+        # get its own fresh timestamp. Reusing started.timestamp() across N
+        # lookups produces identical Authorization headers and risks a stale
+        # timestamp signing future probes during long batches.
+        result = _lookup_one(c.address, cookies, sapisid, getter)
 
         if result["rate_limited"]:
             rate_limited_seen = True
