@@ -71,9 +71,31 @@ For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
 | `--intent work\|personal\|either` | Default `work`. Controls which section ranks first and which candidate the decision line recommends. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--no-smtp` | Skip SMTP verification entirely. Faster, but loses the `deliverable` field. |
+| `--allow-google-account` | Opt-in: use Google's People API to verify candidate existence on Google-hosted domains. Reads your logged-in Chrome session cookies. **Solves Google Workspace catch-all blindness** (see §When to use it below). |
+| `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set. Needed for non-literal-google.com domains since v1 doesn't auto-detect MX. e.g. `--google-workspace-domain acme.com` for a YC startup on Gmail. |
 | `--max-per-section N` | Cap rows per Work/Personal/Other section. Default 5. |
 | `--json` | Emit machine-readable JSON instead of the markdown card. |
-| `--diagnose` | Print a capability probe (gh auth, dnspython, etc.) and exit. No lookup. |
+| `--diagnose` | Print a capability probe (gh auth, dnspython, google_account readiness, etc.) and exit. No lookup. |
+
+## When to use `--allow-google-account`
+
+**The signal**: when SMTP can't disambiguate candidates because the target is on a Google Workspace domain (literal `google.com` OR any `aspmx.l.google.com`-hosted domain), Google's People API can. Five candidates that previously had identical scores collapse to one verified + four `not_found` — and the verified one comes back with a display name we can cross-check against the target.
+
+**When you SHOULD set it**:
+
+- Target's employer is Google itself, or a known Workspace-using company (most YC startups, most tech companies on `aspmx.l.google.com`).
+- Identity is uncertain (`ambiguity != "single_plausible_match"` from `person_resolve`) AND the resolved employer has Google-hosted email.
+- The first run without it produced ≥3 candidates with identical scores on a Google domain.
+
+**When you SHOULDN'T set it**:
+
+- Target is on Microsoft 365 (Workspace API doesn't help; M365 has its own auth path that's not yet wired).
+- User asked you to be quick / not auth into Google.
+- You're running snoop in a batch / loop (the path is one-target-per-invocation; bulk use risks Google flagging the account).
+
+**ToS posture, briefly**: this uses YOUR own logged-in Google session to query Google about a third party. Technically the same posture as querying any logged-in service about visible data, but at scale or for harassment, the user owns the responsibility. The skill enforces one-target-per-invocation and a daily probe budget (default 30) as defense-in-depth. Surface this posture to the user the first time they invoke `--allow-google-account` per machine.
+
+**Non-Google Workspace domains**: pass them via `--google-workspace-domain` repeatable. v1 doesn't auto-detect MX; if you know `acme.com` is on Workspace, declare it. Defer MX-based auto-detection to a later iteration.
 
 ## Step 3 — The output contract
 
@@ -93,7 +115,9 @@ The three score columns:
 |---|---|---|
 | **Belongs** | belongs_to_person: is this actually this person's address? | No sources observed |
 | **Work** | current_work_address: is this a current work email? | No employer info / unrelated domain |
-| **Deliverable** | will a message sent here reach a human? | SMTP inconclusive (no information) OR unprobed |
+| **Deliverable** | will a message sent here reach a human? | SMTP inconclusive AND no Google account verdict OR unprobed |
+
+Deliverable now merges two signals: SMTP RCPT verdict AND Google account existence (when `--allow-google-account` ran). If SMTP is inconclusive (Google/M365 blocks RCPT) but the Google account check came back `verified`, deliverable is 0.85. If they CONFLICT (one says yes, other says no), the renderer surfaces the disagreement and the lower confidence wins.
 
 A `—` in a column means **abstain** (no evidence either way), NOT zero. Render exactly as the script outputs.
 
@@ -106,6 +130,7 @@ A `—` in a column means **abstain** (no evidence either way), NOT zero. Render
 - When the script's resolver notes contain a plan-vs-observed delta (e.g. "plan claimed employer=OpenAI; github profile company=Anthropic — employer differs"), surface it to the user.
 - Use `--intent personal` only when the user explicitly asked for personal contact. The default `work` is right for sales prep, founder research, recruiter outreach.
 - **Populate `channel_hints` in the plan when you learned a backup channel during plan construction.** If you found the target via a LinkedIn URL, include `"channel_hints": {"linkedin": "<that-url>"}`. If you saw "DMs open" on their X bio, `{"x_dms_open": true, "x_handle": "@..."}`. The renderer surfaces these as the fallback channel when email confidence is low — don't recreate this as freeform prose at the end of your response when the structured data could have rendered it cleanly.
+- **Set `--allow-google-account` when the target is on a Google Workspace domain AND identity is uncertain.** Google Workspace catch-all defeats SMTP verification; the People API path is the only way to discriminate among pattern candidates. Concrete triggers: employer is google.com OR a Workspace-hosted domain (declare via `--google-workspace-domain`); AND identity ambiguity is not `single_plausible_match`; OR a prior run produced ≥3 candidates on the same domain with identical scores. Surface the ToS posture ("uses your logged-in Google session to query Google") to the user the FIRST time you invoke this flag per machine — don't bury it.
 
 **MUST NOT do:**
 
@@ -129,6 +154,8 @@ If the user's first invocation produces "unavailable" status on a P1 resolver (g
 
 - `gh` not authed → `gh auth login`
 - `dnspython` missing → `pip install --user dnspython`
+- `google_account` status `missing` (no Google cookies found) → user needs to sign into Google in any installed Chromium browser (Chrome, Brave, Edge, Arc, Vivaldi)
+- `google_account` status `degraded` (SAPISID missing) → user's session is partial; sign out and back in to refresh
 - `~/.snoop` not writable → check disk space and home permissions
 
 ## Notes
