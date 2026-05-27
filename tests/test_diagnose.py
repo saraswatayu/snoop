@@ -176,9 +176,75 @@ def test_diagnose_returns_all_probes():
     caps = diagnose()
     names = {c.name for c in caps}
     expected = {
-        "gh_cli", "anon_github", "dnspython", "idna", "whois", "snoop_state_dir",
+        "gh_cli", "anon_github", "dnspython", "idna", "whois",
+        "google_account", "snoop_state_dir",
     }
     assert names == expected
+
+
+# ---- _probe_google_account --------------------------------------------------
+
+
+def test_google_account_missing_when_no_cookies(monkeypatch):
+    import lib.chrome_cookies as cc
+    monkeypatch.setattr(cc, "list_supported_browsers", lambda: ["chrome"])
+    monkeypatch.setattr(cc, "get_google_cookies", lambda: {})
+    cap = diag._probe_google_account()
+    assert cap.status == "missing"
+    assert "no Google cookies" in cap.detail
+
+
+def test_google_account_missing_on_unsupported_platform(monkeypatch):
+    import lib.chrome_cookies as cc
+    monkeypatch.setattr(cc, "list_supported_browsers", lambda: [])
+    cap = diag._probe_google_account()
+    assert cap.status == "missing"
+    assert "not supported" in cap.detail.lower()
+
+
+def test_google_account_degraded_when_cookies_present_but_no_sapisid(monkeypatch):
+    import lib.chrome_cookies as cc
+    monkeypatch.setattr(cc, "list_supported_browsers", lambda: ["chrome"])
+    monkeypatch.setattr(cc, "get_google_cookies",
+                        lambda: {"SID": "s", "SSID": "ss"})  # no SAPISID-family
+    cap = diag._probe_google_account()
+    assert cap.status == "degraded"
+    assert "SAPISID" in cap.detail
+
+
+def test_google_account_ok_when_sapisid_present(monkeypatch):
+    import lib.chrome_cookies as cc
+    monkeypatch.setattr(cc, "list_supported_browsers", lambda: ["chrome"])
+    monkeypatch.setattr(
+        cc, "get_google_cookies",
+        lambda: {"SID": "s", "SAPISID": "real-sapisid", "HSID": "h"},
+    )
+    cap = diag._probe_google_account()
+    assert cap.status == "ok"
+    assert "ready" in cap.detail.lower()
+
+
+def test_google_account_ok_when_modern_secure_sapisid_present(monkeypatch):
+    """__Secure-1PAPISID counts as a SAPISID-family cookie."""
+    import lib.chrome_cookies as cc
+    monkeypatch.setattr(cc, "list_supported_browsers", lambda: ["chrome"])
+    monkeypatch.setattr(
+        cc, "get_google_cookies",
+        lambda: {"__Secure-1PAPISID": "modern-only"},
+    )
+    cap = diag._probe_google_account()
+    assert cap.status == "ok"
+
+
+def test_google_account_degraded_when_cookie_read_errors(monkeypatch):
+    import lib.chrome_cookies as cc
+    monkeypatch.setattr(cc, "list_supported_browsers", lambda: ["chrome"])
+    def bombs():
+        raise OSError("simulated")
+    monkeypatch.setattr(cc, "get_google_cookies", bombs)
+    cap = diag._probe_google_account()
+    assert cap.status == "degraded"
+    assert "errored" in cap.detail.lower()
 
 
 def test_diagnose_returns_list_of_capability():

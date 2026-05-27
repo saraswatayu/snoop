@@ -25,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -177,6 +178,77 @@ def _probe_whois_binary() -> Capability:
     )
 
 
+def _probe_google_account() -> Capability:
+    """Check whether the --allow-google-account path is operable.
+
+    Doesn't make a real People API call (that would burn a probe slot in
+    the user's daily budget and risks Google flagging the diagnose runs).
+    Just confirms cookie acquisition can find a SAPISID-family cookie.
+    """
+    try:
+        from . import chrome_cookies
+    except ImportError:
+        return Capability(
+            name="google_account",
+            status="missing",
+            detail="lib/chrome_cookies.py not importable",
+            impact="--allow-google-account path cannot read browser cookies",
+        )
+
+    if not chrome_cookies.list_supported_browsers():
+        return Capability(
+            name="google_account",
+            status="missing",
+            detail=f"chrome_cookies: platform {sys.platform!r} not supported "
+                   f"(macOS/Linux only in v1)",
+            impact="--allow-google-account unavailable on this platform",
+        )
+
+    try:
+        cookies = chrome_cookies.get_google_cookies()
+    except Exception as e:  # noqa: BLE001
+        return Capability(
+            name="google_account",
+            status="degraded",
+            detail=f"cookie read errored: {type(e).__name__}: {e}",
+            impact="--allow-google-account will fail until the read succeeds",
+        )
+
+    if not cookies:
+        return Capability(
+            name="google_account",
+            status="missing",
+            detail=(
+                "no Google cookies found in any installed Chromium browser "
+                "(Chrome, Brave, Edge, Arc, Vivaldi). Sign into Google in "
+                "Chrome and retry."
+            ),
+            impact="--allow-google-account inactive — falls back to other resolvers",
+        )
+
+    # Check that a SAPISID-family cookie is present (the load-bearing one).
+    sapisid_names = ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID")
+    has_sapisid = any(cookies.get(n) for n in sapisid_names)
+    if not has_sapisid:
+        return Capability(
+            name="google_account",
+            status="degraded",
+            detail=(
+                f"Google cookies found ({len(cookies)} total) but no SAPISID-"
+                f"family cookie among {sapisid_names!r}. Session may be partial; "
+                f"sign out and back into Google."
+            ),
+            impact="--allow-google-account will fail SAPISIDHASH auth",
+        )
+
+    return Capability(
+        name="google_account",
+        status="ok",
+        detail=f"Google cookies present ({len(cookies)} cookies); SAPISID auth ready",
+        impact="--allow-google-account ready for use",
+    )
+
+
 def _probe_snoop_state_dir() -> Capability:
     snoop_dir = Path.home() / ".snoop"
     try:
@@ -224,6 +296,7 @@ def diagnose() -> list[Capability]:
         _probe_dnspython(),
         _probe_idna(),
         _probe_whois_binary(),
+        _probe_google_account(),
         _probe_snoop_state_dir(),
     ]
 
