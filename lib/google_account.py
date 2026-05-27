@@ -374,6 +374,10 @@ def fetch_google_account(
         the returned list is for the cluster pass downstream.
     """
     started = datetime.now(timezone.utc) if now is None else now
+    # Separate monotonic clock for elapsed_ms — if the caller pinned `started`
+    # to a fixed datetime for determinism, subtracting wall-clock from it
+    # would yield nonsense.
+    started_monotonic = time.monotonic()
 
     if cookie_loader is None:
         from .chrome_cookies import get_google_cookies
@@ -439,14 +443,18 @@ def fetch_google_account(
             c.account_exists = "unprobed"
             continue
 
-        if budget is not None:
-            budget.record("google_account")
-
         if result["parse_error"]:
             logger.info("google_account lookup error for %s: %s",
                         c.address, result["parse_error"])
             c.account_exists = "unprobed"
             continue
+
+        # Only record successful exchanges against the budget. Auth/server
+        # errors didn't produce a real lookup, so they shouldn't burn the
+        # user's daily quota (otherwise a stale browser session can exhaust
+        # the quota in one bad run).
+        if budget is not None:
+            budget.record("google_account")
 
         if not result["exists"]:
             c.account_exists = "not_found"
@@ -486,9 +494,7 @@ def fetch_google_account(
                 ),
             ))
 
-    elapsed_ms = int(
-        (datetime.now(timezone.utc) - started).total_seconds() * 1000
-    )
+    elapsed_ms = int((time.monotonic() - started_monotonic) * 1000)
 
     probed = [c for c in candidates_list if c.account_exists != "unprobed"]
     if rate_limited_seen:
