@@ -40,6 +40,7 @@ from __future__ import annotations
 import json
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Any, Callable
 
@@ -143,17 +144,29 @@ def _employer_match(observed_company: str | None, target_employer_name: str) -> 
 
 
 def _blog_matches_personal_domain(blog: str | None, domains: list[str]) -> str | None:
-    """If `blog` URL contains a known personal_domain, return the matched
-    domain string. Otherwise None."""
+    """If `blog` URL's host equals (or is a subdomain of) a known
+    personal_domain, return the matched domain. Otherwise None.
+
+    Host parsing matters here: a naive substring check binds 'foo.com'
+    to 'https://barfoo.com', and the false bind unlocks resolvers on
+    the wrong person.
+    """
     if not blog or not domains:
         return None
-    b = blog.lower().strip()
+    raw_blog = blog.strip()
+    parsed = urllib.parse.urlsplit(
+        raw_blog if "://" in raw_blog else "//" + raw_blog
+    )
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return None
+    if host.startswith("www."):
+        host = host[4:]
     for raw in domains:
         d = normalize_domain(raw)
         if not d:
             continue
-        # match by host: foo.com appears in https://foo.com/x or https://www.foo.com/...
-        if d in b:
+        if host == d or host.endswith("." + d):
             return d
     return None
 
