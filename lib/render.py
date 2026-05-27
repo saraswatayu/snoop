@@ -192,10 +192,15 @@ def _decision_line(
             f"Best available work candidate: `{pick.address}` — "
             f"low confidence; verify before sending."
         )
-    elif intent == "personal":
+    elif intent == "personal" and high_belief:
         lines.append(
             f"**Best personal address: `{pick.address}`** — for warm "
             f"outreach, not cold business."
+        )
+    elif intent == "personal":
+        lines.append(
+            f"Best available personal candidate: `{pick.address}` — "
+            f"low confidence; verify before sending warm outreach."
         )
     else:
         lines.append(f"**Best overall: `{pick.address}`**")
