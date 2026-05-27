@@ -275,6 +275,12 @@ def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
         for c in r.candidates:
             addr_key = c.address.lower()
             if addr_key not in by_addr:
+                # Canonicalize to the lowercase form for downstream rendering
+                # and copy-paste. Without this, a candidate first seen as
+                # 'Pete@OpenAI.COM' would surface in the decision card verbatim
+                # while the SMTP probe internally lowercased it — verdict and
+                # displayed address disagree by case.
+                c.address = addr_key
                 by_addr[addr_key] = c
             else:
                 merged = by_addr[addr_key]
