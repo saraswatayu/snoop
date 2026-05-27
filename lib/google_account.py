@@ -1,37 +1,37 @@
 """lib/google_account.py — Google People API existence + identity lookups.
 
-Reverse-engineered against Google's internal People API (the same one
-GHunt wraps). Uses your own logged-in Google session via cookies read
-from lib.chrome_cookies. SAPISIDHASH auth, POST to people-pa.clients6,
-parse the protojson response.
+Calls Google's internal People API (the same one GHunt wraps). Uses your
+own logged-in Google session via cookies read from lib.chrome_cookies.
+SAPISIDHASH auth, GET to people-pa.clients6.google.com/v2/people/lookup,
+parse the JSON response.
 
-**STABILITY WARNING.** The endpoint URL, request body shape, and
-response parsing format are NOT documented and Google rotates them
-periodically (~every 6-12 months historically). When the live API
-breaks our parser, the resolver returns status="error" with a clear
-"endpoint may have rotated" message; pipeline continues with non-Google
-signals. To fix: update _PEOPLE_LOOKUP_ENDPOINT / _build_lookup_request
-/ _parse_lookup_response. The cross-reference of last truth is the
-current GHunt source.
+**STABILITY WARNING.** The endpoint URL, API key, origin pairing, query
+param schema, and response shape are all reverse-engineered against
+GHunt's current source (the closest thing to a working reference). When
+the live API breaks our parser, the resolver returns status="error" with
+a clear message; the pipeline continues with non-Google signals. To fix:
+re-read GHunt's `apis/peoplepa.py` and `knowledge/keys.py`, then update
+the matching constants here.
 
 What's stable across rotations:
   - SAPISIDHASH algorithm (SHA1(ts + " " + SAPISID + " " + origin))
   - Cookie names (SID/SSID/HSID/APISID/SAPISID and __Secure-1P* family)
-  - The general shape: POST with SAPISIDHASH auth + cookies + protojson body
+  - The general shape: GET with X-Goog-Api-Key + SAPISIDHASH auth + cookies
 
-What rotates:
-  - Endpoint hostname / path
-  - The body's field positions (protojson is positional)
-  - The response's nesting depth and field positions
+What rotates (and breaks us when it does):
+  - _LOOKUP_URL (endpoint hostname / path)
+  - _API_KEY (Google's photos web client key)
+  - _ORIGIN (must match the key's registered origin — SAPISIDHASH validates
+    against the origin server-side, so a mismatch silently 401s)
+  - Query param names / response field nesting
 
 Four account_exists outcomes per candidate:
 
-  "verified"          : account exists AND we got display name + Gaia ID
-                        (most informative — can cross-check name)
-  "exists_unverifiable": account exists but Google's response withheld
-                        profile details (visibility-restricted Workspace
-                        account, querying outside the org)
-  "not_found"         : explicit not-found response
+  "verified"          : account exists AND we got at least personId
+                        (and usually display name) — strongest signal
+  "exists_unverifiable": Google acknowledged existence but withheld
+                        profile details (Workspace visibility-restricted)
+  "not_found"         : explicit not-found response (empty people dict)
   "unprobed"          : never asked (cookies missing, budget exhausted,
                         candidate domain not Google-hosted)
 
@@ -47,6 +47,7 @@ import json
 import logging
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
@@ -56,27 +57,47 @@ from .schema import EmailCandidate, ResolverResult, Source
 logger = logging.getLogger(__name__)
 
 
-# ---- volatile constants (update when Google rotates) -----------------------
+# ---- volatile constants (mirror GHunt's apis/peoplepa.py + knowledge/keys.py) ----
 
-# The People API endpoint GHunt has historically used. Path may rotate.
-_PEOPLE_LOOKUP_ENDPOINT = (
-    "https://people-pa.clients6.google.com/v2/people/lookup"
-)
-# Public web-client API key. Not a secret — appears in Google's web JS.
-# Rotates rarely but does rotate.
-_PEOPLE_LOOKUP_KEY = "AIzaSyA4xrSh53WnkVQVl7Q-EKAt4UDgrXrXwbI"
-# SAPISIDHASH origin — must match an origin Google's API trusts for
-# unauthenticated-ish web clients.
-_ORIGIN = "https://contacts.google.com"
+# Endpoint. Same as GHunt's. Path rotates rarely; full URL is what changes.
+_LOOKUP_URL = "https://people-pa.clients6.google.com/v2/people/lookup"
+
+# Google's "photos" web client API key. This is the key GHunt uses for the
+# People API lookup. The origin the server expects for SAPISIDHASH is THIS
+# key's registered origin, not contacts.google.com (which is why our v1
+# implementation silently 401'd every request).
+_API_KEY = "AIzaSyAa2odBewW-sPJu3jMORr0aNedh3YlkiQc"
+_ORIGIN = "https://photos.google.com"
+
+# Field paths and containers we request. Minimal subset of GHunt's
+# "max_details" template — we don't need Dynamite/Chat extension data,
+# just enough to tell existence apart from visibility-restricted and
+# (when available) to pull a display name for name-matching.
+_FIELD_PATHS = [
+    "person.metadata",
+    "person.metadata.best_display_name",
+    "person.name",
+    "person.photo",
+    "person.email",
+    "person.read_only_profile_info",
+]
+_CONTAINERS = [
+    "PROFILE",
+    "DOMAIN_PROFILE",
+    "ACCOUNT",
+    "EXTERNAL_ACCOUNT",
+]
 
 # Default request timeout per lookup (seconds). Google's lookup is usually
 # <1s when it works; >5s means rate limit or networking issue.
 _DEFAULT_TIMEOUT_SEC = 5.0
 
 
-# Type alias for the injectable HTTP transport. Takes (url, headers, body_bytes)
-# and returns (status_code, response_bytes).
-HttpPost = Callable[[str, dict[str, str], bytes], tuple[int, bytes]]
+# Type aliases for the injectable transports.
+# HttpGet: (url, params, headers) -> (status, response_bytes).
+# params is a list of (key, value) tuples to preserve multi-valued keys.
+HttpGet = Callable[[str, list[tuple[str, str]], dict[str, str]],
+                   tuple[int, bytes]]
 CookieLoader = Callable[[], dict[str, str]]
 
 
@@ -104,9 +125,9 @@ def compute_sapisidhash(
 
 
 def _pick_sapisid_cookie(cookies: dict[str, str]) -> str | None:
-    """Pick the best SAPISID-family cookie. Prefer modern __Secure-* variants
-    when present (Google rolled these out around 2020 and they're now the
-    default for new sessions); fall back to legacy SAPISID."""
+    """Pick the best SAPISID-family cookie. Prefer the legacy SAPISID when
+    present (GHunt's gen_sapisidhash uses it exclusively); fall back to the
+    modern __Secure-* variants for browsers that have rotated to those."""
     for name in ("SAPISID", "__Secure-1PAPISID", "__Secure-3PAPISID"):
         v = cookies.get(name)
         if v:
@@ -121,27 +142,39 @@ def _cookie_header(cookies: dict[str, str]) -> str:
 # ---- request / response (volatile) ------------------------------------------
 
 
-def _build_lookup_request(email: str) -> bytes:
-    """Build the protojson request body for one email lookup.
+def _build_lookup_params(email: str) -> list[tuple[str, str]]:
+    """Build URL query params for one email lookup.
 
-    Google's "protojson" encoding is JSON arrays in protobuf field order.
-    The shape below mirrors what GHunt sends as of late 2024:
-
-      [
-        [<email>],         # repeated lookup_id field
-        1,                 # include_profile_info: true
-        [1, 2, 3, 4, 7]    # field mask: name, photo, gaia_id, status, ...
-      ]
-
-    When Google rotates this, the symptom is a 400 response or an empty
-    parsed result. Update the array shape against the current GHunt source.
+    Returned as a list of (key, value) tuples so multi-valued keys
+    (request_mask.include_field.paths, request_mask.include_container)
+    survive urlencode(doseq=True) intact — Google expects each as a
+    separate ?key=val repeat, not a single comma-joined value.
     """
-    payload = [
-        [email],
-        1,
-        [1, 2, 3, 4, 7],
+    params: list[tuple[str, str]] = [
+        ("id", email),
+        ("type", "EMAIL"),
+        ("match_type", "EXACT"),
+        ("core_id_params.enable_private_names", "true"),
     ]
-    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    for path in _FIELD_PATHS:
+        params.append(("request_mask.include_field.paths", path))
+    for container in _CONTAINERS:
+        params.append(("request_mask.include_container", container))
+    return params
+
+
+def _blank() -> dict[str, Any]:
+    return {
+        "exists": False, "profile_visible": False,
+        "gaia_id": None, "display_name": None, "photo_url": None,
+        "rate_limited": False, "parse_error": None,
+    }
+
+
+def _err(msg: str) -> dict[str, Any]:
+    out = _blank()
+    out["parse_error"] = msg
+    return out
 
 
 def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
@@ -156,92 +189,86 @@ def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
       rate_limited:  bool
       parse_error:   str | None
 
-    Defensive against missing / null fields. The position-based reads are
-    the rotation surface — if Google moves a field, only this function
-    breaks, and the rest of the resolver still returns a clean error
-    rather than crashing.
+    Real response shape on success:
+      {"people": {"<personId or e:email>": {<Person record>}}}
+
+    Real response on not-found: empty object {} OR {"people": {}}.
+
+    Real response on error: {"error": {"code": "...", "message": "...",
+      "status": "..."}} — usually with the matching HTTP status, but
+      some surfaces 200-respond with error in the body.
     """
-    out: dict[str, Any] = {
-        "exists": False,
-        "profile_visible": False,
-        "gaia_id": None,
-        "display_name": None,
-        "photo_url": None,
-        "rate_limited": False,
-        "parse_error": None,
-    }
+    out = _blank()
     try:
         body = json.loads(payload_bytes.decode("utf-8", errors="replace"))
     except (ValueError, UnicodeDecodeError) as e:
         out["parse_error"] = f"json decode: {e}"
         return out
 
-    # Rate-limit detection: Google returns either {"error": {...}} for HTTP
-    # errors that still 200-respond, or {"code": "RATE_LIMIT_EXCEEDED"}
-    # depending on the surface.
-    if isinstance(body, dict):
-        err = body.get("error")
-        if isinstance(err, dict):
-            status = err.get("status") or err.get("code") or ""
-            if "RATE_LIMIT" in str(status).upper():
-                out["rate_limited"] = True
-                return out
-            # Other API errors: surface as parse_error so we don't claim
-            # not_found when the real signal is "API rejected our request"
-            out["parse_error"] = (
-                f"api error: {err.get('message', str(err))[:120]}"
-            )
-            return out
-
-    # On success the body is a top-level array. Empty array → not_found.
-    if not isinstance(body, list) or not body:
-        return out  # exists=False
-
-    # body[0] is the matches array. Each match is a profile object.
-    matches = body[0] if isinstance(body[0], list) else []
-    if not matches:
-        return out  # exists=False (no matches for that email)
-
-    first = matches[0]
-    if not isinstance(first, dict):
-        out["exists"] = True
-        out["profile_visible"] = False
+    if not isinstance(body, dict):
+        out["parse_error"] = f"unexpected response type: {type(body).__name__}"
         return out
 
-    # Existence is confirmed once a match comes back.
+    err = body.get("error")
+    if isinstance(err, dict):
+        status_str = str(err.get("status") or err.get("code") or "").upper()
+        if "RATE_LIMIT" in status_str or "RESOURCE_EXHAUSTED" in status_str:
+            out["rate_limited"] = True
+            return out
+        msg = str(err.get("message", err))[:160]
+        out["parse_error"] = f"api error: {msg}"
+        return out
+
+    people = body.get("people")
+    if not isinstance(people, dict) or not people:
+        return out  # exists=False
+
+    # Lookup is one-email-per-request, so there's only ever one entry.
+    first = next(iter(people.values()), None)
+    if not isinstance(first, dict):
+        return out
+
     out["exists"] = True
 
-    # Gaia ID: typically at first["personId"] or first["id"]. Tolerant lookup.
-    for key in ("personId", "id", "person_id"):
-        v = first.get(key)
-        if isinstance(v, str) and v:
-            out["gaia_id"] = v
-            break
+    pid = first.get("personId")
+    if isinstance(pid, str) and pid:
+        out["gaia_id"] = pid
 
-    # Names array: list of name records, each with primary value.
-    names = first.get("name") or first.get("names")
-    if isinstance(names, list) and names:
-        for entry in names:
-            if isinstance(entry, dict):
-                value = entry.get("displayName") or entry.get("value")
-                if isinstance(value, str) and value:
-                    out["display_name"] = value
+    # Display name. Try metadata.bestDisplayName first (Google patched the
+    # `name[]` field in 2022, but bestDisplayName still serves a usable
+    # value on many profiles), then fall back to name[].
+    metadata = first.get("metadata")
+    if isinstance(metadata, dict):
+        best = metadata.get("bestDisplayName")
+        if isinstance(best, dict):
+            v = best.get("displayName") or best.get("value")
+            if isinstance(v, str) and v.strip():
+                out["display_name"] = v.strip()
+
+    if not out["display_name"]:
+        names = first.get("name") or first.get("names")
+        if isinstance(names, list):
+            for entry in names:
+                if not isinstance(entry, dict):
+                    continue
+                v = entry.get("displayName") or entry.get("value")
+                if isinstance(v, str) and v.strip():
+                    out["display_name"] = v.strip()
                     break
 
-    # Photo URL
     photos = first.get("photo") or first.get("photos")
-    if isinstance(photos, list) and photos:
+    if isinstance(photos, list):
         for entry in photos:
-            if isinstance(entry, dict):
-                url = entry.get("url")
-                if isinstance(url, str) and url:
-                    out["photo_url"] = url
-                    break
+            if not isinstance(entry, dict):
+                continue
+            url = entry.get("url")
+            if isinstance(url, str) and url:
+                out["photo_url"] = url
+                break
 
-    # If we got SOMETHING beyond bare existence (gaia_id OR display_name),
-    # treat as profile_visible. If Google returned an "exists but I'm not
-    # going to tell you anything else" response, profile_visible stays False
-    # and the candidate is `exists_unverifiable`.
+    # profile_visible: gaia_id alone is enough to confirm a queryable
+    # account. display_name/photo are bonus signal for name-matching but
+    # not required for the "verified" verdict.
     out["profile_visible"] = bool(out["gaia_id"] or out["display_name"])
     return out
 
@@ -249,17 +276,26 @@ def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
 # ---- HTTP transport ---------------------------------------------------------
 
 
-def _default_http_post(
-    url: str, headers: dict[str, str], body: bytes,
-    *, timeout: float = _DEFAULT_TIMEOUT_SEC,
+def _default_http_get(
+    url: str,
+    params: list[tuple[str, str]],
+    headers: dict[str, str],
+    *,
+    timeout: float = _DEFAULT_TIMEOUT_SEC,
 ) -> tuple[int, bytes]:
     """Real HTTP transport for production. Tests inject a fake."""
-    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    encoded = urllib.parse.urlencode(params, doseq=True)
+    full_url = f"{url}?{encoded}" if encoded else url
+    req = urllib.request.Request(full_url, headers=headers, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:
-        return e.code, e.read()
+        try:
+            body = e.read() or b""
+        except Exception:  # noqa: BLE001
+            body = b""
+        return e.code, body
 
 
 # ---- public API -------------------------------------------------------------
@@ -269,45 +305,40 @@ def _lookup_one(
     email: str,
     cookies: dict[str, str],
     sapisid: str,
-    http_post: HttpPost,
+    http_get: HttpGet,
     *,
     now: float | None = None,
 ) -> dict[str, Any]:
     """Do one People API lookup. Returns the parsed result dict."""
-    url = f"{_PEOPLE_LOOKUP_ENDPOINT}?key={_PEOPLE_LOOKUP_KEY}&alt=json"
     auth = compute_sapisidhash(sapisid, now=now)
     headers = {
         "Authorization": auth,
-        "Content-Type": "application/json+protobuf",
         "Cookie": _cookie_header(cookies),
         "Origin": _ORIGIN,
         "Referer": _ORIGIN + "/",
         "User-Agent": "Mozilla/5.0 (snoop-skill)",
+        "X-Goog-Api-Key": _API_KEY,
         "X-Goog-AuthUser": "0",
     }
-    body = _build_lookup_request(email)
+    params = _build_lookup_params(email)
     try:
-        status, payload = http_post(url, headers, body)
+        status, payload = http_get(_LOOKUP_URL, params, headers)
     except (urllib.error.URLError, OSError, TimeoutError) as e:
-        return {
-            "exists": False, "profile_visible": False,
-            "gaia_id": None, "display_name": None, "photo_url": None,
-            "rate_limited": False,
-            "parse_error": f"http error: {type(e).__name__}: {e}",
-        }
+        return _err(f"http error: {type(e).__name__}: {e}")
     if status == 429:
-        return {
-            "exists": False, "profile_visible": False,
-            "gaia_id": None, "display_name": None, "photo_url": None,
-            "rate_limited": True, "parse_error": None,
-        }
+        out = _blank()
+        out["rate_limited"] = True
+        return out
+    if status in (401, 403):
+        # Almost always: API key rotated, origin/key pairing wrong, or the
+        # browser session lost its SAPISID. Surface as parse_error so the
+        # candidate is marked unprobed rather than not_found.
+        return _err(
+            f"auth failed: HTTP {status} (API key may have rotated, or "
+            "browser session is stale — re-sign-into Google in your browser)"
+        )
     if status >= 500:
-        return {
-            "exists": False, "profile_visible": False,
-            "gaia_id": None, "display_name": None, "photo_url": None,
-            "rate_limited": False,
-            "parse_error": f"server error: HTTP {status}",
-        }
+        return _err(f"server error: HTTP {status}")
     return _parse_lookup_response(payload)
 
 
@@ -315,9 +346,9 @@ def fetch_google_account(
     candidates: Iterable[EmailCandidate],
     *,
     cookie_loader: CookieLoader | None = None,
-    http_post: HttpPost | None = None,
+    http_get: HttpGet | None = None,
     target_domains: Iterable[str] | None = None,
-    budget: Any | None = None,  # lib.verify_smtp.ProbeBudget; optional defense-in-depth
+    budget: Any | None = None,  # lib.verify_smtp.ProbeBudget; optional
     now: datetime | None = None,
 ) -> ResolverResult:
     """Probe each candidate against Google's People API.
@@ -328,26 +359,29 @@ def fetch_google_account(
             when the lookup yields a real result.
         cookie_loader: Optional callable returning Google cookies. Default uses
             lib.chrome_cookies.get_google_cookies().
-        http_post: Optional injected HTTP transport for tests.
+        http_get: Optional injected HTTP transport for tests. Signature is
+            (url, params_list, headers) -> (status, body_bytes).
         target_domains: Restrict probing to candidates whose domain is in this
-            set. Default: only literal "google.com" + any domain that *looks*
-            Google-hosted by suffix. Pass an explicit set to broaden.
+            set. Default: only literal "google.com". Pass a broader set for
+            Workspace tenants whose MX is Google-hosted (the caller knows
+            this via lib.normalize / MX lookup; v1 doesn't auto-detect).
+        budget: ProbeBudget for defense-in-depth rate limiting.
         now: For deterministic tests.
 
     Returns:
-        ResolverResult with one candidate-shaped EmailCandidate per real
-        result. Same address may appear in input AND get its account_exists
-        updated; mutation is preferred over duplication so the cluster pass
-        downstream sees one row per address.
+        ResolverResult with one candidate per probed entry (regardless of
+        outcome). The mutation on the input list is the primary side effect;
+        the returned list is for the cluster pass downstream.
     """
     started = datetime.now(timezone.utc) if now is None else now
 
-    # Cookie acquisition
     if cookie_loader is None:
-        from . import chrome_cookies
-        cookie_loader = chrome_cookies.get_google_cookies
+        from .chrome_cookies import get_google_cookies
+        loader: CookieLoader = get_google_cookies
+    else:
+        loader = cookie_loader
     try:
-        cookies = cookie_loader() or {}
+        cookies = loader() or {}
     except Exception as e:  # noqa: BLE001
         return ResolverResult(
             resolver="google_account", candidates=[], status="unavailable",
@@ -364,10 +398,8 @@ def fetch_google_account(
             ),
         )
 
-    poster: HttpPost = http_post if http_post is not None else _default_http_post
+    getter: HttpGet = http_get if http_get is not None else _default_http_get
 
-    # Default domain filter: literal google.com (a Workspace tenant's MX can be
-    # detected separately; for v1 we only probe google.com itself).
     if target_domains is None:
         target_domain_set = {"google.com"}
     else:
@@ -375,6 +407,7 @@ def fetch_google_account(
 
     candidates_list = list(candidates)
     rate_limited_seen = False
+    verified_seen = False
     probed_any = False
 
     for c in candidates_list:
@@ -384,20 +417,21 @@ def fetch_google_account(
         if domain not in target_domain_set:
             continue
 
-        # If a prior candidate triggered rate-limit, mark subsequent as unprobed
-        # rather than firing more probes that will rate-limit too.
-        if rate_limited_seen:
+        # Short-circuit on first verified hit: snoop is one-person-per-run,
+        # so a confirmed Gaia binding answers the question — additional
+        # probes burn the daily budget and risk Google flagging the account.
+        # Subsequent candidates are left as `unprobed` rather than `not_found`
+        # so the scorer knows we abstained, not negated.
+        if rate_limited_seen or verified_seen:
             c.account_exists = "unprobed"
             continue
 
-        # Daily budget check (defense-in-depth; Google enforces its own
-        # rate limit, ours just caps us before we get there).
         if budget is not None and not budget.allow("google_account"):
             c.account_exists = "unprobed"
             continue
 
         probed_any = True
-        result = _lookup_one(c.address, cookies, sapisid, poster,
+        result = _lookup_one(c.address, cookies, sapisid, getter,
                              now=started.timestamp())
 
         if result["rate_limited"]:
@@ -405,12 +439,10 @@ def fetch_google_account(
             c.account_exists = "unprobed"
             continue
 
-        # Successful probe — record it against the budget
         if budget is not None:
             budget.record("google_account")
 
         if result["parse_error"]:
-            # Treat as transient error; don't poison belongs_to_person.
             logger.info("google_account lookup error for %s: %s",
                         c.address, result["parse_error"])
             c.account_exists = "unprobed"
@@ -426,11 +458,9 @@ def fetch_google_account(
             ))
             continue
 
-        # Account exists. Was profile visible?
         if result["profile_visible"]:
             c.account_exists = "verified"
-            # Store display name on the candidate so the scorer can compare
-            # it against the target name without parsing the detail string.
+            verified_seen = True
             if result["display_name"]:
                 c.account_display_name = result["display_name"]
             detail_parts = ["Google account confirmed"]
@@ -460,9 +490,6 @@ def fetch_google_account(
         (datetime.now(timezone.utc) - started).total_seconds() * 1000
     )
 
-    # Result candidates list: only those we actually probed (so the cluster
-    # pass doesn't see duplicates of unprobed entries). The mutation has
-    # already happened on the input list.
     probed = [c for c in candidates_list if c.account_exists != "unprobed"]
     if rate_limited_seen:
         status = "error"
