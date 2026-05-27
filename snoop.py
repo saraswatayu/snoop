@@ -447,7 +447,7 @@ def main(argv: list[str] | None = None) -> int:
             candidates, args.google_workspace_domain,
         )
         if google_targets:
-            fetch_google_account(
+            google_result = fetch_google_account(
                 google_targets,
                 target_domains=_google_target_domains(args.google_workspace_domain),
                 budget=ProbeBudget(
@@ -455,6 +455,14 @@ def main(argv: list[str] | None = None) -> int:
                     state_path=Path.home() / ".snoop" / "google-budget.json",
                 ),
             )
+            # Surface non-ok resolver outcomes (rate limit, cookies missing,
+            # auth failure) so the user can tell 'didn't find' apart from
+            # 'didn't ask'. Silent swallowing lets a stale browser session
+            # masquerade as a clean lookup.
+            if google_result.status in ("error", "unavailable") and google_result.error_detail:
+                person.notes.append(
+                    f"google_account {google_result.status}: {google_result.error_detail}"
+                )
             # Re-score so account_exists feeds the next stage's top-K pick
             score_all(candidates, person)
 
