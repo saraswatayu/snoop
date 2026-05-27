@@ -188,13 +188,16 @@ def test_verify_propagates_verdict_to_candidate():
     assert cands[1].smtp_verdict == "invalid"
 
 
-def test_verify_marks_remaining_as_unprobed_when_domain_dies():
-    """A catch_all verdict means future candidates on that domain are
-    unprobed — probing them wouldn't add information."""
+def test_verify_propagates_catch_all_to_unprobed_candidates_on_same_domain():
+    """When the catch-all sentinel returns 250 for the first candidate, ALL
+    other candidates on the same domain inherit catch_all (with the same
+    mx_provider) — they're skipped to save probes, but the verdict
+    propagates. Previously these were left "unprobed", which produced
+    misleading per-candidate deliverable scores in the rendered output
+    (the user's run review caught this)."""
     FakeProbe.reset()
     FakeProbe.responses = {
-        ("acme.com", "a@acme.com"): ("catch_all", "other", 250),
-        ("acme.com", "b@acme.com"): ("catch_all", "other", 250),
+        ("acme.com", "a@acme.com"): ("catch_all", "google", 250),
     }
     cands = [
         EmailCandidate(address="a@acme.com"),
@@ -202,11 +205,32 @@ def test_verify_marks_remaining_as_unprobed_when_domain_dies():
         EmailCandidate(address="c@acme.com"),
     ]
     verify_candidates(cands, _probe_factory=FakeProbe)  # type: ignore[arg-type]
-    # First catch_all: probed and verdict set
-    assert cands[0].smtp_verdict == "catch_all"
-    # Subsequent: skipped (dead domain)
+    # All three inherit catch_all + the same mx_provider
+    for c in cands:
+        assert c.smtp_verdict == "catch_all", (
+            f"{c.address} should inherit catch_all from sentinel"
+        )
+        assert c.mx_provider == "google"
+    # Only the first one actually got probed — the others were skipped
+    assert FakeProbe.instances_per_domain == {"acme.com": 1}
+
+
+def test_verify_propagates_unprobed_for_mx_failure():
+    """When the SMTP/MX setup fails for a domain, subsequent candidates on
+    that domain should be marked `unprobed` (we don't have a verdict to
+    propagate — only the knowledge that we couldn't reach the MX)."""
+    FakeProbe.reset()
+    # First candidate triggers a domain error (no MX, or SMTP connect fail)
+    FakeProbe.domain_errors = {"dead-mx.com": "no usable MX"}
+    cands = [
+        EmailCandidate(address="a@dead-mx.com"),
+        EmailCandidate(address="b@dead-mx.com"),
+    ]
+    verify_candidates(cands, _probe_factory=FakeProbe)  # type: ignore[arg-type]
+    # First: probed, MX error → unprobed verdict
+    assert cands[0].smtp_verdict == "unprobed"
+    # Second: skipped due to dead domain, also unprobed (not catch_all)
     assert cands[1].smtp_verdict == "unprobed"
-    assert cands[2].smtp_verdict == "unprobed"
 
 
 # ---- malformed addresses ---------------------------------------------------

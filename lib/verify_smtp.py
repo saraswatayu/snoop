@@ -273,7 +273,13 @@ def verify_candidates(
         populated for everything that was probed.
     """
     probes: dict[str, DomainProbe] = {}
-    dead_domains: set[str] = set()
+    # When a domain dies (catch-all sentinel returned 250, or MX/SMTP setup
+    # failed), record WHY so subsequent candidates on the same domain inherit
+    # the right verdict. Without this, the first probed candidate gets
+    # "catch_all" and the rest end up "unprobed" — which is technically true
+    # ("we did not probe them") but misleading: the user reads two different
+    # deliverable scores for addresses on the same catch-all domain.
+    dead_domains: dict[str, tuple[Literal["catch_all", "unprobed"], str | None]] = {}
     candidates = list(candidates)
 
     # Group by domain; iterate stably so the catch-all sentinel runs ONCE
@@ -297,7 +303,9 @@ def verify_candidates(
             continue
 
         if domain in dead_domains:
-            c.smtp_verdict = "unprobed"
+            inherited_verdict, inherited_provider = dead_domains[domain]
+            c.smtp_verdict = inherited_verdict
+            c.mx_provider = inherited_provider
             continue
 
         if budget is not None and not budget.allow(domain):
@@ -314,9 +322,13 @@ def verify_candidates(
         if budget is not None:
             budget.record(domain)
 
-        # A catch-all or no-MX domain renders future probes pointless.
-        if verdict in ("catch_all",) or probes[domain].error is not None:
-            dead_domains.add(domain)
+        # A catch-all domain or a no-MX/connect-failed domain renders future
+        # probes pointless. Record WHY so the next candidate on this domain
+        # inherits the right verdict (catch_all propagates; no-MX → unprobed).
+        if verdict == "catch_all":
+            dead_domains[domain] = ("catch_all", provider)
+        elif probes[domain].error is not None:
+            dead_domains[domain] = ("unprobed", provider)
         # A verified hit doesn't dead-domain the connection — we may have
         # more candidates on the same domain to probe.
 
