@@ -206,6 +206,7 @@ def _score_belongs(
 _FRESH_SOURCE_TYPES = frozenset({
     "gh_profile", "hn_profile", "linkedin", "manual_known",
     "x_bio", "personal_site", "gh_readme", "substack", "package_registry",
+    "google_account",  # People API verdict is the freshest signal we have
 })
 
 
