@@ -129,14 +129,12 @@ def test_parse_verified_response_with_full_profile():
         "metadata": {
             "bestDisplayName": {"displayName": "Peter Steinberger"},
         },
-        "photo": [{"url": "https://lh3.googleusercontent.com/abc"}],
     })
     result = ga._parse_lookup_response(body)
     assert result["exists"] is True
     assert result["profile_visible"] is True
     assert result["gaia_id"] == "1234567890"
     assert result["display_name"] == "Peter Steinberger"
-    assert result["photo_url"] == "https://lh3.googleusercontent.com/abc"
     assert result["rate_limited"] is False
     assert result["parse_error"] is None
 

@@ -77,7 +77,6 @@ _FIELD_PATHS = [
     "person.metadata",
     "person.metadata.best_display_name",
     "person.name",
-    "person.photo",
     "person.email",
     "person.read_only_profile_info",
 ]
@@ -166,7 +165,7 @@ def _build_lookup_params(email: str) -> list[tuple[str, str]]:
 def _blank() -> dict[str, Any]:
     return {
         "exists": False, "profile_visible": False,
-        "gaia_id": None, "display_name": None, "photo_url": None,
+        "gaia_id": None, "display_name": None,
         "rate_limited": False, "parse_error": None,
     }
 
@@ -185,7 +184,6 @@ def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
       profile_visible: bool  (False == exists_unverifiable)
       gaia_id:       str | None
       display_name:  str | None
-      photo_url:     str | None
       rate_limited:  bool
       parse_error:   str | None
 
@@ -256,19 +254,9 @@ def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
                     out["display_name"] = v.strip()
                     break
 
-    photos = first.get("photo") or first.get("photos")
-    if isinstance(photos, list):
-        for entry in photos:
-            if not isinstance(entry, dict):
-                continue
-            url = entry.get("url")
-            if isinstance(url, str) and url:
-                out["photo_url"] = url
-                break
-
     # profile_visible: gaia_id alone is enough to confirm a queryable
-    # account. display_name/photo are bonus signal for name-matching but
-    # not required for the "verified" verdict.
+    # account. display_name is bonus signal for name-matching but not
+    # required for the "verified" verdict.
     out["profile_visible"] = bool(out["gaia_id"] or out["display_name"])
     return out
 
