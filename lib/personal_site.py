@@ -47,10 +47,12 @@ _SYSTEM_LOCALPARTS = (
 _BAD_DOMAINS = ("example.com", "example.org", "example.net", "test", "invalid")
 
 # Match `href="mailto:foo@bar.com"` or `href='mailto:foo@bar.com?subject=...'`.
-# Stop on query string, whitespace, or closing quote. Permissive about the
-# attribute order and surrounding HTML.
+# Stop on query string, fragment, header separator, whitespace, or closing
+# quote. `&` is excluded because raw HTML often contains `&amp;` for header
+# separators — without the exclusion, the encoded `&amp;subject=…` leaks into
+# the captured address. `#` is excluded for the same reason against fragments.
 _MAILTO_HREF_RE = re.compile(
-    r"""href\s*=\s*['"]\s*mailto:\s*([^'"?\s]+)""",
+    r"""href\s*=\s*['"]\s*mailto:\s*([^'"?#&\s]+)""",
     re.IGNORECASE,
 )
 
