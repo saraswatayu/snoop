@@ -1,144 +1,138 @@
 ---
 name: snoop
-description: Use when the user wants to find, guess, or verify someone's email address. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify this email address". Generates a ranked candidate list from name patterns plus light research, then verifies the whole list in ONE batched SMTP call and reports a verified hit or the best guess.
+description: Use when the user wants to find, guess, or verify someone's email address. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify this email address". Resolves a person across public sources (GitHub commits, profile, personal-site mailto: anchors, name-pattern fallback), scores candidates on three independent fields (belongs_to_person / current_work_address / deliverable), and returns a contact decision card. SMTP probing is one verification signal among many, not the engine.
 ---
 
 # snoop
 
 ## Overview
 
-Find a person's work email and verify it. Two halves:
+Find a person's reachable email and tell the user whether and how to use it.
 
-1. **Idea generation (you, the model)** — turn whatever the user gives you
-   into a ranked list of candidate addresses, informed by *light* research.
-2. **Verification (`verify_email.py`)** — verifies the whole ranked list in
-   **one call** (batch mode): one MX lookup + one catch-all probe per domain,
-   one reused SMTP connection, early-stop on the first verified hit. You do
-   **not** loop.
+**Two halves:**
 
-It only does SMTP `RCPT` probing. It never sends mail. Use for legitimate
-outreach / verification only.
+1. **You, the model — produce a `--person-plan` JSON.** Resolve the target from whatever the user gave you into a structured plan: name variants, GitHub handle, X handle, personal domains, employer name and domains. The plan is YOUR upstream knowledge made explicit; the script validates it.
+2. **`snoop.py` — fan out, score, verify, render.** Runs the person-resolver + multi-source pipeline (git commits, GitHub profile, personal-site mailto:, name×domain pattern fallback) in parallel with per-resolver timeouts, dedupes across sources, scores each candidate on three fields, optionally SMTP-probes the top work candidates, and emits a markdown decision card.
+
+The script never sends mail; SMTP probing is RCPT-only.
+
+## When to invoke
+
+- Name + company: `snoop "Peter Steinberger" at OpenAI`
+- LinkedIn URL or freeform: extract the name, infer the employer, build the plan.
+- Single-address verification (legacy mode): `python3 verify_email.py "x@y.com"`. This older path still exists at the skill root for fast one-off verification.
+
+## Step 1 — Build the `--person-plan` (you, the model)
+
+This is your job. The host model knows context the script doesn't: nicknames, employer chronology, role hints, name spellings. Pass it structured, not as 25 brainstormed strings.
+
+Minimum useful plan:
+
+```json
+{
+  "name": "Peter Steinberger",
+  "handles": {"github": "steipete"},
+  "personal_domains": ["steipete.com"],
+  "employer": {"name": "OpenAI", "domains": ["openai.com"]}
+}
+```
+
+Optional fields:
+
+- `handles.x` / `handles.hn` — present but only `github` is validated in v1
+- `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}]` — used to cap former-employer addresses at low confidence
+- `channel_hints`: `{"x_dms_open": true}` — surfaced in the render
+- `name_variants`: explicit overrides if normalization isn't catching a non-Latin spelling
+
+**Any field can be `null` if you don't know it.** The script's `person_resolve` re-derives independently and surfaces conflicts in `Person.notes`. Don't fabricate.
+
+**Anchor binding rule (defense against hallucinated handles):** A `github` handle in the plan is an **untrusted hint** until ≥2 of {name match, employer match, personal_domain cross-link} agree. If you're not sure the handle is right, leave it out — pattern_gen and personal_site still run without it. Don't paste a guess that LOOKS like a handle.
+
+## Step 2 — Invoke the script
+
+`snoop.py` is in this skill's own directory. Resolve that directory at runtime (same approach as the legacy verify_email.py); don't hardcode an absolute path.
+
+```bash
+python3 "<this-skill-dir>/snoop.py" "Peter Steinberger" \
+  --person-plan '{"name":"Peter Steinberger","handles":{"github":"steipete"},"personal_domains":["steipete.com"],"employer":{"name":"OpenAI","domains":["openai.com"]}}' \
+  --known "sam@openai.com=Sam Altman" \
+  --known "greg.brockman@openai.com=Greg Brockman" \
+  --intent work
+```
+
+`--known EMAIL=Full Name` (repeatable) feeds same-company addresses to `pattern_gen` for template inference. Even one or two same-company knowns lets the script promote the inferred-pattern candidate to the top.
+
+For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
+
+**Flags:**
+
+| Flag | Purpose |
+|---|---|
+| `--intent work\|personal\|either` | Default `work`. Controls which section ranks first and which candidate the decision line recommends. |
+| `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
+| `--no-smtp` | Skip SMTP verification entirely. Faster, but loses the `deliverable` field. |
+| `--max-per-section N` | Cap rows per Work/Personal/Other section. Default 5. |
+| `--json` | Emit machine-readable JSON instead of the markdown card. |
+| `--diagnose` | Print a capability probe (gh auth, dnspython, etc.) and exit. No lookup. |
+
+## Step 3 — The output contract
+
+The script emits a markdown **contact decision card**. Pass it through verbatim — do not paraphrase, do not strip the ⚠ caveats, do not invent a "Verified" label.
+
+The card has these sections in this order:
+
+1. **Header** — name, employer, identity ambiguity label (`single plausible match` / `multiple plausible matches` / `insufficient identity evidence`), count of validating anchors bound.
+2. **Resolver notes** (if any) — plan-vs-observed deltas the resolver caught.
+3. **Decision** — opinionated top recommendation with reason-to-trust and ⚠ caveats (SMTP inconclusive, catch-all, former employer, etc.).
+4. **Work** / **Personal** / **Other** tables (order depends on `--intent`).
+5. **Channel hints** (if present in plan).
+
+The three score columns:
+
+| Field | What it means | Abstention (`—`) |
+|---|---|---|
+| **Belongs** | belongs_to_person: is this actually this person's address? | No sources observed |
+| **Work** | current_work_address: is this a current work email? | No employer info / unrelated domain |
+| **Deliverable** | will a message sent here reach a human? | SMTP inconclusive (no information) OR unprobed |
+
+A `—` in a column means **abstain** (no evidence either way), NOT zero. Render exactly as the script outputs.
+
+## Rules — what you MUST do and MUST NOT do
+
+**MUST do:**
+
+- Pass the script's markdown output through verbatim. The decision card IS the answer.
+- When the script reports `ambiguity != "single_plausible_match"`, surface that in your own framing too. Never offer a confident single recommendation if the resolver flagged identity uncertainty.
+- When the script's resolver notes contain a plan-vs-observed delta (e.g. "plan claimed employer=OpenAI; github profile company=Anthropic — employer differs"), surface it to the user.
+- Use `--intent personal` only when the user explicitly asked for personal contact. The default `work` is right for sales prep, founder research, recruiter outreach.
+
+**MUST NOT do:**
+
+- Never label a candidate "Verified" unless the script's `smtp_verdict == "verified"` (clean RCPT 250 on a non-catch-all domain).
+- Never replace a `—` (abstention) with a fabricated score. Especially not for `deliverable` when SMTP was inconclusive.
+- Never paste candidates that the user gave you AS IF they were resolver-discovered. The provenance lives in the Source records; honor it.
+- Never set up a list of targets and loop. `snoop` is one person per invocation. Refuse `snoop "list.txt"` patterns.
 
 ## Token discipline
 
 | Rule | Limit |
 |---|---|
-| Verification calls | exactly **one** batch call — never per-candidate |
-| Web searches | ≤ 2 |
-| `catch_all` / `inconclusive` result | stop, report best-guess — don't re-research |
+| Resolver fan-out | one batched script call — never loop per resolver |
+| Web searches (you, before invoking) | ≤ 2 |
+| Pre-validate handle yourself | Only when the user EXPLICITLY asked; otherwise trust person_resolve's anchor binding to flag bad handles |
 
-## Inputs (flexible)
+## Capability check (one-time per session)
 
-Accept whatever the user pastes:
+If the user's first invocation produces "unavailable" status on a P1 resolver (git_emails or gh_profile), run `python3 <this-skill-dir>/snoop.py --diagnose` once to surface the dependency gap. Common fixes:
 
-- A LinkedIn profile URL → extract the person's name; infer the company.
-- Freeform ("Peter Bogard-Johnson, works at Jane Street").
-- Name + company/domain directly.
-- A single address to just verify → one positional arg (single mode).
-
-If the **target domain** isn't given, resolve it (company site → its mail
-domain). Ask the user only if you genuinely cannot determine it. If the
-company plausibly uses more than one domain (e.g. `.com` vs `.dev`/`.ai`),
-include candidates for **each** — the batch call handles multiple domains in
-one shot, so you don't pay extra turns to discover the right TLD.
-
-## Step 1 — Light research
-
-Spend at most ~1–2 searches to re-rank, not to be exhaustive:
-
-- WebSearch the company's known email pattern (e.g. "acme.com email format",
-  a published staff/press address that reveals the pattern).
-- Note the MX provider if obvious. Google Workspace / Microsoft 365 usually
-  block RCPT → expect to land on best-guess; don't over-invest.
-- Capture name spelling variants (hyphenated surnames, anglicized first
-  names, middle names, diacritics → ascii).
-- **Grab any real known address at the company** with the person's name
-  (e.g. a press/staff email `jdoe@acme.com` for "John Doe"). Even one or
-  two lets the script infer the company's format and corroborate a
-  candidate — the single biggest accuracy lever. Pass these via `--known`.
-
-Then stop researching and move on.
-
-## Step 2 — Generate the ranked list
-
-Ordered, most-likely first, research-derived pattern on top. Cover the usual:
-
-```
-first.last  flast  first  firstl  f.last  last.first
-firstlast  lastf  first_last  f-last  initials
-```
-
-Hyphenated / multi-part surnames: include each part alone, joined, and
-hyphenated. Add candidates on every plausible domain. Cap ~15–25 total.
-
-## Step 3 — One batched verification call
-
-`verify_email.py` is bundled in **this skill's own directory** (the
-directory this SKILL.md lives in). Resolve that directory and call the
-script there — do not hardcode an absolute path, the skill may be installed
-personally (`~/.claude/skills/`) or per-project (`.claude/skills/`).
-
-You already know this skill's directory — it's where you read this
-SKILL.md from. Use that path. Pipe the ranked list straight into the
-script over **stdin** (`--file -`), one per line. Do NOT write a temp
-file — a fixed path collides if two snoop runs happen in parallel, and
-stdin needs no cleanup:
-
-```bash
-printf '%s\n' \
-  jane.doe@acme.com jdoe@acme.com j.doe@acme.com \
-  | python3 "<this-skill-dir>/verify_email.py" --file - \
-      --for "Jane Doe" --known "bsmith@acme.com=Bob Smith"
-```
-
-`--for "First Last"` names the target; `--known "EMAIL=First Last"`
-(repeatable) feeds any real same-domain address you found in Step 1. The
-script infers the company format from those, pushes the predicted match
-to the front, and raises its confidence. Omit both if you found no known
-address — it still works, just without that boost. (Candidates can also
-be positional args — also fine, also no temp file.) Requires `dnspython`;
-if missing, `pip install --user dnspython` — never globally.
-
-The script returns one JSON object: `result`
-(`verified` | `catch_all` | `inconclusive` | `exhausted`), `hit` (the
-verified address or null), and `tested` (per-candidate verdicts, each with
-a `score` 0–1 and a one-line `evidence` string). It already does the
-catch-all sentinel, connection reuse, early-stop on verified, pattern
-ranking, and skips dead domains. Do not re-run it candidate-by-candidate.
-
-Only make a second call if the result is `exhausted` AND you have a
-genuinely different, better-researched candidate set — not to retry the
-same patterns.
-
-## Step 4 — Report
-
-**If there's a clear answer** (a verified hit): one line, nothing else —
-`jane.doe@acme.com — Verified`.
-
-**If no single answer is obvious** (catch-all / inconclusive / exhausted):
-a table, one row per plausible candidate, ranked by the script's `score`
-(highest first):
-
-| Email | Confidence |
-|---|---|
-| jsmith@acme.com | 0.57 |
-| jane.smith@acme.com | 0.45 |
-| jsmith2@acme.com | 0.35 |
-
-Confidence is the script's `score` verbatim (or **Verified** for a hit).
-Use the script's number — do not invent your own. No MX, no SMTP codes,
-no ruled-out list, no prose, no `evidence` string — unless the user asks.
-Never label a guess "Verified".
+- `gh` not authed → `gh auth login`
+- `dnspython` missing → `pip install --user dnspython`
+- `~/.snoop` not writable → check disk space and home permissions
 
 ## Notes
 
-- This skill is typically dispatched as a subagent — good, keep it that way;
-  it isolates the work from the main session's context.
-- Batch mode does one catch-all sentinel + one SMTP connection **per
-  domain** and reuses it — far fewer probes than the old per-candidate loop.
-- Sequential by design (no parallel hammering of a mail server — that looks
-  abusive and triggers rate limiting).
-- `verify_email.py` still supports single mode (one positional email) for
-  ad-hoc "verify this address" requests.
-- Verification uses SMTP `RCPT` probing + catch-all detection, deliberately
-  not the unreliable (and widely disabled) SMTP `VRFY` command.
+- This skill is typically dispatched as a subagent — keep it that way; isolates the work from the main session's context.
+- `verify_email.py` at the skill root is the legacy single-address-verification path. Still useful for "verify this one address" requests where you don't want the full pipeline.
+- SMTP probing skips personal-provider domains (Gmail, iCloud, etc.) by default — major providers either block RCPT or 451-throttle non-recognized senders, AND probing them tips spam filters.
+- SMTP `inconclusive` on Google/M365 carries **zero information**. The renderer makes this explicit so the user understands why `deliverable` is `—` even when `belongs` is high.
+- Per-domain daily probe budget (default 5/day) caps state under `~/.snoop/probe-budget.json` (0600 perms) to avoid spamming MX servers.
