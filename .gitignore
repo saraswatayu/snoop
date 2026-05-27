@@ -1,4 +1,11 @@
 __pycache__/
-*.pyc
+*.py[cod]
+*$py.class
 .venv/
+.pytest_cache/
+.coverage
+*.egg-info/
+.DS_Store
+.snoop/
+*.swp
 /tmp_*
