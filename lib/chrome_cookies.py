@@ -240,10 +240,18 @@ def _query_cookies(
                 pass
 
             placeholders = ",".join("?" * len(cookie_names))
+            # Escape SQLite LIKE wildcards (% and _) so an unusual
+            # domain_suffix (e.g. 'acme_corp.com') doesn't broaden the match.
+            escaped_suffix = (
+                domain_suffix
+                .replace("\\", "\\\\")
+                .replace("%", "\\%")
+                .replace("_", "\\_")
+            )
             cur.execute(
                 f"SELECT name, value, encrypted_value FROM cookies "
-                f"WHERE host_key LIKE ? AND name IN ({placeholders})",
-                [f"%{domain_suffix}"] + list(cookie_names),
+                f"WHERE host_key LIKE ? ESCAPE '\\' AND name IN ({placeholders})",
+                [f"%{escaped_suffix}"] + list(cookie_names),
             )
             for name, value, enc in cur.fetchall():
                 if value:
