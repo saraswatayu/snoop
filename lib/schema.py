@@ -39,9 +39,29 @@ SourceType = Literal[
     "x_bio",            # email extracted from X profile bio
     "pgp",              # OpenPGP key UID
     "linkedin",         # LinkedIn profile contact email (cookie-jar gated)
+    "google_account",   # Google People API existence + (sometimes) profile
     "pattern",          # name × domain template guess (lowest trust)
     "smtp",             # SMTP RCPT verdict — modifies score, not a source itself
     "manual_known",     # user passed via --known; ground truth
+]
+
+
+# Account-existence verdict, distinct from smtp_verdict.
+# - "verified"            : account exists AND profile is visible to us
+#                           (we can cross-check name; strongest belongs signal)
+# - "exists_unverifiable" : account exists, profile is NOT visible (Workspace
+#                           visibility-restricted account, querying outside org).
+#                           Existence is positive belongs evidence; name match
+#                           anchor does NOT bind.
+# - "not_found"           : explicit not-found response — strong negative
+# - "unprobed"            : never asked (cookies missing, budget exhausted,
+#                           candidate domain not Google-hosted, prior probe
+#                           in same batch was rate-limited, etc.)
+AccountExistsVerdict = Literal[
+    "verified",
+    "exists_unverifiable",
+    "not_found",
+    "unprobed",
 ]
 
 
@@ -92,6 +112,11 @@ class EmailCandidate:
     # Verification-layer outputs
     smtp_verdict: SmtpVerdict = "unprobed"
     mx_provider: str | None = None  # "google" | "microsoft" | "other" | None for renderer hints
+    # Independent of SMTP: did the Google People API confirm this account exists?
+    # See AccountExistsVerdict for semantics. The scorer's _score_deliverable
+    # merges signals from both smtp_verdict AND account_exists; either positive
+    # signal lifts deliverable. Set by lib.google_account.fetch_google_account.
+    account_exists: AccountExistsVerdict = "unprobed"
 
     # Domain-level facts
     employer_match: bool = False           # address domain ∈ resolved current employer.domains
