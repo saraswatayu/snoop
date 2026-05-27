@@ -236,6 +236,13 @@ def _score_current_work(
     if c.is_personal_provider:
         return 0.0, ["personal-provider domain — not a work address"]
 
+    # Google said the address doesn't exist — it cannot be a current work
+    # address. Otherwise a pattern-only guess on the employer domain still
+    # scored 0.30 here (employer_match + belongs>0) and contradicted the
+    # belongs/deliverable verdicts.
+    if c.account_exists == "not_found":
+        return 0.0, ["Google account lookup: address not found"]
+
     if c.employer_former_match:
         # Former employer: cap hard. Even if the address was their work email
         # a year ago, it likely bounces or routes to "no longer here."
