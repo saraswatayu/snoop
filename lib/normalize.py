@@ -315,3 +315,27 @@ def normalize_email(email: str) -> str:
         return (email or "").strip().lower()
     local, _, domain = email.strip().rpartition("@")
     return f"{local.lower()}@{normalize_domain(domain)}"
+
+
+def name_match(observed_name: str | None, target_name: str) -> bool:
+    """Loose equality on names — folded ASCII, drop punctuation, compare
+    set-of-tokens to handle "John A. Smith" vs "John Smith".
+    """
+    if not observed_name or not target_name:
+        return False
+    obs = parse_name(observed_name)
+    tgt = parse_name(target_name)
+    if obs and tgt:
+        # First+last fold equality (Eastern-order reversal counted as match)
+        if fold_ascii(obs.first) == fold_ascii(tgt.first) and \
+           fold_ascii(obs.last) == fold_ascii(tgt.last):
+            return True
+        if fold_ascii(obs.first) == fold_ascii(tgt.last) and \
+           fold_ascii(obs.last) == fold_ascii(tgt.first):
+            return True
+    # Token-set fallback
+    obs_tokens = set(fold_ascii(observed_name).split())
+    tgt_tokens = set(fold_ascii(target_name).split())
+    return bool(obs_tokens) and bool(tgt_tokens) and (
+        obs_tokens.issubset(tgt_tokens) or tgt_tokens.issubset(obs_tokens)
+    )

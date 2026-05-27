@@ -27,6 +27,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
+from .normalize import name_match
 from .schema import EmailCandidate, Person, Source
 
 
@@ -150,8 +151,6 @@ def _score_belongs(
     # This is the categorical Google-Workspace unlock: pattern-only candidates
     # that pass the Google check get lifted ABOVE the pattern-only cap.
     if c.account_exists == "verified":
-        # Delayed import to avoid circular: name_match lives in person_resolve.
-        from .person_resolve import name_match
         if c.account_display_name and name_match(c.account_display_name, person.name):
             base = max(base, 0.75)
             reasons.append(
