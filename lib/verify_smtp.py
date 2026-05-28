@@ -218,9 +218,13 @@ class DomainProbe:
             self._connect()
         if self.error or self._server is None:
             return "unprobed", self.provider, None
-        code = self._rcpt(email)
+        # Catch-all was established by the sentinel during _connect(); a
+        # real-address RCPT here would (a) waste a round-trip, (b) log the
+        # target address in the recipient MX's mail.log, and (c) tell us
+        # nothing new — the domain accepts anything.
         if self.catch_all:
-            return "catch_all", self.provider, code
+            return "catch_all", self.provider, None
+        code = self._rcpt(email)
         if code == 250:
             return "verified", self.provider, code
         if code in (550, 551, 553, 554):
