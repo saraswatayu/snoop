@@ -87,6 +87,24 @@ def get_mx(domain: str) -> tuple[str | None, str | None]:
         return None, str(e)
 
 
+def is_google_hosted(domain: str) -> bool:
+    """True when `domain`'s MX is Google Workspace (or the literal google.com).
+
+    Used by snoop.py to auto-add Workspace-hosted domains to the
+    --allow-google-account probe set, so the user doesn't need to remember
+    --google-workspace-domain for every YC startup on Gmail. Returns False
+    on DNS failure or non-Google MX; the caller treats that as "not
+    Workspace, don't probe." One DNS lookup per unique candidate domain
+    per invocation; no caching beyond what the resolver provides.
+    """
+    if domain == "google.com":
+        return True
+    mx_host, err = get_mx(domain)
+    if err or not mx_host:
+        return False
+    return detect_provider(mx_host) == "google"
+
+
 def _random_localpart(n: int = 16) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 

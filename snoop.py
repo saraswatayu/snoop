@@ -47,7 +47,7 @@ from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
 from lib.schema import EmailCandidate, Person, ResolverResult
 from lib.score import is_personal_provider, score_all
-from lib.verify_smtp import ProbeBudget, default_budget, verify_candidates
+from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
 
 
 _PER_RESOLVER_TIMEOUT_SEC = 5.0
@@ -366,6 +366,40 @@ def _google_target_domains(workspace_domains: list[str]) -> set[str]:
     return domains
 
 
+def _autodetect_workspace_domains(
+    candidates: list[EmailCandidate],
+    explicit: list[str],
+    *,
+    is_google_hosted_fn: Callable[[str], bool] = is_google_hosted,
+) -> list[str]:
+    """Find candidate domains whose MX is Google Workspace and add them to
+    the explicit list. Skips google.com (already included) and personal
+    providers (gmail.com etc. — these ARE Google MX but probing arbitrary
+    personal addresses is invasive and wrong-scope for this tool).
+
+    One DNS lookup per unique non-skip candidate domain. Returns the merged
+    list; the caller threads it to _google_target_domains.
+
+    Function injection on is_google_hosted_fn lets tests stub the MX
+    lookup without monkeypatching the verify_smtp module globally.
+    """
+    explicit_set = {d.strip().lower() for d in explicit or [] if isinstance(d, str)}
+    seen_candidate_domains: set[str] = set()
+    additions: list[str] = []
+    for c in candidates:
+        if "@" not in c.address:
+            continue
+        d = c.address.rsplit("@", 1)[1].lower()
+        if d in seen_candidate_domains or d in explicit_set or d == _GOOGLE_NATIVE_DOMAIN:
+            continue
+        seen_candidate_domains.add(d)
+        if is_personal_provider(d):
+            continue
+        if is_google_hosted_fn(d):
+            additions.append(d)
+    return list(explicit or []) + additions
+
+
 def _google_account_candidates(
     candidates: list[EmailCandidate],
     workspace_domains: list[str],
@@ -537,13 +571,16 @@ def main(argv: list[str] | None = None) -> int:
     # SMTP so that not_found verdicts short-circuit SMTP probes on dead
     # candidates (Google's view is authoritative when it returns a verdict).
     if args.allow_google_account:
-        google_targets = _google_account_candidates(
+        # Auto-detect Workspace MX so the user doesn't need to pass
+        # --google-workspace-domain for every YC startup on Gmail.
+        merged_workspace = _autodetect_workspace_domains(
             candidates, args.google_workspace_domain,
         )
+        google_targets = _google_account_candidates(candidates, merged_workspace)
         if google_targets:
             google_result = fetch_google_account(
                 google_targets,
-                target_domains=_google_target_domains(args.google_workspace_domain),
+                target_domains=_google_target_domains(merged_workspace),
                 target_name=person.name,
                 budget=ProbeBudget(
                     per_domain=30,

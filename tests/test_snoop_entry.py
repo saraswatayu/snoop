@@ -421,6 +421,85 @@ def test_load_plan_accepts_valid_inline_json():
     assert plan == {"name": "X", "handles": {"github": "y"}}
 
 
+# ---- _autodetect_workspace_domains ------------------------------------------
+
+
+def test_autodetect_adds_google_hosted_candidate_domains():
+    """Candidate addresses on Workspace-hosted domains get auto-added so
+    the user doesn't need --google-workspace-domain for every YC startup."""
+    cands = [
+        EmailCandidate(address="dan@formation.bio"),
+        EmailCandidate(address="alice@some-other.io"),
+    ]
+    is_google = lambda d: d == "formation.bio"
+    merged = snoop._autodetect_workspace_domains(
+        cands, explicit=[], is_google_hosted_fn=is_google,
+    )
+    assert "formation.bio" in merged
+    assert "some-other.io" not in merged
+
+
+def test_autodetect_preserves_explicit_workspace_list():
+    cands = [EmailCandidate(address="x@formation.bio")]
+    merged = snoop._autodetect_workspace_domains(
+        cands, explicit=["acme.com", "beta.io"],
+        is_google_hosted_fn=lambda d: True,
+    )
+    assert "acme.com" in merged
+    assert "beta.io" in merged
+    assert "formation.bio" in merged
+
+
+def test_autodetect_skips_personal_providers():
+    """Don't ramp probing into gmail.com etc. just because they're on Google MX."""
+    cands = [EmailCandidate(address="someone@gmail.com")]
+    calls = []
+    def is_google(d):
+        calls.append(d)
+        return True
+    merged = snoop._autodetect_workspace_domains(
+        cands, explicit=[], is_google_hosted_fn=is_google,
+    )
+    assert merged == []
+    assert "gmail.com" not in calls  # never even probed
+
+
+def test_autodetect_skips_explicit_and_native_google():
+    """Don't re-probe domains the caller already named or the native google.com."""
+    cands = [
+        EmailCandidate(address="x@google.com"),
+        EmailCandidate(address="x@already-listed.com"),
+    ]
+    calls = []
+    def is_google(d):
+        calls.append(d)
+        return True
+    merged = snoop._autodetect_workspace_domains(
+        cands, explicit=["already-listed.com"],
+        is_google_hosted_fn=is_google,
+    )
+    # Neither domain hit the lookup
+    assert calls == []
+    assert merged == ["already-listed.com"]
+
+
+def test_autodetect_dedupes_within_candidate_set():
+    cands = [
+        EmailCandidate(address="a@same.com"),
+        EmailCandidate(address="b@same.com"),
+        EmailCandidate(address="c@same.com"),
+    ]
+    calls = []
+    def is_google(d):
+        calls.append(d)
+        return True
+    merged = snoop._autodetect_workspace_domains(
+        cands, explicit=[], is_google_hosted_fn=is_google,
+    )
+    assert calls == ["same.com"]  # single lookup despite 3 candidates
+    assert merged == ["same.com"]
+
+
 def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
     """--json mode should produce parseable JSON."""
     import json as _json

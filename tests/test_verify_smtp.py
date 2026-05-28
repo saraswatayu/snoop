@@ -84,6 +84,42 @@ def test_detect_provider_handles_empty():
     assert detect_provider("") == "other"
 
 
+# ---- is_google_hosted -------------------------------------------------------
+
+
+def test_is_google_hosted_recognizes_native_google():
+    from lib.verify_smtp import is_google_hosted
+    assert is_google_hosted("google.com") is True
+
+
+def test_is_google_hosted_recognizes_workspace_mx(monkeypatch):
+    from lib import verify_smtp
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d: ("aspmx.l.google.com", None))
+    assert verify_smtp.is_google_hosted("formation.bio") is True
+
+
+def test_is_google_hosted_false_for_microsoft_mx(monkeypatch):
+    from lib import verify_smtp
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d: ("openai-com.mail.protection.outlook.com", None))
+    assert verify_smtp.is_google_hosted("openai.com") is False
+
+
+def test_is_google_hosted_false_when_no_mx(monkeypatch):
+    from lib import verify_smtp
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d: (None, "no MX records"))
+    assert verify_smtp.is_google_hosted("nomx.example") is False
+
+
+def test_is_google_hosted_false_when_dns_errors(monkeypatch):
+    from lib import verify_smtp
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d: (None, "DNS timeout"))
+    assert verify_smtp.is_google_hosted("offline.example") is False
+
+
 # ---- SYNTAX_RE --------------------------------------------------------------
 
 
