@@ -45,6 +45,7 @@ from typing import Any
 
 from . import _gh_api
 from ._gh_api import GhCaller
+from .gh_search import find_github_handle
 from .normalize import (
     fold_ascii,
     name_match,
@@ -234,8 +235,26 @@ def resolve_person(
     bound_anchors: list[tuple[str, str]] = []
     notes: list[str] = []
 
-    # Validate GitHub handle (the only handle we resolve in v1)
+    # Validate GitHub handle (the only handle we resolve in v1).
+    # If no handle is in the plan, fall back to GitHub user search:
+    # name + employer hint, validated against profile name/company. This
+    # makes the zero-config CLI path (`snoop "Dan Neil" "Formation Bio"`)
+    # actually find git_emails / gh_profile / recent_repos data.
     github_handle = handles.get("github")
+    if not github_handle and caller is not None and name.strip():
+        try:
+            employer_hint = employer.name if employer else None
+            found = find_github_handle(name, employer_hint, gh_caller=caller)
+        except Exception:  # noqa: BLE001 — search is best-effort
+            found = None
+        if found:
+            github_handle = found
+            handles["github"] = found
+            notes.append(
+                f"github handle {found!r} discovered via user search "
+                f"(not in plan); profile validation follows"
+            )
+
     profile: dict | None = None
     if github_handle and caller is not None:
         try:

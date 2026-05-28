@@ -304,3 +304,85 @@ def test_resolve_passes_channel_hints_through():
     plan = {"channel_hints": {"x_dms_open": True, "prefers": "x"}}
     p = resolve_person("X", plan=plan, gh_caller=make_gh({}))
     assert p.channel_hints == {"x_dms_open": True, "prefers": "x"}
+
+
+# ---- gh_search fallback (zero-config CLI path) ------------------------------
+
+
+def test_resolve_invokes_gh_search_when_no_handle_in_plan():
+    """No github handle in the plan → person_resolve calls gh_search and
+    threads the discovered handle through the normal validation path."""
+    plan = {"employer": {"name": "Formation Bio", "domains": ["formation.bio"]}}
+    # Caller serves both the search query and the profile fetch (validation
+    # in gh_search) AND the subsequent fetch person_resolve does for anchors.
+    routes = {
+        "/search/users": {
+            "items": [{"login": "danielneil"}],
+        },
+        "/users/danielneil": {
+            "login": "danielneil",
+            "name": "Daniel Neil",
+            "company": "Formation Bio",
+        },
+    }
+    p = resolve_person("Daniel Neil", plan=plan, gh_caller=make_gh(routes))
+    assert p.handles.get("github") == "danielneil"
+    assert any("user search" in n for n in p.notes)
+    # Anchor binding still applies — name and employer both matched, so this
+    # should resolve to single_plausible_match.
+    assert p.ambiguity == "single_plausible_match"
+
+
+def test_resolve_skips_gh_search_when_handle_already_in_plan():
+    """Don't call search when the plan already names a handle — search
+    would re-fetch the same profile for no benefit."""
+    plan = {
+        "handles": {"github": "steipete"},
+        "employer": {"name": "OpenAI", "domains": ["openai.com"]},
+    }
+    routes = {
+        "/users/steipete": {
+            "login": "steipete",
+            "name": "Peter Steinberger",
+            "company": "OpenAI",
+        },
+        # If gh_search were invoked, it would try /search/users — this raises
+        # to prove it wasn't.
+        "/search/users": AssertionError("gh_search should not have been called"),
+    }
+    p = resolve_person("Peter Steinberger", plan=plan, gh_caller=make_gh(routes))
+    assert p.handles.get("github") == "steipete"
+
+
+def test_resolve_gh_search_failure_doesnt_break_pipeline():
+    """gh_search erroring out (network, rate limit, etc.) must not affect
+    the rest of person_resolve. The person comes back with no handle,
+    pipeline continues with pattern_gen / personal_site."""
+    import subprocess
+
+    def caller(path):
+        if path.startswith("/search/users"):
+            raise subprocess.SubprocessError("rate limited")
+        return None
+
+    plan = {"employer": {"name": "Acme", "domains": ["acme.com"]}}
+    p = resolve_person("Someone Random", plan=plan, gh_caller=caller)
+    assert "github" not in p.handles
+    # Ambiguity reflects the no-handle reality
+    assert p.ambiguity == "insufficient_identity_evidence"
+
+
+def test_resolve_gh_search_skipped_when_search_finds_ambiguous():
+    """gh_search returns None on ambiguity → person_resolve gets no handle,
+    falls through to no-handle ambiguity state."""
+    routes = {
+        "/search/users": {
+            "items": [{"login": "first"}, {"login": "second"}],
+        },
+        # Both candidates pass name+employer match — search abstains
+        "/users/first": {"name": "John Smith", "company": "Acme"},
+        "/users/second": {"name": "John Smith", "company": "Acme"},
+    }
+    plan = {"employer": {"name": "Acme", "domains": ["acme.com"]}}
+    p = resolve_person("John Smith", plan=plan, gh_caller=make_gh(routes))
+    assert "github" not in p.handles
