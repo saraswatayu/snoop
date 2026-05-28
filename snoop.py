@@ -40,7 +40,7 @@ from typing import Any, Callable
 
 from lib import diagnose, render
 from lib.git_emails import fetch_git_emails
-from lib.gh_profile import fetch_gh_profile
+from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
@@ -455,6 +455,14 @@ def main(argv: list[str] | None = None) -> int:
 
     person = resolve_person(name, plan=plan)
     manual_known = _parse_knowns(args.known)
+
+    # Dossier enrichment (D4-C): when the github handle is bound, fetch
+    # recently-pushed repos. One extra API call, gated on the same bound-
+    # handle check as the resolver fan-out so we never query GitHub for
+    # an untrusted hint. Best-effort: empty list on any failure.
+    gh_handle_bound = _gh_handle(person)
+    if gh_handle_bound:
+        person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
 
     # Fan out resolvers
     results = run_pipeline(person, manual_known=manual_known)
