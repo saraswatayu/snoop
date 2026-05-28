@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import re
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
@@ -98,11 +99,7 @@ def _extract_mailto_addresses(html: str) -> list[str]:
         if _CLOUDFLARE_PROTECTED_RE.search(raw):
             continue
         # urldecode common cases (e.g. %40 → @)
-        try:
-            import urllib.parse
-            raw = urllib.parse.unquote(raw)
-        except Exception:  # noqa: BLE001
-            pass
+        raw = urllib.parse.unquote(raw)
         email = normalize_email(raw)
         if _is_extractable(email) and email not in seen:
             seen[email] = None
