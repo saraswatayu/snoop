@@ -100,6 +100,15 @@ class Employer:
 
 
 @dataclass
+class GitHubRepo:
+    """One recently-pushed public repo, surfaced in the dossier."""
+    name: str                     # "owner/repo" form for display
+    description: str | None       # one-line description, may be None
+    html_url: str                 # https://github.com/owner/repo
+    pushed_at: str                # ISO-8601 timestamp from the API; rendered as-is
+
+
+@dataclass
 class EmailCandidate:
     """One candidate email for a target person.
 
@@ -164,6 +173,23 @@ class Person:
     # Validation notes from person_resolve: plan-vs-observed deltas, missing-
     # anchor warnings, search ambiguity context. Surfaced by the renderer.
     notes: list[str] = field(default_factory=list)
+
+    # Tier 1 dossier — populated by person_resolve from the same
+    # GET /users/{handle} call that validates anchors, so it costs zero
+    # extra API budget. All optional; renderer skips absent fields.
+    # The `gh_` prefix keeps GitHub-sourced fields distinct from
+    # cross-validated identity fields above (e.g. `name` here is the
+    # canonical target name; `gh_name` is what GitHub's profile says,
+    # which may or may not match).
+    gh_name: str | None = None
+    gh_bio: str | None = None
+    gh_blog: str | None = None          # blog/website URL from the profile
+    gh_twitter: str | None = None       # twitter_username from the profile
+    gh_company: str | None = None       # raw company text (may not match employer.name)
+    gh_location: str | None = None
+    # Tier 2 dossier (D4-C): top-N recently-pushed non-fork public repos.
+    # Fetched by lib.gh_profile.fetch_recent_repos as an opt-in second call.
+    gh_recent_repos: list[GitHubRepo] = field(default_factory=list)
 
 
 @dataclass
