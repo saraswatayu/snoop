@@ -256,7 +256,27 @@ def resolve_person(
             )
 
     # If we got a profile, score the anchor binding
+    gh_name: str | None = None
+    gh_bio: str | None = None
+    gh_blog: str | None = None
+    gh_twitter: str | None = None
+    gh_company: str | None = None
+    gh_location: str | None = None
     if profile is not None:
+        # Capture dossier fields from the same fetch (Tier 1 dossier per
+        # docs/plans/2026-05-28-output-redesign.md, D4-C). Free: this
+        # is the same /users/{handle} call that drives anchor binding.
+        def _str_or_none(v: object) -> str | None:
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+            return None
+        gh_name = _str_or_none(profile.get("name"))
+        gh_bio = _str_or_none(profile.get("bio"))
+        gh_blog = _str_or_none(profile.get("blog"))
+        gh_twitter = _str_or_none(profile.get("twitter_username"))
+        gh_company = _str_or_none(profile.get("company"))
+        gh_location = _str_or_none(profile.get("location"))
+
         # Anchor 1: name match
         observed_name = profile.get("name")
         if name_match(observed_name, name):
@@ -351,4 +371,10 @@ def resolve_person(
         ambiguity=ambiguity,
         bound_anchors=bound_anchors,
         notes=notes,
+        gh_name=gh_name,
+        gh_bio=gh_bio,
+        gh_blog=gh_blog,
+        gh_twitter=gh_twitter,
+        gh_company=gh_company,
+        gh_location=gh_location,
     )
