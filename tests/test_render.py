@@ -203,6 +203,24 @@ def test_about_block_skipped_when_no_fields():
     assert "About:" not in out
 
 
+def test_about_block_collapses_bio_whitespace():
+    """Multi-line bios from real profiles (e.g., 'Building things.\\n\\nPreviously
+    at X') must collapse to a single line so the dossier stays scannable."""
+    p = make_person(gh_bio="Building things.\n\nPreviously at OpenAI.\n\tNow exploring.")
+    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
+    out = render_decision_card(p, [c], intent="either")
+    # The bio should appear on a single line with single spaces between words
+    assert "Building things. Previously at OpenAI. Now exploring." in out
+    # No literal newlines or tabs inside the bio section
+    about_start = out.find("About:")
+    next_section = out.find("\n\n", about_start + 1)
+    about_block = out[about_start:next_section if next_section >= 0 else len(out)]
+    # The About block itself has line breaks between rows; the bio row
+    # specifically should not contain stray \n or \t
+    bio_line = next(line for line in about_block.splitlines() if "Building things" in line)
+    assert "\n" not in bio_line and "\t" not in bio_line
+
+
 def test_about_block_includes_linkedin_from_channel_hints():
     p = make_person(channel_hints={"linkedin": "https://www.linkedin.com/in/steipete"})
     c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")

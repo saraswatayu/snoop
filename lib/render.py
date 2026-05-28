@@ -208,8 +208,11 @@ def _about_block(person: Person) -> list[str]:
     if gh_handle:
         gh_url = f"github.com/{gh_handle}"
         if person.gh_bio:
-            # Bio truncated to keep the dossier scannable
-            bio = person.gh_bio.strip()
+            # Collapse internal whitespace (newlines, tabs, multi-space) so
+            # multi-paragraph bios render as a single scannable line. Without
+            # this, a real Peter-Steinberger-style bio with "\n\nPreviously…"
+            # breaks the About block into three visual lines.
+            bio = " ".join(person.gh_bio.split())
             if len(bio) > 80:
                 bio = bio[:77] + "…"
             rows.append(("GitHub", f'{gh_url} — "{bio}"'))
