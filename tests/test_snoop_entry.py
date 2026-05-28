@@ -432,6 +432,17 @@ def test_google_account_candidates_skips_already_probed():
     assert [c.address for c in out] == ["b@google.com"]
 
 
+def test_google_account_candidates_sorts_by_belongs_desc():
+    """Observation-backed candidates probe BEFORE pattern guesses so a
+    verified-but-wrong-person pattern hit can't pre-empt a higher-confidence
+    candidate that hasn't been tried yet."""
+    high = EmailCandidate(address="z@google.com", belongs_to_person=0.75)
+    low = EmailCandidate(address="a@google.com", belongs_to_person=0.20)
+    unscored = EmailCandidate(address="m@google.com")  # belongs=None
+    out = snoop._google_account_candidates([low, unscored, high], [])
+    assert [c.address for c in out] == ["z@google.com", "a@google.com", "m@google.com"]
+
+
 def test_google_target_domains_always_includes_literal_google_com():
     assert "google.com" in snoop._google_target_domains([])
     assert snoop._google_target_domains(["acme.com"]) == {"google.com", "acme.com"}

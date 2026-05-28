@@ -346,10 +346,10 @@ def test_fetch_only_probes_google_domain_by_default():
     assert len(http_calls) == 1
 
 
-def test_fetch_short_circuits_on_first_verified_hit():
-    """One-person-per-run: a verified hit answers the question. Don't burn
-    the daily probe budget on additional candidates — mark them unprobed
-    rather than continuing to call Google."""
+def test_fetch_short_circuits_on_verified_name_match():
+    """One-person-per-run: a verified hit WITH a matching display name
+    answers the question. Don't burn the daily probe budget on additional
+    candidates — mark them unprobed rather than continuing to call Google."""
     verified_body = _people_response({
         "personId": "424242",
         "metadata": {"bestDisplayName": {"displayName": "Real Person"}},
@@ -359,8 +359,6 @@ def test_fetch_short_circuits_on_first_verified_hit():
 
     def http(url, params, headers):
         http_calls.append(dict(params).get("id"))
-        # First candidate gets the verified response; others would get
-        # not_found if we ever called them — but we shouldn't.
         if dict(params).get("id") == "first@google.com":
             return (200, verified_body)
         return (200, not_found_body)
@@ -371,7 +369,8 @@ def test_fetch_short_circuits_on_first_verified_hit():
         EmailCandidate(address="third@google.com"),
     ]
     result = ga.fetch_google_account(
-        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+        cands, cookie_loader=make_cookies(), http_get=http,
+        target_name="Real Person", now=NOW,
     )
     assert result.status == "ok"
     assert http_calls == ["first@google.com"]
@@ -380,6 +379,75 @@ def test_fetch_short_circuits_on_first_verified_hit():
     # Subsequent candidates abstained, not negated — scorer needs to know
     # we didn't actually confirm they're absent.
     assert cands[1].account_exists == "unprobed"
+    assert cands[2].account_exists == "unprobed"
+
+
+def test_fetch_short_circuits_when_no_target_name(monkeypatch):
+    """Legacy behavior: when caller didn't pass target_name, any verified
+    short-circuits. Preserved for callers (tests, future use) that don't
+    have a target name to check against."""
+    verified_body = _people_response({
+        "personId": "1", "metadata": {"bestDisplayName": {"displayName": "X"}},
+    })
+    http_calls = []
+    def http(url, params, headers):
+        http_calls.append(dict(params).get("id"))
+        return (200, verified_body)
+
+    cands = [
+        EmailCandidate(address="a@google.com"),
+        EmailCandidate(address="b@google.com"),
+    ]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+    )
+    assert http_calls == ["a@google.com"]
+    assert cands[0].account_exists == "verified"
+    assert cands[1].account_exists == "unprobed"
+
+
+def test_fetch_does_not_short_circuit_on_verified_wrong_name():
+    """The reliability fix: a verified hit on a different person (common
+    on multi-user Workspace tenants where pattern guesses can hit real
+    accounts belonging to someone else with the same first name) does NOT
+    short-circuit. Continue probing until either name match or all done."""
+    wrong_person_body = _people_response({
+        "personId": "1",
+        "metadata": {"bestDisplayName": {"displayName": "Other Pete"}},
+    })
+    right_person_body = _people_response({
+        "personId": "2",
+        "metadata": {"bestDisplayName": {"displayName": "Peter Steinberger"}},
+    })
+    not_found_body = b'{"people": {}}'
+    http_calls = []
+
+    def http(url, params, headers):
+        addr = dict(params).get("id")
+        http_calls.append(addr)
+        if addr == "pete@bigco.com":
+            return (200, wrong_person_body)
+        if addr == "peter.s@bigco.com":
+            return (200, right_person_body)
+        return (200, not_found_body)
+
+    cands = [
+        EmailCandidate(address="pete@bigco.com"),
+        EmailCandidate(address="peter.s@bigco.com"),
+        EmailCandidate(address="ps@bigco.com"),
+    ]
+    result = ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http,
+        target_domains={"bigco.com"},
+        target_name="Peter Steinberger", now=NOW,
+    )
+    assert result.status == "ok"
+    # First two probed; third is short-circuited because second matched.
+    assert http_calls == ["pete@bigco.com", "peter.s@bigco.com"]
+    assert cands[0].account_exists == "verified"
+    assert cands[0].account_display_name == "Other Pete"
+    assert cands[1].account_exists == "verified"
+    assert cands[1].account_display_name == "Peter Steinberger"
     assert cands[2].account_exists == "unprobed"
 
 

@@ -93,7 +93,7 @@ For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
 - User asked you to be quick / not auth into Google.
 - You're running snoop in a batch / loop (the path is one-target-per-invocation; bulk use risks Google flagging the account).
 
-The skill enforces one-target-per-invocation and a daily probe budget (default 30) as defense-in-depth against accidentally burning your own Google account.
+The skill enforces one-target-per-invocation and a daily probe budget (default 30) as defense-in-depth against accidentally burning your own Google account. On Workspace tenants with many users, the probe short-circuits only when a verified hit's display name matches the target — a verified hit on a different person (e.g. a pattern guess that happens to be someone else's real account) does NOT end the probe; remaining candidates are still tried.
 
 **Non-Google Workspace domains**: pass them via `--google-workspace-domain` repeatable. v1 doesn't auto-detect MX; if you know `acme.com` is on Workspace, declare it. Defer MX-based auto-detection to a later iteration.
 

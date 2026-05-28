@@ -52,6 +52,7 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterable
 
+from .normalize import name_match
 from .schema import EmailCandidate, ResolverResult, Source
 
 logger = logging.getLogger(__name__)
@@ -336,6 +337,7 @@ def fetch_google_account(
     cookie_loader: CookieLoader | None = None,
     http_get: HttpGet | None = None,
     target_domains: Iterable[str] | None = None,
+    target_name: str | None = None,
     budget: Any | None = None,  # lib.verify_smtp.ProbeBudget; optional
     now: datetime | None = None,
 ) -> ResolverResult:
@@ -353,6 +355,13 @@ def fetch_google_account(
             set. Default: only literal "google.com". Pass a broader set for
             Workspace tenants whose MX is Google-hosted (the caller knows
             this via lib.normalize / MX lookup; v1 doesn't auto-detect).
+        target_name: Target's name for verified-hit name-match check. When
+            provided, the short-circuit only triggers on verified + display
+            name match — a verified hit on a different person (common on
+            multi-user Workspace tenants where pattern guesses can hit real
+            accounts belonging to someone else with the same first name)
+            does NOT short-circuit. When None, any verified hit short-circuits
+            (legacy behavior; only safe on literal google.com one-target runs).
         budget: ProbeBudget for defense-in-depth rate limiting.
         now: For deterministic tests.
 
@@ -459,9 +468,20 @@ def fetch_google_account(
 
         if result["profile_visible"]:
             c.account_exists = "verified"
-            verified_seen = True
             if result["display_name"]:
                 c.account_display_name = result["display_name"]
+            # Short-circuit ONLY when we can confirm this is the target
+            # (name match) OR the caller didn't pass a target name and so
+            # opted into the legacy "any verified short-circuits" behavior.
+            # On multi-user Workspace tenants a pattern guess can hit a real
+            # account belonging to someone else; short-circuiting there would
+            # leave the actual target's address unprobed.
+            if target_name is None:
+                verified_seen = True
+            elif result["display_name"] and name_match(
+                result["display_name"], target_name
+            ):
+                verified_seen = True
             detail_parts = ["Google account confirmed"]
             if result["gaia_id"]:
                 detail_parts.append(f"Gaia {result['gaia_id'][:8]}…")

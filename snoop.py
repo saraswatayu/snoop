@@ -333,7 +333,14 @@ def _google_account_candidates(
 ) -> list[EmailCandidate]:
     """Filter candidates to those on Google-hosted domains worth probing.
     Skip candidates that already have an account_exists verdict (don't
-    re-probe within one invocation)."""
+    re-probe within one invocation).
+
+    Sorted by belongs_to_person descending so observation-backed candidates
+    probe first. On multi-user Workspace tenants this matters: a pattern
+    guess that happens to hit someone else's real account could short-
+    circuit further probing of higher-confidence candidates that haven't
+    been tried yet. None → -1 sentinel sorts unscored candidates to the end.
+    """
     domains = _google_target_domains(workspace_domains)
     out: list[EmailCandidate] = []
     for c in candidates:
@@ -344,6 +351,10 @@ def _google_account_candidates(
         domain = c.address.rsplit("@", 1)[1].lower()
         if domain in domains:
             out.append(c)
+    out.sort(key=lambda c: (
+        -(c.belongs_to_person if c.belongs_to_person is not None else -1.0),
+        c.address,
+    ))
     return out
 
 
@@ -464,6 +475,7 @@ def main(argv: list[str] | None = None) -> int:
             google_result = fetch_google_account(
                 google_targets,
                 target_domains=_google_target_domains(args.google_workspace_domain),
+                target_name=person.name,
                 budget=ProbeBudget(
                     per_domain=30,
                     state_path=Path.home() / ".snoop" / "google-budget.json",
