@@ -396,6 +396,11 @@ def _format_json_report(person: Person, candidates: list[EmailCandidate]) -> str
                 {"name": person.employer.name, "domains": person.employer.domains}
                 if person.employer else None
             ),
+            "former_employers": [
+                {"name": fe.name, "domains": fe.domains,
+                 "since": fe.since, "until": fe.until}
+                for fe in person.former_employers
+            ],
             "ambiguity": person.ambiguity,
             "bound_anchors": [list(a) for a in person.bound_anchors],
             "notes": person.notes,

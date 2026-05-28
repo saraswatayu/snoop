@@ -407,6 +407,29 @@ def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
     assert parsed["candidates"] == []
 
 
+def test_format_json_report_includes_former_employers():
+    """Pipelining --json should surface the former_employers list — the
+    scorer uses employer_former_match to cap former-employer addresses
+    at low confidence; downstream consumers should be able to see the
+    actual list and not just the boolean."""
+    import json as _json
+    from lib.schema import Employer
+    p = Person(
+        name="Jane",
+        ambiguity="insufficient_identity_evidence",
+        former_employers=[
+            Employer(name="PSPDFKit", domains=["pspdfkit.com"], until="2023"),
+        ],
+    )
+    raw = snoop._format_json_report(p, [])
+    parsed = _json.loads(raw)
+    fe = parsed["person"]["former_employers"]
+    assert len(fe) == 1
+    assert fe[0]["name"] == "PSPDFKit"
+    assert fe[0]["domains"] == ["pspdfkit.com"]
+    assert fe[0]["until"] == "2023"
+
+
 def test_format_json_report_includes_account_and_former_employer_fields():
     """The JSON report must surface account_exists, account_display_name,
     and employer_former_match — pipelining `snoop --json` is the supported
