@@ -138,6 +138,53 @@ def test_cluster_or_merges_domain_level_flags():
     assert clustered[0].employer_match is True
 
 
+def test_cluster_preserves_verification_fields_when_present():
+    """If one input has a verdict on smtp_verdict / account_exists /
+    mx_provider / account_display_name and another doesn't, the merged
+    candidate keeps the verdict. Defends against silent drop of pre-probed
+    inputs from cached or manual_known resolvers."""
+    probed = EmailCandidate(
+        address="pete@openai.com",
+        sources=[src("manual_known")],
+        smtp_verdict="verified",
+        account_exists="verified",
+        mx_provider="google",
+        account_display_name="Pete Steinberger",
+    )
+    blank = EmailCandidate(
+        address="pete@openai.com", sources=[src("pattern")],
+    )
+    # Both orderings: probed first, then blank-second shouldn't downgrade.
+    clustered = snoop.cluster_candidates([
+        ResolverResult(resolver="A", candidates=[probed], status="ok"),
+        ResolverResult(resolver="B", candidates=[blank], status="ok"),
+    ])
+    merged = clustered[0]
+    assert merged.smtp_verdict == "verified"
+    assert merged.account_exists == "verified"
+    assert merged.mx_provider == "google"
+    assert merged.account_display_name == "Pete Steinberger"
+
+    # Reverse order: blank first, probed second should upgrade.
+    clustered = snoop.cluster_candidates([
+        ResolverResult(resolver="A", candidates=[
+            EmailCandidate(address="pete@openai.com", sources=[src("pattern")])
+        ], status="ok"),
+        ResolverResult(resolver="B", candidates=[
+            EmailCandidate(
+                address="pete@openai.com", sources=[src("manual_known")],
+                smtp_verdict="verified", account_exists="verified",
+                mx_provider="google", account_display_name="Pete Steinberger",
+            )
+        ], status="ok"),
+    ])
+    merged = clustered[0]
+    assert merged.smtp_verdict == "verified"
+    assert merged.account_exists == "verified"
+    assert merged.mx_provider == "google"
+    assert merged.account_display_name == "Pete Steinberger"
+
+
 def test_cluster_preserves_distinct_addresses():
     r = ResolverResult(
         resolver="gh_profile",

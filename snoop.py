@@ -297,6 +297,20 @@ def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
                 merged.is_personal_provider = (
                     merged.is_personal_provider or c.is_personal_provider
                 )
+                # Verification-layer fields: today no pre-cluster resolver sets
+                # these, but defense-in-depth — if a future cached/manual_known
+                # resolver returns candidates with prior verdicts, don't silently
+                # drop them. First-seen-non-default wins; explicit verdicts are
+                # never overwritten by "unprobed".
+                if merged.smtp_verdict == "unprobed" and c.smtp_verdict != "unprobed":
+                    merged.smtp_verdict = c.smtp_verdict
+                if merged.account_exists == "unprobed" and c.account_exists != "unprobed":
+                    merged.account_exists = c.account_exists
+                if merged.mx_provider is None and c.mx_provider is not None:
+                    merged.mx_provider = c.mx_provider
+                if (merged.account_display_name is None
+                        and c.account_display_name is not None):
+                    merged.account_display_name = c.account_display_name
     return list(by_addr.values())
 
 
