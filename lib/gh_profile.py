@@ -32,8 +32,10 @@ import subprocess
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Callable
 
+from . import _gh_api
+from ._gh_api import GhCaller
 from .normalize import normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
@@ -57,7 +59,6 @@ _BAD_EMAIL_DOMAINS = (
 _BAD_LOCALPARTS = ("noreply", "no-reply", "do-not-reply")
 
 # Caller signatures match git_emails.py for consistency.
-GhCaller = Callable[[str], Any]
 HttpGet = Callable[[str], str | None]   # url -> body or None on 404
 
 
@@ -76,41 +77,10 @@ def _is_extractable(email: str) -> bool:
     return True
 
 
-def _gh_via_cli(path: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Any:
-    result = subprocess.run(
-        ["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-        capture_output=True, text=True, timeout=timeout, check=False,
-    )
-    if result.returncode != 0:
-        raise subprocess.SubprocessError(
-            f"gh api {path} exited {result.returncode}: {result.stderr.strip()[:200]}"
-        )
-    if not result.stdout.strip():
-        return {}
-    return json.loads(result.stdout)
-
-
-def _gh_via_http(path: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Any:
-    url = path if path.startswith("http") else f"https://api.github.com{path}"
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "snoop-skill", "Accept": "application/vnd.github+json"}
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
-
-
+# Local re-export so existing tests that monkey-patch
+# `gh_profile._default_gh_caller` keep working.
 def _default_gh_caller() -> GhCaller | None:
-    from shutil import which
-    if which("gh") is not None:
-        try:
-            r = subprocess.run(
-                ["gh", "auth", "status"], capture_output=True, timeout=2, check=False
-            )
-            if r.returncode == 0:
-                return _gh_via_cli
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-    return _gh_via_http
+    return _gh_api.default_gh_caller()
 
 
 def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str | None:

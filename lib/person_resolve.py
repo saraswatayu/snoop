@@ -41,9 +41,10 @@ import json
 import subprocess
 import urllib.error
 import urllib.parse
-import urllib.request
-from typing import Any, Callable
+from typing import Any
 
+from . import _gh_api
+from ._gh_api import GhCaller
 from .normalize import (
     fold_ascii,
     name_match,
@@ -53,51 +54,28 @@ from .normalize import (
 from .schema import Employer, Person
 
 
-_DEFAULT_TIMEOUT_SEC = 6.0
+def _gh_404_to_none(caller: GhCaller) -> GhCaller:
+    """Wrap a caller so a 404 HTTPError comes back as None — the resolver
+    uses None as 'handle does not exist on GitHub' to emit a precise note
+    ('handle does not exist; downstream resolvers will skip it') instead of
+    the generic 'could not validate' message.
 
-GhCaller = Callable[[str], Any]
-
-
-def _gh_via_cli(path: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Any:
-    result = subprocess.run(
-        ["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-        capture_output=True, text=True, timeout=timeout, check=False,
-    )
-    if result.returncode != 0:
-        raise subprocess.SubprocessError(
-            f"gh api {path} exited {result.returncode}: {result.stderr.strip()[:200]}"
-        )
-    if not result.stdout.strip():
-        return {}
-    return json.loads(result.stdout)
-
-
-def _gh_via_http(path: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Any:
-    url = path if path.startswith("http") else f"https://api.github.com{path}"
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "snoop-skill", "Accept": "application/vnd.github+json"}
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        if e.code == 404:
-            return None  # handle does not exist
-        raise
+    This is a person_resolve-specific contract. Other resolvers treat 404 as
+    a generic error since a missing user there means 'no data,' not 'plan
+    was wrong about the handle.'
+    """
+    def wrapped(path: str) -> Any:
+        try:
+            return caller(path)
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return None
+            raise
+    return wrapped
 
 
 def _default_gh_caller() -> GhCaller | None:
-    from shutil import which
-    if which("gh") is not None:
-        try:
-            r = subprocess.run(
-                ["gh", "auth", "status"], capture_output=True, timeout=2, check=False,
-            )
-            if r.returncode == 0:
-                return _gh_via_cli
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-    return _gh_via_http
+    return _gh_404_to_none(_gh_api.default_gh_caller())
 
 
 # ---- name/string comparison helpers ----------------------------------------

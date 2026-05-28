@@ -33,18 +33,16 @@ from __future__ import annotations
 import json
 import subprocess
 import urllib.error
-import urllib.request
 from datetime import datetime, timedelta, timezone
-from shutil import which
-from typing import Any, Callable
+from typing import Any
 
+from . import _gh_api
+from ._gh_api import GhCaller
 from .normalize import normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
-_API_BASE = "https://api.github.com"
 _DEFAULT_LOOKBACK_DAYS = 90
 _DEFAULT_REPO_LIMIT = 30  # per-repo pass cost; cap to keep latency bounded
-_DEFAULT_TIMEOUT_SEC = 8.0
 
 _NOISE_DOMAINS = (
     "users.noreply.github.com",
@@ -60,9 +58,10 @@ _NOISE_LOCALPART_PREFIXES = ("noreply", "no-reply")
 _BOT_MARKERS = ("[bot]", "dependabot", "github-actions", "renovate", "snyk-bot")
 
 
-# A caller is `(path: str) -> parsed_json`. Tests inject a stub; production
-# uses _gh_via_cli or _gh_via_http.
-GhCaller = Callable[[str], Any]
+# Local re-export so existing tests that monkey-patch
+# `git_emails._default_gh_caller` keep working.
+def _default_gh_caller() -> GhCaller | None:
+    return _gh_api.default_gh_caller()
 
 
 def _is_noise_email(email: str) -> bool:
@@ -90,65 +89,6 @@ def _parse_dt(s: str | None) -> datetime | None:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except (ValueError, TypeError):
         return None
-
-
-def _gh_via_cli(path: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Any:
-    """Invoke `gh api <path>`. Returns parsed JSON.
-
-    Raises subprocess.SubprocessError on non-zero exit or process failure;
-    json.JSONDecodeError on parse failure.
-    """
-    result = subprocess.run(
-        ["gh", "api", "-H", "Accept: application/vnd.github+json", path],
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
-    if result.returncode != 0:
-        raise subprocess.SubprocessError(
-            f"gh api {path} exited {result.returncode}: {result.stderr.strip()[:200]}"
-        )
-    if not result.stdout.strip():
-        return []
-    return json.loads(result.stdout)
-
-
-def _gh_via_http(path: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> Any:
-    """Anonymous HTTP fallback. 60 req/hr ceiling."""
-    url = path if path.startswith("http") else f"{_API_BASE}{path}"
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "snoop-skill",
-            "Accept": "application/vnd.github+json",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
-
-
-def _default_gh_caller() -> GhCaller | None:
-    """Return the best available API caller, or None if both paths fail.
-
-    Tries gh CLI first (auth check via `gh auth status`), falls back to
-    anonymous HTTP. Returns None only if there's literally no way to call
-    the GitHub API — which is rare on a developer machine.
-    """
-    if which("gh") is not None:
-        try:
-            result = subprocess.run(
-                ["gh", "auth", "status"],
-                capture_output=True,
-                timeout=2,
-                check=False,
-            )
-            if result.returncode == 0:
-                return _gh_via_cli
-        except (subprocess.SubprocessError, FileNotFoundError):
-            pass
-    # gh either missing or not authed; fall back to anonymous HTTP.
-    return _gh_via_http
 
 
 def _harvest_from_events(
