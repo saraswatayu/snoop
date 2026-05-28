@@ -81,21 +81,39 @@ def _default_gh_caller() -> GhCaller | None:
 # ---- name/string comparison helpers ----------------------------------------
 
 
+_ORG_SUFFIX_TOKENS = frozenset({
+    "inc", "llc", "ltd", "corp", "co", "company",
+    "gmbh", "ag", "sa", "bv", "kg", "ltda", "srl", "spa",
+    "lp", "llp", "plc",
+})
+
+
 def _employer_match(observed_company: str | None, target_employer_name: str) -> bool:
     """Tolerant company-name match. Companies often have variants
-    ('OpenAI' vs '@openai' vs 'OpenAI, Inc.'). Fold both, then check
-    substring containment in either direction."""
+    ('OpenAI' vs '@openai' vs 'OpenAI, Inc.'). Compare as token sets —
+    one must be a subset of the other after stripping common org suffixes.
+
+    Token-set was chosen over the earlier substring containment because
+    `tgt in obs or obs in tgt` false-positives in two real ways:
+      - plan='Apple' vs observed='Applesauce' → 'apple' in 'applesauce' = True
+      - plan='A' vs observed='OpenAI'         → 'a' in 'openai' = True
+    Both would falsely bind the github_employer_match anchor, which (combined
+    with one other correct anchor) flips ambiguity to single_plausible_match
+    and shows the user a misleading "identity confirmed" framing.
+    """
     if not observed_company or not target_employer_name:
         return False
-    obs = fold_ascii(observed_company).lstrip("@").strip().rstrip(",").rstrip(".")
-    tgt = fold_ascii(target_employer_name).lstrip("@").strip().rstrip(",").rstrip(".")
-    if not obs or not tgt:
+    def _tokens(s: str) -> set[str]:
+        folded = fold_ascii(s).lstrip("@")
+        # Split on whitespace AND common separators
+        raw = [t.strip(",.()[]{}\"'") for t in folded.split()]
+        out = {t for t in raw if t and t not in _ORG_SUFFIX_TOKENS}
+        return out
+    obs_tokens = _tokens(observed_company)
+    tgt_tokens = _tokens(target_employer_name)
+    if not obs_tokens or not tgt_tokens:
         return False
-    # Strip common suffixes
-    for suffix in (" inc", " llc", " ltd", " corp", " gmbh", " co"):
-        if obs.endswith(suffix): obs = obs[:-len(suffix)].rstrip(",").rstrip(".")
-        if tgt.endswith(suffix): tgt = tgt[:-len(suffix)].rstrip(",").rstrip(".")
-    return obs in tgt or tgt in obs
+    return obs_tokens.issubset(tgt_tokens) or tgt_tokens.issubset(obs_tokens)
 
 
 def _blog_matches_personal_domain(blog: str | None, domains: list[str]) -> str | None:

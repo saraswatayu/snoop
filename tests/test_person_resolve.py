@@ -277,6 +277,29 @@ def test_resolve_keeps_former_employers():
     assert p.former_employers[0].until == "2023"
 
 
+def test_employer_match_rejects_partial_word_substring():
+    """Defense against substring false-positives. plan='Apple' vs profile
+    company='Applesauce Corp' previously bound github_employer_match by
+    substring containment ('apple' in 'applesauce' = True). With one other
+    correct anchor, that flipped ambiguity to single_plausible_match
+    incorrectly."""
+    from lib.person_resolve import _employer_match
+    assert not _employer_match("Applesauce Corp", "Apple")
+    assert not _employer_match("Apple", "Applesauce Corp")
+    # Real positives still work
+    assert _employer_match("Apple Inc, Cupertino", "Apple")
+    assert _employer_match("@OpenAI", "OpenAI")
+    assert _employer_match("OpenAI, Inc.", "OpenAI")
+
+
+def test_employer_match_rejects_one_letter_observation():
+    """A single-letter observed company shouldn't false-match a longer
+    target. 'A' in 'OpenAI' substring-matched previously."""
+    from lib.person_resolve import _employer_match
+    assert not _employer_match("A", "OpenAI")
+    assert not _employer_match("OpenAI", "A")
+
+
 def test_resolve_passes_channel_hints_through():
     plan = {"channel_hints": {"x_dms_open": True, "prefers": "x"}}
     p = resolve_person("X", plan=plan, gh_caller=make_gh({}))
