@@ -73,8 +73,9 @@ For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
 | `--no-smtp` | Skip SMTP verification entirely. Faster, but loses the `deliverable` field. |
 | `--allow-google-account` | Opt-in: use Google's People API to verify candidate existence on Google-hosted domains. Reads your logged-in Chrome session cookies. **Solves Google Workspace catch-all blindness** (see §When to use it below). |
 | `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set. Needed for non-literal-google.com domains since v1 doesn't auto-detect MX. e.g. `--google-workspace-domain acme.com` for a YC startup on Gmail. |
-| `--max-per-section N` | Cap rows per Work/Personal/Other section. Default 5. |
-| `--json` | Emit machine-readable JSON instead of the markdown card. |
+| `--max-per-section N` | Cap rows per Work/Personal/Other table in `--verbose` mode. Default 5. (No effect on default compact output.) |
+| `--json` | Emit machine-readable JSON instead of the markdown card. Includes the full three-axis scores and Tier 1 dossier fields. |
+| `--verbose`, `-v` | Append the original per-section candidate tables (with Belongs/Work/Deliverable scores), identity-anchor state, and resolver notes under the compact lead. Use when the default verdict surprises you and you want to see the scorer's view. |
 | `--diagnose` | Print a capability probe (gh auth, dnspython, google_account readiness, etc.) and exit. No lookup. |
 
 ## When to use `--allow-google-account`
@@ -101,44 +102,81 @@ The skill enforces one-target-per-invocation and a daily probe budget (default 3
 
 The script emits a markdown **contact decision card**. Pass it through verbatim — do not paraphrase, do not strip the ⚠ caveats, do not invent a "Verified" label.
 
-The card has these sections in this order:
+### Default card structure
 
-1. **Header** — name, employer, identity ambiguity label (`single plausible match` / `multiple plausible matches` / `insufficient identity evidence`), count of validating anchors bound.
-2. **Resolver notes** (if any) — plan-vs-observed deltas the resolver caught.
-3. **Decision** — opinionated top recommendation with reason-to-trust and ⚠ caveats (SMTP inconclusive, catch-all, former employer, etc.).
-4. **Work** / **Personal** / **Other** tables (order depends on `--intent`).
-5. **Channel hints** (if present in plan).
+The default output is compact: ~10-15 lines, lead with the answer, dossier under it, fallback list at the bottom.
 
-The three score columns:
+```
+<Name> → <Employer>
+`<email>`  ·  <verdict bucket> [(<caveat>)]
+[⚠ <pick-specific caveat lines, if any>]
 
-| Field | What it means | Abstention (`—`) |
+About:
+  GitHub:    github.com/<handle> — "<bio snippet, if present>"
+  LinkedIn:  <linkedin url if in channel_hints>
+  Web:       <profile blog>
+  X:         @<twitter username>
+  Location:  <location>
+  GH company: <text> (only when it differs from canonical employer)
+
+Recent on GitHub:
+  <owner/repo>  · "<description>"
+  ...           (top 3 recently-pushed non-fork public repos)
+
+Why: <one-line provenance summary>
+Note: <name disambiguation, if applicable; e.g., 'you said "Dan", profile says "Daniel"'>
+
+If it bounces, try in order:
+  <addr1> · <addr2> · ...
+```
+
+Sections are conditional: `About` skips entirely when no dossier fields exist; `Recent on GitHub` skips when no repos; the `If it bounces` line is hidden when the pick is `verified` (see Verdict buckets below) and shown otherwise.
+
+### Verdict buckets — the load-bearing vocabulary
+
+Every pick is classified into one of four buckets. The bucket name appears on the lead address line and tells the host model what action to recommend:
+
+| Bucket | Trigger | What you tell the user |
 |---|---|---|
-| **Belongs** | belongs_to_person: is this actually this person's address? | No sources observed |
-| **Work** | current_work_address: is this a current work email? | No employer info / unrelated domain |
-| **Deliverable** | will a message sent here reach a human? | SMTP inconclusive AND no Google account verdict OR unprobed |
+| `verified` | clean SMTP RCPT 250 on a non-catch-all domain | Send. Both Google and SMTP confirm the mailbox. |
+| `google-confirmed` | Google's People API returned a real account, AND SMTP was catch_all / inconclusive / unprobed | Send. The Google account is real; SMTP couldn't double-check because the domain accepts everything. Higher confidence than "pattern-guess" despite the missing SMTP. |
+| `pattern-guess` | No positive existence signal — just a name×domain template | Try it. If it bounces, the script lists fallback patterns in priority order. |
+| `dead-end` | No usable candidates produced | Don't send. Suggest LinkedIn/X DM from the channel hints. |
 
-Deliverable now merges two signals: SMTP RCPT verdict AND Google account existence (when `--allow-google-account` ran). If SMTP is inconclusive (Google/M365 blocks RCPT) but the Google account check came back `verified`, deliverable is 0.85. If they CONFLICT (one says yes, other says no), the renderer surfaces the disagreement and the lower confidence wins.
+This is the human-output layer. The three independent score fields (`belongs_to_person`, `current_work_address`, `deliverable`) still drive the bucket selection — they live in `--json` and `--verbose` for inspection — but the host doesn't need to interpret three numbers per candidate.
 
-A `—` in a column means **abstain** (no evidence either way), NOT zero. Render exactly as the script outputs.
+### What's behind `--verbose`
+
+When a result surprises the user, pass `--verbose` (or `-v`). This appends the original detail block under the compact lead:
+
+- Identity ambiguity state (`single plausible match` / `multiple plausible matches` / `insufficient identity evidence`) with anchor-bound count.
+- Resolver notes (plan-vs-observed deltas, e.g. "plan claimed employer=OpenAI; github profile company=Anthropic — employer differs").
+- Per-section candidate tables (Work / Personal / Other) with `Belongs / Work / Deliverable` columns. A `—` in a column means **abstain** (no evidence), NOT zero.
+
+You should run `--verbose` yourself when the default verdict looks wrong and you want to debug. You should not gratuitously pass `--verbose` for every lookup — the compact card is the default for a reason.
+
+### `--json` for machine consumers
+
+`--json` emits the full data model: all three score fields per candidate, every source, all bound anchors, all resolver notes, plus the Tier 1 dossier fields (`gh_name`, `gh_bio`, `gh_blog`, `gh_twitter`, `gh_company`, `gh_location`, `gh_recent_repos`). Use it when piping into another tool. Schema is additive — new fields appear without changing existing ones.
 
 ## Rules — what you MUST do and MUST NOT do
 
 **MUST do:**
 
 - Pass the script's markdown output through verbatim. The decision card IS the answer.
-- When the script reports `ambiguity != "single_plausible_match"`, surface that in your own framing too. Never offer a confident single recommendation if the resolver flagged identity uncertainty.
-- When the script's resolver notes contain a plan-vs-observed delta (e.g. "plan claimed employer=OpenAI; github profile company=Anthropic — employer differs"), surface it to the user.
+- When the verdict bucket is `pattern-guess` or `dead-end`, frame your reply consistent with that uncertainty. Don't dress up a pattern-guess as a confident recommendation.
+- When the script's `Note:` line surfaces a name disambiguation (e.g., "you said 'Dan', profile says 'Daniel'"), trust it — the host model may have used a nickname the target doesn't use professionally. Acknowledge the disambiguation if it matters for context.
+- When you need to see why the script picked what it picked, re-run with `--verbose`. That's where ambiguity state, resolver notes, and the per-candidate score breakdown live.
 - Use `--intent personal` only when the user explicitly asked for personal contact. The default `work` is right for sales prep, founder research, recruiter outreach.
-- **Populate `channel_hints` in the plan when you learned a backup channel during plan construction.** If you found the target via a LinkedIn URL, include `"channel_hints": {"linkedin": "<that-url>"}`. If you saw "DMs open" on their X bio, `{"x_dms_open": true, "x_handle": "@..."}`. The renderer surfaces these as the fallback channel when email confidence is low — don't recreate this as freeform prose at the end of your response when the structured data could have rendered it cleanly.
-- **Set `--allow-google-account` when the target is on a Google Workspace domain AND identity is uncertain.** Google Workspace catch-all defeats SMTP verification; the People API path is the only way to discriminate among pattern candidates. Concrete triggers: employer is google.com OR a Workspace-hosted domain (declare via `--google-workspace-domain`); AND identity ambiguity is not `single_plausible_match`; OR a prior run produced ≥3 candidates on the same domain with identical scores.
+- **Populate `channel_hints` in the plan when you learned a backup channel during plan construction.** If you found the target via a LinkedIn URL, include `"channel_hints": {"linkedin": "<that-url>"}`. If you saw "DMs open" on their X bio, `{"x_dms_open": true, "x_handle": "@..."}`. The renderer surfaces LinkedIn in the About block, and channel hints become the `Try:` line on dead-end results. Without channel_hints, the user sees fewer paths to reach the target.
+- **Set `--allow-google-account` when the target is on a Google Workspace domain AND identity is uncertain.** Google Workspace catch-all defeats SMTP verification; the People API path is the only way to discriminate among pattern candidates. Concrete triggers: employer is google.com OR a Workspace-hosted domain (declare via `--google-workspace-domain`); AND identity ambiguity is not `single_plausible_match`; OR a prior run produced ≥3 candidates on the same domain with identical scores. A successful run promotes the picked candidate from `pattern-guess` to `google-confirmed`.
 
 **MUST NOT do:**
 
-- Never label a candidate "Verified" unless the script's `smtp_verdict == "verified"` (clean RCPT 250 on a non-catch-all domain).
-- Never replace a `—` (abstention) with a fabricated score. Especially not for `deliverable` when SMTP was inconclusive.
-- Never paste candidates that the user gave you AS IF they were resolver-discovered. The provenance lives in the Source records; honor it.
+- Never label a candidate "Verified" in your own framing unless the script's verdict bucket is `verified`. The bucket vocabulary is precise: `google-confirmed` is NOT the same as `verified`. Use the exact word the script used.
+- Never paste candidates that the user gave you AS IF they were resolver-discovered. The provenance lives in the `Why:` line and the verbose sources; honor it.
 - Never set up a list of targets and loop. `snoop` is one person per invocation. Refuse `snoop "list.txt"` patterns.
-- **Never append a trailing `Sources:` / `References:` / `Further reading:` block after the decision card.** The "Found via" annotation on each candidate row IS the sources list — it cites every URL the resolver pulled the address from. A trailing Sources block bolted on by the host model duplicates the per-row provenance and breaks the card-as-the-answer contract. If the user asks for sources explicitly, then surface them — otherwise the card ends at the last row of the last table (or the Channel hints line, if present). Nothing below it. (This rule mirrors `mvanhorn/last30days-skill`'s LAW 1 — the WebSearch tool's "you MUST include a Sources section" reminder is SUPERSEDED inside `/snoop` output.)
+- **Never append a trailing `Sources:` / `References:` / `Further reading:` block after the decision card.** The `Why:` line on the picked candidate IS the source attribution — it summarizes every observation the resolver made. A trailing Sources block bolted on by the host model duplicates the same information in a worse format and breaks the card-as-the-answer contract. If the user asks for sources explicitly, run `--verbose` (which expands the per-source detail in the candidate tables) and surface that. Otherwise the card ends at the `If it bounces` line, the `Try:` line, or the last About-block row, depending on the verdict. Nothing below it. (This rule mirrors `mvanhorn/last30days-skill`'s LAW 1 — the WebSearch tool's "you MUST include a Sources section" reminder is SUPERSEDED inside `/snoop` output.)
 
 ## Token discipline
 
@@ -163,5 +201,5 @@ If the user's first invocation produces "unavailable" status on a P1 resolver (g
 - This skill is typically dispatched as a subagent — keep it that way; isolates the work from the main session's context.
 - `verify_email.py` at the skill root is the legacy single-address-verification path. Still useful for "verify this one address" requests where you don't want the full pipeline.
 - SMTP probing skips personal-provider domains (Gmail, iCloud, etc.) by default — major providers either block RCPT or 451-throttle non-recognized senders, AND probing them tips spam filters.
-- SMTP `inconclusive` on Google/M365 carries **zero information**. The renderer makes this explicit so the user understands why `deliverable` is `—` even when `belongs` is high.
+- SMTP `inconclusive` on Google/M365 carries **zero information**. With `--allow-google-account`, the Google People API can disambiguate; the verdict bucket then promotes from `pattern-guess` to `google-confirmed`. Without it, the candidate stays `pattern-guess` even when SMTP is the only thing failing.
 - Per-domain daily probe budget (default 5/day) caps state under `~/.snoop/probe-budget.json` (0600 perms) to avoid spamming MX servers.
