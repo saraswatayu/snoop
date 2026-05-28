@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lib import diagnose, render
+from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
@@ -51,6 +52,85 @@ from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verif
 
 
 _PER_RESOLVER_TIMEOUT_SEC = 5.0
+
+
+# ---- capability warnings (top-of-card error surface) ------------------------
+
+
+def _capability_warnings(
+    capabilities: list[Capability],
+    *,
+    allow_google_account: bool,
+) -> list[str]:
+    """Translate diagnose results into one-line, user-actionable warnings
+    surfaced at the top of the compact card.
+
+    Each warning follows the three-tier model: what's broken, why it
+    matters for this lookup, how to fix it. Only surfaces degradations
+    that materially affect the result — the user doesn't need to see
+    "idna package missing" on a typical lookup since stdlib idna handles
+    99% of real domains.
+
+    `allow_google_account=False` suppresses google_account warnings;
+    the user opted out of that path, so a missing cookie isn't actionable.
+    """
+    by_name = {c.name: c for c in capabilities}
+    out: list[str] = []
+
+    gh = by_name.get("gh_cli")
+    if gh and gh.status == "missing":
+        out.append(
+            "gh CLI not installed — install GitHub CLI for full rate "
+            "limit (5000 req/hr); falling back to 60 req/hr anonymous"
+        )
+    elif gh and gh.status == "degraded":
+        out.append(
+            "gh CLI not authenticated — run `gh auth login` to unlock "
+            "5000 req/hr; falling back to 60 req/hr anonymous"
+        )
+
+    dns = by_name.get("dnspython")
+    if dns and dns.status != "ok":
+        out.append(
+            "dnspython not installed — `pip install --user dnspython` "
+            "to enable SMTP verification (currently disabled)"
+        )
+
+    if allow_google_account:
+        google = by_name.get("google_account")
+        if google and google.status == "missing":
+            out.append(
+                "--allow-google-account requested but no Google cookies "
+                "found — sign into Google in Chrome and retry"
+            )
+        elif google and google.status == "degraded":
+            out.append(
+                "--allow-google-account requested but Google session is "
+                "partial — sign out and back into Google to refresh"
+            )
+
+    state = by_name.get("snoop_state_dir")
+    if state and state.status == "missing":
+        out.append(
+            f"~/.snoop unwritable ({state.detail}) — daily probe budget "
+            f"will not persist between invocations"
+        )
+
+    return out
+
+
+def _fast_capability_probe(*, allow_google_account: bool) -> list[Capability]:
+    """Run only the probes that feed _capability_warnings. Skips the
+    anon_github HTTP fetch (saves ~300ms) and idna/whois checks (not
+    in the warning surface). Called once per main() invocation."""
+    caps = [
+        diagnose._probe_gh_cli(),
+        diagnose._probe_dnspython(),
+        diagnose._probe_snoop_state_dir(),
+    ]
+    if allow_google_account:
+        caps.append(diagnose._probe_google_account())
+    return caps
 
 
 # ---- CLI plumbing -----------------------------------------------------------
@@ -456,10 +536,16 @@ def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[E
     return eligible[:top_k]
 
 
-def _format_json_report(person: Person, candidates: list[EmailCandidate]) -> str:
+def _format_json_report(
+    person: Person,
+    candidates: list[EmailCandidate],
+    *,
+    warnings: list[str] | None = None,
+) -> str:
     """Machine-readable equivalent of the markdown card. Useful for
     pipelining `snoop --json` into another tool."""
     return json.dumps({
+        "warnings": warnings or [],
         "person": {
             "name": person.name,
             "name_variants": person.name_variants,
@@ -541,6 +627,17 @@ def main(argv: list[str] | None = None) -> int:
     person = resolve_person(name, plan=plan)
     manual_known = _parse_knowns(args.known)
 
+    # Capability probe runs once per invocation. Cheap (no network, no
+    # cookie reads unless --allow-google-account). Feeds the warning
+    # surface at the top of the card so degraded environments show up
+    # adjacent to the result instead of silently weakening it.
+    capabilities = _fast_capability_probe(
+        allow_google_account=args.allow_google_account,
+    )
+    warnings = _capability_warnings(
+        capabilities, allow_google_account=args.allow_google_account,
+    )
+
     # Dossier enrichment (D4-C): when the github handle is bound, fetch
     # recently-pushed repos. One extra API call, gated on the same bound-
     # handle check as the resolver fan-out so we never query GitHub for
@@ -557,10 +654,11 @@ def main(argv: list[str] | None = None) -> int:
         # Empty pipeline — still render so the user sees identity state
         # and resolver notes. Respect --json mode.
         if args.json:
-            sys.stdout.write(_format_json_report(person, []))
+            sys.stdout.write(_format_json_report(person, [], warnings=warnings))
         else:
             sys.stdout.write(render.render_decision_card(
                 person, [], intent=args.intent, verbose=args.verbose,
+                warnings=warnings,
             ))
         return 0
 
@@ -608,13 +706,14 @@ def main(argv: list[str] | None = None) -> int:
             score_all(candidates, person)
 
     if args.json:
-        sys.stdout.write(_format_json_report(person, candidates))
+        sys.stdout.write(_format_json_report(person, candidates, warnings=warnings))
     else:
         output = render.render_decision_card(
             person, candidates,
             intent=args.intent,
             max_per_section=args.max_per_section,
             verbose=args.verbose,
+            warnings=warnings,
         )
         sys.stdout.write(output)
     return 0

@@ -590,6 +590,7 @@ def render_decision_card(
     intent: Intent = "work",
     max_per_section: int = 5,
     verbose: bool = False,
+    warnings: list[str] | None = None,
 ) -> str:
     """Render the contact decision card as markdown.
 
@@ -602,6 +603,12 @@ def render_decision_card(
             applies in verbose mode (default hides per-section tables).
         verbose: When True, append the original Identity/Resolver-notes
             block and per-section candidate tables under the compact lead.
+        warnings: Optional list of one-line user-actionable warnings to
+            render at the top of the card (before the lead). Each entry
+            is rendered as `⚠ <warning>`. Use for capability degradations
+            ("gh CLI not authenticated — run gh auth login") that affect
+            the trustworthiness of the result. None or empty = no warning
+            block.
 
     Returns:
         Markdown string. Default form (verbose=False) is compact: lead
@@ -610,7 +617,14 @@ def render_decision_card(
     """
     pick, fell_back = _pick_best(candidates, intent)
     bucket = _verdict_bucket(pick)
-    lines = _render_lead(person, pick, bucket, candidates, intent, fell_back)
+
+    lines: list[str] = []
+    if warnings:
+        for w in warnings:
+            lines.append(f"⚠ {w}")
+        lines.append("")  # blank line separating warnings from the lead
+
+    lines.extend(_render_lead(person, pick, bucket, candidates, intent, fell_back))
 
     if verbose:
         lines.extend(_verbose_identity_block(person))

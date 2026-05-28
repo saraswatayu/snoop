@@ -483,6 +483,62 @@ def test_autodetect_skips_explicit_and_native_google():
     assert merged == ["already-listed.com"]
 
 
+def test_capability_warnings_surfaces_gh_unauth():
+    from lib.diagnose import Capability
+    caps = [
+        Capability(name="gh_cli", status="degraded",
+                   detail="not authed", impact="anon fallback"),
+        Capability(name="dnspython", status="ok",
+                   detail="installed", impact="SMTP ok"),
+    ]
+    warnings = snoop._capability_warnings(caps, allow_google_account=False)
+    assert any("gh auth login" in w for w in warnings)
+    assert not any("dnspython" in w for w in warnings)
+
+
+def test_capability_warnings_surfaces_dnspython_missing():
+    from lib.diagnose import Capability
+    caps = [
+        Capability(name="gh_cli", status="ok", detail="ok", impact="ok"),
+        Capability(name="dnspython", status="missing",
+                   detail="not installed", impact="no SMTP"),
+    ]
+    warnings = snoop._capability_warnings(caps, allow_google_account=False)
+    assert any("dnspython" in w and "pip install" in w for w in warnings)
+
+
+def test_capability_warnings_skips_google_when_flag_off():
+    from lib.diagnose import Capability
+    caps = [
+        Capability(name="google_account", status="missing",
+                   detail="no cookies", impact="--allow-google-account inactive"),
+    ]
+    # Without --allow-google-account, missing cookies isn't actionable.
+    warnings = snoop._capability_warnings(caps, allow_google_account=False)
+    assert not any("google" in w.lower() for w in warnings)
+
+
+def test_capability_warnings_surfaces_google_when_flag_on():
+    from lib.diagnose import Capability
+    caps = [
+        Capability(name="google_account", status="missing",
+                   detail="no Google cookies found", impact="path inactive"),
+    ]
+    warnings = snoop._capability_warnings(caps, allow_google_account=True)
+    assert any("Google cookies" in w or "Google" in w for w in warnings)
+
+
+def test_capability_warnings_no_warnings_when_all_ok():
+    from lib.diagnose import Capability
+    caps = [
+        Capability(name="gh_cli", status="ok", detail="ok", impact="ok"),
+        Capability(name="dnspython", status="ok", detail="ok", impact="ok"),
+        Capability(name="snoop_state_dir", status="ok", detail="ok", impact="ok"),
+    ]
+    warnings = snoop._capability_warnings(caps, allow_google_account=False)
+    assert warnings == []
+
+
 def test_autodetect_dedupes_within_candidate_set():
     cands = [
         EmailCandidate(address="a@same.com"),

@@ -76,6 +76,57 @@ def make_person(**overrides):
     return Person(**defaults)
 
 
+# ---- warnings (capability degradations) -------------------------------------
+
+
+def test_warnings_render_at_top_with_warning_glyph():
+    p = make_person()
+    out = render_decision_card(
+        p, [], warnings=["gh CLI not authenticated — run `gh auth login`"],
+    )
+    # First non-empty line is the warning
+    first_line = out.split("\n")[0]
+    assert first_line.startswith("⚠ ")
+    assert "gh CLI" in first_line
+
+
+def test_warnings_appear_before_name_header():
+    p = make_person()
+    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
+    out = render_decision_card(
+        p, [c], warnings=["dnspython not installed"],
+    )
+    warning_idx = out.find("⚠")
+    name_idx = out.find("Peter Steinberger")
+    assert warning_idx < name_idx
+
+
+def test_multiple_warnings_each_get_a_line():
+    p = make_person()
+    out = render_decision_card(
+        p, [], warnings=[
+            "gh CLI not authenticated — run `gh auth login`",
+            "dnspython not installed — pip install --user dnspython",
+        ],
+    )
+    warning_lines = [line for line in out.splitlines() if line.startswith("⚠ ")]
+    assert len(warning_lines) == 2
+
+
+def test_no_warnings_means_no_warning_block():
+    p = make_person()
+    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
+    out = render_decision_card(p, [c], warnings=None)
+    assert "⚠" not in out.split("Peter Steinberger")[0]
+
+
+def test_empty_warnings_list_means_no_warning_block():
+    p = make_person()
+    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
+    out = render_decision_card(p, [c], warnings=[])
+    assert "⚠" not in out.split("Peter Steinberger")[0]
+
+
 # ---- header (default mode) --------------------------------------------------
 
 
