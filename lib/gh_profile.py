@@ -37,7 +37,7 @@ from typing import Callable
 from . import _gh_api
 from ._gh_api import GhCaller
 from .normalize import normalize_email
-from .schema import EmailCandidate, ResolverResult, Source
+from .schema import EmailCandidate, GitHubRepo, ResolverResult, Source
 
 _DEFAULT_TIMEOUT_SEC = 6.0
 
@@ -246,3 +246,60 @@ def fetch_gh_profile(
             else None
         ),
     )
+
+
+def fetch_recent_repos(
+    handle: str,
+    *,
+    n: int = 5,
+    gh_caller: GhCaller | None = None,
+) -> list[GitHubRepo]:
+    """Fetch top-N recently-pushed non-fork public repos for the dossier.
+
+    Best-effort: returns [] on any error (no auth, timeout, 404). The
+    dossier is decorative; errors here must not break the rest of the
+    pipeline. Caller surfaces empty as "no recent activity to show."
+
+    Filters: skips forks (people pushing PR branches to forks isn't
+    interesting in a dossier) and archived repos (frozen, not signal
+    of current work).
+    """
+    caller = gh_caller if gh_caller is not None else _default_gh_caller()
+    if caller is None:
+        return []
+    try:
+        # API accepts per_page up to 100; ask for 2x N so we have headroom
+        # after filtering forks/archived.
+        per_page = min(100, max(n * 2, n))
+        result = caller(
+            f"/users/{handle}/repos?sort=pushed&direction=desc&per_page={per_page}&type=owner"
+        )
+    except (subprocess.SubprocessError, urllib.error.URLError,
+            json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(result, list):
+        return []
+    out: list[GitHubRepo] = []
+    for repo in result:
+        if not isinstance(repo, dict):
+            continue
+        if repo.get("fork") or repo.get("archived") or repo.get("private"):
+            continue
+        full_name = repo.get("full_name") or repo.get("name")
+        html_url = repo.get("html_url")
+        pushed_at = repo.get("pushed_at")
+        if not (isinstance(full_name, str) and isinstance(html_url, str)
+                and isinstance(pushed_at, str)):
+            continue
+        description = repo.get("description")
+        if description is not None and not isinstance(description, str):
+            description = None
+        out.append(GitHubRepo(
+            name=full_name,
+            description=description,
+            html_url=html_url,
+            pushed_at=pushed_at,
+        ))
+        if len(out) >= n:
+            break
+    return out
