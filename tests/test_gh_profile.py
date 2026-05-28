@@ -12,6 +12,7 @@ from lib.gh_profile import (
     _extract_emails_from_text,
     _is_extractable,
     fetch_gh_profile,
+    fetch_recent_repos,
 )
 
 
@@ -292,3 +293,111 @@ def test_fetch_continues_when_readme_fetch_raises():
     assert result.status == "ok"
     assert [c.address for c in result.candidates] == ["pete@openai.com"]
     assert result.candidates[0].sources[0].type == "gh_profile"
+
+
+# ---- fetch_recent_repos -----------------------------------------------------
+
+
+def _repo(name, **overrides):
+    """Construct a GitHub API repo-list response item."""
+    d = {
+        "name": name.split("/")[-1] if "/" in name else name,
+        "full_name": name,
+        "fork": False,
+        "archived": False,
+        "private": False,
+        "description": "some description",
+        "html_url": f"https://github.com/{name}",
+        "pushed_at": "2026-05-20T10:00:00Z",
+    }
+    d.update(overrides)
+    return d
+
+
+def test_fetch_recent_repos_returns_typed_list():
+    gh = make_gh({
+        "/users/steipete/repos": [
+            _repo("steipete/InterposeKit"),
+            _repo("steipete/dotfiles", description=None),
+        ],
+    })
+    repos = fetch_recent_repos("steipete", gh_caller=gh, n=5)
+    assert len(repos) == 2
+    assert repos[0].name == "steipete/InterposeKit"
+    assert repos[0].description == "some description"
+    assert repos[0].html_url == "https://github.com/steipete/InterposeKit"
+    assert repos[1].description is None
+
+
+def test_fetch_recent_repos_filters_forks():
+    gh = make_gh({
+        "/users/steipete/repos": [
+            _repo("steipete/forked-thing", fork=True),
+            _repo("steipete/real-thing"),
+        ],
+    })
+    repos = fetch_recent_repos("steipete", gh_caller=gh, n=5)
+    names = [r.name for r in repos]
+    assert "steipete/forked-thing" not in names
+    assert "steipete/real-thing" in names
+
+
+def test_fetch_recent_repos_filters_archived():
+    gh = make_gh({
+        "/users/steipete/repos": [
+            _repo("steipete/old", archived=True),
+            _repo("steipete/current"),
+        ],
+    })
+    repos = fetch_recent_repos("steipete", gh_caller=gh, n=5)
+    assert [r.name for r in repos] == ["steipete/current"]
+
+
+def test_fetch_recent_repos_caps_at_n():
+    gh = make_gh({
+        "/users/steipete/repos": [
+            _repo(f"steipete/repo{i}") for i in range(20)
+        ],
+    })
+    repos = fetch_recent_repos("steipete", gh_caller=gh, n=3)
+    assert len(repos) == 3
+
+
+def test_fetch_recent_repos_returns_empty_on_api_error():
+    import subprocess
+
+    def bombs(path):
+        raise subprocess.SubprocessError("simulated")
+
+    repos = fetch_recent_repos("steipete", gh_caller=bombs, n=5)
+    assert repos == []
+
+
+def test_fetch_recent_repos_returns_empty_when_no_auth(monkeypatch):
+    import lib.gh_profile as gp
+    monkeypatch.setattr(gp, "_default_gh_caller", lambda: None)
+    repos = fetch_recent_repos("steipete", n=5)
+    assert repos == []
+
+
+def test_fetch_recent_repos_handles_non_list_response():
+    """If the API returns an error dict instead of a list (e.g., 404 body),
+    we get an empty list, not a crash."""
+    gh = make_gh({
+        "/users/ghost/repos": {"message": "Not Found"},
+    })
+    repos = fetch_recent_repos("ghost", gh_caller=gh, n=5)
+    assert repos == []
+
+
+def test_fetch_recent_repos_skips_repos_with_missing_fields():
+    """The API can return repos with null fields under odd conditions
+    (incomplete fork data, etc.). Skip them rather than crash."""
+    gh = make_gh({
+        "/users/x/repos": [
+            {"name": "x/incomplete"},  # missing html_url, pushed_at
+            _repo("x/complete"),
+        ],
+    })
+    repos = fetch_recent_repos("x", gh_caller=gh, n=5)
+    assert [r.name for r in repos] == ["x/complete"]
