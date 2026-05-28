@@ -483,6 +483,60 @@ def test_autodetect_skips_explicit_and_native_google():
     assert merged == ["already-listed.com"]
 
 
+def test_plan_from_flags_with_only_name():
+    args = snoop._build_parser().parse_args(["Dan Neil"])
+    plan = snoop._plan_from_flags(args)
+    assert plan == {"name": "Dan Neil"}
+
+
+def test_plan_from_flags_with_name_and_employer():
+    args = snoop._build_parser().parse_args(["Dan Neil", "Formation Bio"])
+    plan = snoop._plan_from_flags(args)
+    assert plan == {"name": "Dan Neil", "employer": {"name": "Formation Bio"}}
+
+
+def test_plan_from_flags_with_full_zero_config_set():
+    args = snoop._build_parser().parse_args([
+        "Dan Neil", "Formation Bio",
+        "--domain", "formation.bio",
+        "--github", "danielneil",
+    ])
+    plan = snoop._plan_from_flags(args)
+    assert plan == {
+        "name": "Dan Neil",
+        "employer": {"name": "Formation Bio", "domains": ["formation.bio"]},
+        "handles": {"github": "danielneil"},
+    }
+
+
+def test_plan_from_flags_repeated_domain_flag():
+    args = snoop._build_parser().parse_args([
+        "Jane", "Acme",
+        "--domain", "acme.com",
+        "--domain", "acme.io",
+    ])
+    plan = snoop._plan_from_flags(args)
+    assert plan["employer"]["domains"] == ["acme.com", "acme.io"]
+
+
+def test_plan_from_flags_domain_without_employer_name():
+    """--domain without a positional employer name still creates an
+    employer entry — the resolver can run pattern_gen on the domain
+    even without a canonical name."""
+    args = snoop._build_parser().parse_args([
+        "Jane",
+        "--domain", "acme.com",
+    ])
+    plan = snoop._plan_from_flags(args)
+    assert plan["employer"] == {"domains": ["acme.com"]}
+
+
+def test_plan_from_flags_empty_when_no_input():
+    args = snoop._build_parser().parse_args([])
+    plan = snoop._plan_from_flags(args)
+    assert plan == {}
+
+
 def test_capability_warnings_surfaces_gh_unauth():
     from lib.diagnose import Capability
     caps = [

@@ -147,13 +147,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Full name of the target (e.g. 'Peter Steinberger')",
     )
     p.add_argument(
+        "employer",
+        nargs="?",
+        help=(
+            "Optional employer name (e.g. 'Formation Bio'). Combined with "
+            "--domain to form a minimal plan when --person-plan is not given."
+        ),
+    )
+    p.add_argument(
+        "--domain",
+        action="append",
+        default=[],
+        metavar="DOMAIN",
+        help=(
+            "Repeatable. Email domain(s) the employer uses (e.g. 'formation.bio'). "
+            "Used by pattern_gen and SMTP probing. Without it, the employer's "
+            "email format can't be inferred and most candidates collapse to "
+            "low-confidence pattern guesses."
+        ),
+    )
+    p.add_argument(
+        "--github",
+        metavar="HANDLE",
+        help=(
+            "Target's GitHub username. Enables git_emails, gh_profile, "
+            "gh_search, and the recent-repos dossier. Anchor binding still "
+            "applies — a wrong handle gets caught and skipped."
+        ),
+    )
+    p.add_argument(
         "--person-plan",
         help=(
             "JSON file path OR @file OR inline JSON string. Schema: "
             "{name, handles{github,x,hn}, personal_domains[], "
             "employer{name,domains[]}, former_employers[], channel_hints{}}. "
-            "Host model produces this upstream; person_resolve re-derives and "
-            "surfaces deltas."
+            "Wins over positional employer / --domain / --github for any "
+            "field it specifies. Host model produces this upstream when it "
+            "has richer context; person_resolve re-derives and surfaces deltas."
         ),
     )
     p.add_argument(
@@ -224,6 +254,29 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     return p
+
+
+def _plan_from_flags(args: argparse.Namespace) -> dict[str, Any]:
+    """Build a minimal --person-plan-shaped dict from positional / flag args.
+
+    Lets `snoop "Dan Neil" "Formation Bio" --domain formation.bio --github danielneil`
+    work without forcing the user to construct JSON. Returns {} when nothing
+    is provided. The result is merged UNDER any --person-plan dict in main(),
+    so an explicit plan still wins for fields it specifies.
+    """
+    plan: dict[str, Any] = {}
+    if args.name:
+        plan["name"] = args.name
+    if args.employer or args.domain:
+        emp: dict[str, Any] = {}
+        if args.employer:
+            emp["name"] = args.employer
+        if args.domain:
+            emp["domains"] = list(args.domain)
+        plan["employer"] = emp
+    if args.github:
+        plan["handles"] = {"github": args.github}
+    return plan
 
 
 def _load_plan(arg: str | None) -> dict[str, Any]:
@@ -619,7 +672,13 @@ def main(argv: list[str] | None = None) -> int:
     if not args.name and not args.person_plan:
         parser.error("must provide a name or --person-plan")
 
-    plan = _load_plan(args.person_plan)
+    # --person-plan wins over positional/flag-derived plan for any field
+    # it specifies. The flag-derived plan fills gaps for everything else
+    # so `snoop "Dan Neil" "Formation Bio" --domain formation.bio` works
+    # without anyone constructing JSON.
+    flag_plan = _plan_from_flags(args)
+    file_plan = _load_plan(args.person_plan)
+    plan = {**flag_plan, **file_plan}
     name = args.name or plan.get("name")
     if not name:
         parser.error("name required (positional or in --person-plan)")
