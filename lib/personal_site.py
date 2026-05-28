@@ -45,7 +45,10 @@ _SYSTEM_LOCALPARTS = (
     "postmaster", "abuse", "webmaster",
     "mailer-daemon",
 )
-_BAD_DOMAINS = ("example.com", "example.org", "example.net", "test", "invalid")
+_BAD_DOMAINS = (
+    "example.com", "example.org", "example.net",
+    "test", "invalid", "localhost", "local",
+)
 
 # Match `href="mailto:foo@bar.com"` or `href='mailto:foo@bar.com?subject=...'`.
 # Stop on query string, fragment, header separator, whitespace, or closing

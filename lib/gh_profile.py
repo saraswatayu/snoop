@@ -54,7 +54,7 @@ _MAILTO_RE = re.compile(
 # Don't extract from these — pre-filter at parse time before scoring sees them.
 _BAD_EMAIL_DOMAINS = (
     "example.com", "example.org", "example.net",
-    "localhost", "test", "invalid",
+    "localhost", "local", "test", "invalid",
 )
 _BAD_LOCALPARTS = ("noreply", "no-reply", "do-not-reply")
 

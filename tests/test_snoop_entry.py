@@ -407,6 +407,28 @@ def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
     assert parsed["candidates"] == []
 
 
+def test_format_json_report_includes_account_and_former_employer_fields():
+    """The JSON report must surface account_exists, account_display_name,
+    and employer_former_match — pipelining `snoop --json` is the supported
+    integration boundary, and dropping fields silently breaks downstream
+    consumers."""
+    import json as _json
+    p = Person(name="Jane", ambiguity="insufficient_identity_evidence")
+    c = EmailCandidate(
+        address="jane@former.com",
+        account_exists="verified",
+        account_display_name="Jane Doe",
+        employer_former_match=True,
+        sources=[src("manual_known")],
+    )
+    raw = snoop._format_json_report(p, [c])
+    parsed = _json.loads(raw)
+    cand = parsed["candidates"][0]
+    assert cand["account_exists"] == "verified"
+    assert cand["account_display_name"] == "Jane Doe"
+    assert cand["employer_former_match"] is True
+
+
 # ---- run_pipeline timeout ---------------------------------------------------
 
 

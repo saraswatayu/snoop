@@ -58,6 +58,13 @@ def test_is_extractable_drops_placeholder_domains():
     assert not _is_extractable("test@test.invalid")
 
 
+def test_is_extractable_drops_localhost_addresses():
+    """Consistency with gh_profile and git_emails — `localhost` and `local`
+    are placeholder TLDs and shouldn't surface as candidates."""
+    assert not _is_extractable("me@localhost")
+    assert not _is_extractable("me@my.local")
+
+
 # ---- _extract_mailto_addresses ----------------------------------------------
 
 

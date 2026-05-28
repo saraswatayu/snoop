@@ -409,7 +409,10 @@ def _format_json_report(person: Person, candidates: list[EmailCandidate]) -> str
                 "deliverable": c.deliverable,
                 "smtp_verdict": c.smtp_verdict,
                 "mx_provider": c.mx_provider,
+                "account_exists": c.account_exists,
+                "account_display_name": c.account_display_name,
                 "employer_match": c.employer_match,
+                "employer_former_match": c.employer_former_match,
                 "is_personal_provider": c.is_personal_provider,
                 "score_reasons": c.score_reasons,
                 "sources": [
