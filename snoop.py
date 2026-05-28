@@ -153,21 +153,49 @@ def _load_plan(arg: str | None) -> dict[str, Any]:
       - "@path/to/file.json" (literal @-prefix → file path)
       - "path/to/file.json"  (heuristic: if it looks like a path and exists)
       - "{... json ...}"     (inline)
+
+    JSON parse errors are caught and re-raised as SystemExit with a clean
+    one-line message naming where the parse came from. A raw json traceback
+    here was the most common confusing error during dogfooding because the
+    arg is usually 100+ chars of JSON and the user has no obvious entry point
+    to fix the syntax.
     """
     if not arg:
         return {}
     arg = arg.strip()
     if not arg:
         return {}
+
+    def _parse(text: str, source: str) -> dict[str, Any]:
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            snippet = text[:60].replace("\n", " ")
+            if len(text) > 60:
+                snippet += "..."
+            raise SystemExit(
+                f"--person-plan: invalid JSON ({source}): {e.msg} "
+                f"at line {e.lineno} col {e.colno}\n"
+                f"  near: {snippet}"
+            ) from None
+
     if arg.startswith("@"):
         path = Path(arg[1:]).expanduser()
-        return json.loads(path.read_text())
-    if (arg.startswith("{") or arg.startswith("[")):
-        return json.loads(arg)
+        try:
+            text = path.read_text()
+        except OSError as e:
+            raise SystemExit(f"--person-plan: cannot read {path}: {e}") from None
+        return _parse(text, f"file {path}")
+    if arg.startswith("{") or arg.startswith("["):
+        return _parse(arg, "inline")
     # Treat as file path if it exists
     p = Path(arg).expanduser()
     if p.exists():
-        return json.loads(p.read_text())
+        try:
+            text = p.read_text()
+        except OSError as e:
+            raise SystemExit(f"--person-plan: cannot read {p}: {e}") from None
+        return _parse(text, f"file {p}")
     raise SystemExit(f"--person-plan: cannot interpret {arg!r} as file path or JSON")
 
 

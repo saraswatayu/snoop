@@ -388,6 +388,39 @@ def test_main_requires_name_or_plan():
         snoop.main([])
 
 
+def test_load_plan_rejects_malformed_json_with_clean_message(capsys):
+    """A malformed --person-plan should exit cleanly with a clear message,
+    not crash with a Python traceback from json.loads."""
+    import pytest
+    with pytest.raises(SystemExit) as exc_info:
+        snoop._load_plan('{"bad json')
+    msg = str(exc_info.value)
+    assert "invalid JSON" in msg
+    assert "inline" in msg
+    # Should name location of the parse failure
+    assert "line" in msg and "col" in msg
+    # Should show a snippet of what failed
+    assert "near:" in msg
+
+
+def test_load_plan_rejects_malformed_json_file(tmp_path):
+    """File-based --person-plan with malformed JSON gets the same clean
+    error, with the file path identified as the source."""
+    import pytest
+    bad = tmp_path / "plan.json"
+    bad.write_text('{"name": "X", "handles":}')
+    with pytest.raises(SystemExit) as exc_info:
+        snoop._load_plan(f"@{bad}")
+    msg = str(exc_info.value)
+    assert "invalid JSON" in msg
+    assert str(bad) in msg
+
+
+def test_load_plan_accepts_valid_inline_json():
+    plan = snoop._load_plan('{"name": "X", "handles": {"github": "y"}}')
+    assert plan == {"name": "X", "handles": {"github": "y"}}
+
+
 def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
     """--json mode should produce parseable JSON."""
     import json as _json
