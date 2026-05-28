@@ -38,7 +38,7 @@ from concurrent.futures import (
 from pathlib import Path
 from typing import Any, Callable
 
-from lib import diagnose, render
+from lib import __version__, diagnose, render
 from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
@@ -140,6 +140,11 @@ def _build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="snoop",
         description="Resolve a person's email addresses across public sources.",
+    )
+    p.add_argument(
+        "--version",
+        action="version",
+        version=f"snoop {__version__}",
     )
     p.add_argument(
         "name",

@@ -286,6 +286,17 @@ def test_smtp_candidates_handles_malformed_address():
 # ---- end-to-end via main() --------------------------------------------------
 
 
+def test_version_flag_prints_and_exits_cleanly(capsys):
+    """`snoop --version` should print 'snoop X.Y.Z' and exit 0."""
+    import pytest
+    from lib import __version__
+    with pytest.raises(SystemExit) as exc:
+        snoop.main(["--version"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert out.strip() == f"snoop {__version__}"
+
+
 def test_main_diagnose_exits_clean(capsys):
     rc = snoop.main(["--diagnose"])
     assert rc == 0
