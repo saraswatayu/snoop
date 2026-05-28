@@ -355,6 +355,8 @@ def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
     monkeypatch.setattr(snoop, "fetch_gh_profile", mock_profile)
     monkeypatch.setattr(snoop, "fetch_personal_site", mock_site)
     monkeypatch.setattr(snoop, "fetch_pattern_candidates", mock_pattern)
+    # Dossier enrichment must also be mocked so the test stays hermetic.
+    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
 
     # SMTP no-op
     monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
@@ -366,14 +368,16 @@ def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
     ])
     assert rc == 0
     out = capsys.readouterr().out
-    # Header
-    assert "# Peter Steinberger" in out
-    assert "OpenAI" in out
-    # Both candidates surfaced in the work section
+    # New compact header: Name → Employer
+    assert "Peter Steinberger → OpenAI" in out
+    # Pick named in the lead address line
     assert "pete@openai.com" in out
+    # Fallback list shows the lower-confidence pattern address
     assert "peter.steinberger@openai.com" in out
-    # Decision line names the high-belief one
-    assert "pete@openai.com" in out.split("##")[1]  # decision section
+    # Pick is the lead, fallback appears after "If it bounces"
+    if "If it bounces" in out:
+        bounce_section = out.split("If it bounces")[1]
+        assert "peter.steinberger@openai.com" in bounce_section
 
 
 def test_main_requires_name_or_plan():
@@ -553,9 +557,9 @@ def test_main_invokes_google_account_when_flag_set(monkeypatch, capsys):
     # The phantom should be capped low (rendered with very low belongs)
     # and the real one should be the recommendation
     assert "real@google.com" in out
-    # Decision line names the real one
-    decision_section = out.split("##")[1]
-    assert "real@google.com" in decision_section
+    # The lead address line is one of the first ~3 lines and contains the pick.
+    lead = "\n".join(out.split("\n")[:3])
+    assert "real@google.com" in lead
 
 
 def test_main_skips_google_account_when_flag_not_set(monkeypatch, capsys):

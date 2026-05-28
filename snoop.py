@@ -132,6 +132,17 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit machine-readable JSON instead of the markdown card.",
     )
+    p.add_argument(
+        "--verbose",
+        "-v",
+        action="store_true",
+        help=(
+            "Append the per-section candidate tables (with belongs/work/"
+            "deliverable scores), identity-anchor state, and resolver "
+            "notes under the compact lead. Use when the default surprises "
+            "you and you want to see what the scorer thought."
+        ),
+    )
     return p
 
 
@@ -405,6 +416,18 @@ def _format_json_report(person: Person, candidates: list[EmailCandidate]) -> str
             "bound_anchors": [list(a) for a in person.bound_anchors],
             "notes": person.notes,
             "channel_hints": person.channel_hints,
+            # Tier 1 dossier (additive; machine consumers can ignore)
+            "gh_name": person.gh_name,
+            "gh_bio": person.gh_bio,
+            "gh_blog": person.gh_blog,
+            "gh_twitter": person.gh_twitter,
+            "gh_company": person.gh_company,
+            "gh_location": person.gh_location,
+            "gh_recent_repos": [
+                {"name": r.name, "description": r.description,
+                 "html_url": r.html_url, "pushed_at": r.pushed_at}
+                for r in person.gh_recent_repos
+            ],
         },
         "candidates": [
             {
@@ -474,7 +497,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             sys.stdout.write(_format_json_report(person, []))
         else:
-            sys.stdout.write(render.render_decision_card(person, [], intent=args.intent))
+            sys.stdout.write(render.render_decision_card(
+                person, [], intent=args.intent, verbose=args.verbose,
+            ))
         return 0
 
     # Initial scoring (without verification signals yet)
@@ -524,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
             person, candidates,
             intent=args.intent,
             max_per_section=args.max_per_section,
+            verbose=args.verbose,
         )
         sys.stdout.write(output)
     return 0
