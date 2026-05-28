@@ -52,34 +52,76 @@ Useful flags (full list in `--help` or `SKILL.md`):
 
 | Flag | Purpose |
 |---|---|
-| `--intent work\|personal\|either` | Default `work`. Controls section order and the decision-line recommendation. |
+| `--intent work\|personal\|either` | Default `work`. Controls which kind of address gets picked. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--no-smtp` | Skip SMTP verification entirely. |
 | `--allow-google-account` | Opt-in: use Google's People API to verify candidates on Google-hosted domains. Reads logged-in Chrome session cookies. |
 | `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set (for Workspace tenants on non-google.com domains). |
+| `--verbose` / `-v` | Append the original per-section candidate tables, identity-anchor state, and resolver notes under the compact lead. |
 | `--json` | Emit machine-readable JSON instead of the markdown card. |
 | `--diagnose` | Print a capability probe (gh auth, dnspython, google_account readiness, etc.) and exit. |
 
 ## Output: the contact decision card
 
-`snoop.py` emits a markdown card with:
+`snoop.py` emits a compact markdown card. The lead is the answer; the
+forensic detail moves behind `--verbose`. A typical Google-Workspace
+result looks like:
 
-1. **Header** — name, employer, identity ambiguity state, count of bound anchors.
-2. **Resolver notes** — plan-vs-observed deltas (e.g. "plan claimed employer=OpenAI; github profile company=Anthropic").
-3. **Decision** — opinionated top recommendation with a reason-to-trust line and ⚠ caveats (SMTP inconclusive, catch-all, former employer, etc.).
-4. **Work / Personal / Other tables** — ranked candidates with three score columns.
-5. **Channel hints** — when the plan included a backup channel (X DMs open, LinkedIn URL, etc.).
+```
+Daniel Neil → Formation Bio
+`daniel@formation.bio`  ·  google-confirmed (catch-all, so SMTP inconclusive)
 
-The three score columns:
+About:
+  GitHub:    github.com/danielneil — "Building drug development infra"
+  LinkedIn:  linkedin.com/in/danielneil
+  Web:       formation.bio
 
-| Field | Question | Abstention (`—`) |
+Recent on GitHub:
+  formation-bio/clinical-pipeline  · "End-to-end clinical data pipeline"
+  danielneil/dotfiles              · "zsh + tmux + vim"
+
+Why: generic template 'first'; Google account verified (Gaia 10553047…)
+Note: you said "Dan", profile says "Daniel"
+
+If it bounces, try in order:
+  neil.daniel@formation.bio · neildaniel@formation.bio · neild@formation.bio
+```
+
+### The four verdict buckets
+
+| Bucket | Trigger | What to do |
 |---|---|---|
-| **Belongs** | Is this actually this person's address? | No sources observed |
-| **Work** | Is this their current work email? | No employer info / unrelated domain |
-| **Deliverable** | Will mail reach a human? | SMTP inconclusive AND no Google account verdict |
+| `verified` | Clean SMTP RCPT 250 on a non-catch-all domain | Send. Both Google and SMTP agree. |
+| `google-confirmed` | Google's People API confirms the account exists, but SMTP can't double-check (catch-all or inconclusive) | Send. Real account; just no SMTP confirmation possible. |
+| `pattern-guess` | No positive existence signal — just a name × domain template | Try it. If it bounces, the script lists fallback patterns in priority order. |
+| `dead-end` | Nothing usable | Don't send. Use the channel hints (LinkedIn, X DM). |
 
-A `—` means **abstain**, not zero. The card never labels a candidate
-"Verified" unless SMTP returned a clean 250 on a non-catch-all domain.
+The `If it bounces, try in order` line is hidden when the verdict is
+`verified` (no bounce expected) and shown for `google-confirmed` and
+`pattern-guess`. Asymmetric on purpose: real-but-not-double-verified
+deserves a backup list cheaply.
+
+### About block (dossier)
+
+The compact card surfaces what we learned about the person from the same
+public sources that produced the address: GitHub bio, blog/website,
+Twitter, location; LinkedIn URL from the plan's `channel_hints`; top 3
+recently-pushed non-fork public repos from a single GitHub API call.
+The dossier costs nothing extra to render — it's data the resolvers
+already fetched.
+
+### Behind `--verbose`
+
+Pass `--verbose` (or `-v`) when the default verdict surprises you. The
+flag appends the original detail block: identity ambiguity state
+(`single plausible match` / `multiple plausible matches` /
+`insufficient identity evidence`), resolver notes (plan-vs-observed
+deltas), and per-section candidate tables with the three independent
+score columns — `belongs_to_person`, `current_work_address`,
+`deliverable` — each 0–1 or `—` (abstention, not zero).
+
+`--json` includes the same data plus the Tier 1 dossier fields. The
+schema is additive; new fields appear without changing existing ones.
 
 ## How SMTP verification works
 
