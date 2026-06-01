@@ -621,6 +621,20 @@ def test_autodetect_dedupes_within_candidate_set():
     assert merged == ["same.com"]
 
 
+def test_work_search_fn_none_without_results():
+    assert snoop._work_search_fn({}) is None
+    assert snoop._work_search_fn({"work_search_results": []}) is None
+    assert snoop._work_search_fn({"work_search_results": "nope"}) is None
+
+
+def test_work_search_fn_returns_supplied_results():
+    results = [{"title": "Talk", "url": "https://x.example",
+                "crosslink_url": "https://steipete.com/talks"}]
+    fn = snoop._work_search_fn({"work_search_results": results})
+    assert fn is not None
+    assert fn("any query") == results  # host-model results passed through
+
+
 def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
     """--json mode should produce parseable JSON."""
     import json as _json

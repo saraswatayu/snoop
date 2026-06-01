@@ -62,10 +62,29 @@ def test_build_profile_routes_every_section():
     assert any(n.severity == "info" for n in profile.consistency_notes)
 
 
-def test_t8_search_note_reaches_person_notes():
+def test_search_no_results_note_reaches_person_notes():
     person = _rich_person()
     build_profile(person, [_candidate()], enable_search=True, search_fn=None, now=_now())
-    assert any("T8" in n for n in person.notes)
+    assert any("work_search_results" in n for n in person.notes)
+
+
+def test_supplied_search_results_become_work_items():
+    """End-to-end: host-model-style results with a crosslink to the person's
+    bound domain land as work items; a namesake without crosslink is dropped."""
+    person = _rich_person()
+    person.bound_anchors.append(("github_personal_domain_match", "formation.bio"))
+    person.personal_domains = ["formation.bio"]
+    results = [
+        {"title": "My clinical-data talk", "url": "https://confvids.example/v/1",
+         "item_type": "talk", "crosslink_url": "https://formation.bio/talks"},
+        {"title": "Talk by a different Dan", "url": "https://randomconf.example/x",
+         "item_type": "talk"},  # no crosslink -> namesake -> dropped
+    ]
+    profile = build_profile(person, [_candidate()],
+                            search_fn=lambda q: results, now=_now())
+    talks = [w for w in profile.work_items if w.item_type == "talk"]
+    assert len(talks) == 1
+    assert talks[0].title == "My clinical-data talk"
 
 
 def test_empty_person_yields_profile_with_only_emails():

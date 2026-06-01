@@ -250,18 +250,19 @@ def _probe_google_account() -> Capability:
 
 
 def _probe_profile_search() -> Capability:
-    """The profile's free-text body-of-work search path needs a search provider.
-    None is wired yet (T8: provider / ToS decision pending), so the profile uses
-    anchored sources only. This is a feature gap, not a broken dependency, hence
-    'degraded' rather than 'missing'."""
+    """The profile's free-text body-of-work search is fed by the HOST MODEL's
+    WebSearch results (plan.work_search_results), not a bundled provider. A
+    standalone CLI run has no host model, so it uses anchored sources only.
+    This is a by-design boundary, not a broken dependency."""
     return Capability(
         name="profile_search",
         status="degraded",
-        detail="free-text body-of-work search provider not configured (T8 pending)",
+        detail=("free-text body-of-work search runs from host-model WebSearch "
+                "results (plan.work_search_results)"),
         impact=(
-            "work_items uses anchored sources only (repos, profile-linked feeds); "
-            "talks / podcasts / papers found via free-text search are unavailable "
-            "until a provider is wired. Pass --no-search to silence the note."
+            "with a host model: talks/podcasts/papers (cross-link-gated) appear. "
+            "Standalone CLI: anchored sources only (repos, profile-linked feeds). "
+            "Pass --no-search to skip entirely."
         ),
     )
 

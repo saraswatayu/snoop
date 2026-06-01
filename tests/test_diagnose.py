@@ -182,12 +182,12 @@ def test_diagnose_returns_all_probes():
     assert names == expected
 
 
-def test_profile_search_reports_unconfigured():
+def test_profile_search_reports_host_model_source():
     from lib.diagnose import _probe_profile_search
     cap = _probe_profile_search()
     assert cap.name == "profile_search"
     assert cap.status == "degraded"
-    assert "T8" in cap.detail
+    assert "work_search_results" in cap.detail
 
 
 # ---- _probe_google_account --------------------------------------------------

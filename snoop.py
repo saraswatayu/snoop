@@ -721,6 +721,28 @@ def _format_json_report(
 # ---- main -------------------------------------------------------------------
 
 
+def _work_search_fn(plan: dict[str, Any]) -> Callable[[str], list[dict]] | None:
+    """Build the work-items search_fn from host-model-supplied WebSearch results.
+
+    T8's "provider" is the host model's built-in WebSearch: during planning the
+    model runs the searches it would anyway and passes the results as
+    plan["work_search_results"] = [{title, url, item_type, published_at,
+    summary, crosslink_url}, ...]. snoop binds each through the anchor gate
+    (lib.binding), so a namesake result without a cross-link to a bound signal
+    is dropped, and web_search facts render "possibly" at most.
+
+    Returns None when no results were supplied (a standalone CLI run, or a host
+    that did not search) — work_items then uses anchored sources only.
+    """
+    raw = plan.get("work_search_results")
+    if not isinstance(raw, list):
+        return None
+    results = [r for r in raw if isinstance(r, dict)]
+    if not results:
+        return None
+    return lambda _query: results
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -745,6 +767,10 @@ def main(argv: list[str] | None = None) -> int:
 
     person = resolve_person(name, plan=plan)
     manual_known = _parse_knowns(args.known)
+    # Free-text body-of-work search (T8): the host model supplies WebSearch
+    # results via plan["work_search_results"]; the anchor gate keeps namesakes
+    # out. --no-search is the escape hatch.
+    work_search_fn = None if args.no_search else _work_search_fn(plan)
 
     # Capability probe runs once per invocation. Cheap (no network, no
     # cookie reads unless --allow-google-account). Feeds the warning
@@ -774,6 +800,7 @@ def main(argv: list[str] | None = None) -> int:
         # and resolver notes. Respect --json mode.
         empty_profile = build_profile(
             person, [], enable_search=not args.no_search,
+            search_fn=work_search_fn,
         )
         if args.json:
             sys.stdout.write(_format_json_report(
@@ -833,6 +860,7 @@ def main(argv: list[str] | None = None) -> int:
     # candidates + the producers. --no-search is the DX-D1 escape hatch.
     profile = build_profile(
         person, candidates, enable_search=not args.no_search,
+        search_fn=work_search_fn,
     )
     if args.json:
         sys.stdout.write(_format_json_report(

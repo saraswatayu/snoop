@@ -61,6 +61,15 @@ Optional fields:
 - `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}]` — used to cap former-employer addresses at low confidence
 - `channel_hints`: `{"x_dms_open": true, "linkedin": "<linkedin-url>", "prefers": "x"}` — surfaced in the render. **Populate this whenever you learned a backup channel during plan construction.** Common cases: you found the target via LinkedIn → `{"linkedin": "<that-url>"}`. You saw "DMs open" on their X bio → `{"x_dms_open": true}`. The renderer makes this the fallback channel when email confidence is low; without it, the user only sees email options and may have to dig back through the chat to find the LinkedIn link you already had.
 - `name_variants`: explicit overrides if normalization isn't catching a non-Latin spelling
+- `work_search_results`: the body-of-work search feed (T8). snoop has no bundled search provider on purpose — **you** are the provider. When building the profile, run your built-in WebSearch (≤2 queries, e.g. `"<name>" talk OR podcast OR conference`, `"<name>" article OR paper`) and pass the hits here:
+  ```json
+  "work_search_results": [
+    {"title": "...", "url": "https://...", "item_type": "talk|article|podcast|paper|other",
+     "published_at": "2026-04-10", "summary": "...",
+     "crosslink_url": "https://<their-bound-domain-or-profile>/..."}
+  ]
+  ```
+  **The namesake gate is enforced by the script, not by you:** a result is attributed ONLY if one of its URLs binds to the person (the result is hosted on a bound domain, OR you set `crosslink_url` to a page that links back to their bound site/profile). Set `crosslink_url` only when you actually verified the page ties to THIS person; otherwise omit it and the result is dropped. Free-text results always render `[?]` possibly, never `[+]`. Omit the field entirely for a quick email-only lookup.
 
 **Any field can be `null` if you don't know it.** The script's `person_resolve` re-derives independently and surfaces conflicts in `Person.notes`. Don't fabricate.
 
@@ -89,7 +98,7 @@ For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
 | `--intent work\|personal\|either` | Default `work`. Controls which section ranks first and which candidate the decision line recommends. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--no-smtp` | Skip SMTP verification entirely. Faster, but loses the `deliverable` field. |
-| `--no-search` | Escape hatch for the profile's free-text body-of-work search path. Profile features are ON by default (DX); anchored sources (repos, profile-linked feeds) still run. (Free-text search provider is not yet wired — see T8 note in the output.) |
+| `--no-search` | Escape hatch: ignore `work_search_results` even if supplied. Profile features are ON by default (DX); anchored sources (repos, profile-linked feeds) always run. |
 | `--allow-google-account` | Opt-in: use Google's People API to verify candidate existence on Google-hosted domains. Reads your logged-in Chrome session cookies. **Solves Google Workspace catch-all blindness** (see §When to use it below). |
 | `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set. Needed for non-literal-google.com domains since v1 doesn't auto-detect MX. e.g. `--google-workspace-domain acme.com` for a YC startup on Gmail. |
 | `--max-per-section N` | Cap rows per Work/Personal/Other table in `--verbose` mode. Default 5. (No effect on default compact output.) |
@@ -167,7 +176,7 @@ Social:
   [+] website: <their-site>
 Body of work:
   [+] repo: owner/name — <description>
-  [?] talk: <title>            ← only via free-text search (today: provider unwired)
+  [?] talk: <title>            ← from your work_search_results (cross-link-gated)
 Roles:
   [+] <Title> at <Employer> (since–now)
 Identity check:
@@ -175,11 +184,11 @@ Identity check:
 ```
 
 Each section is omitted when empty. Pass this through verbatim like the rest of
-the card. If you see `work_items: free-text search not configured (blocked on
-T8 ...)` in the notes / verbose, that is expected: the anchored body-of-work
-(repos, profile-linked feeds) still renders; only the free-text search path
-awaits a provider decision. The additive `profile` block in `--json` carries the
-same sections with `bind_tier` per fact for machine consumers.
+the card. If you did not supply `work_search_results`, the notes/verbose will say
+`free-text search: no results supplied this run` — that is expected: the anchored
+body-of-work (repos, profile-linked feeds) still renders; only the WebSearch-fed
+talks/podcasts/papers are absent. The additive `profile` block in `--json`
+carries the same sections with `bind_tier` per fact for machine consumers.
 
 ### Verdict buckets — the load-bearing vocabulary
 

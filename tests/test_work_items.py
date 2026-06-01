@@ -107,16 +107,16 @@ def test_empty_when_no_repos_and_no_search():
 # ---- search not configured (T8) ---------------------------------------------
 
 
-def test_enable_search_without_fn_yields_only_anchored_and_t8_note():
-    """enable_search=True with search_fn=None: only anchored items appear, and
-    error_detail records the T8 capability gap."""
+def test_enable_search_without_results_yields_only_anchored_and_note():
+    """enable_search=True with no search results this run: only anchored items
+    appear, and error_detail records that no results were supplied."""
     person = _bound_person(gh_recent_repos=[_repo("steipete/x")])
     result = collect_work_items(person, enable_search=True, search_fn=None, now=NOW)
 
     assert [i.item_type for i in result.contributions] == ["repo"]
     assert result.error_detail is not None
-    assert "T8" in result.error_detail
-    assert "search" in result.error_detail.lower()
+    assert "no results supplied" in result.error_detail
+    assert "work_search_results" in result.error_detail
 
 
 def test_search_fn_none_path_returns_empty_list_directly():

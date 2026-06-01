@@ -10,11 +10,14 @@ both gated by lib.binding so a namesake's output never gets attributed:
      binds "asserted" when the handle is independently bound (>=2 anchors) and
      "possibly" otherwise. Either way it is attributable; only "unbound" drops.
 
-  2. FREE-TEXT SEARCH PATH (SCAFFOLD): a query against a search provider for
-     talks, articles, podcasts, and papers. The real provider is BLOCKED on T8
-     (search provider / ToS decision), so this path is an injectable scaffold:
-     a `search_fn` callable supplies results in tests, and with no `search_fn`
-     it is a no-op returning []. The binding gate is the safety guarantee here
+  2. FREE-TEXT SEARCH PATH: talks, articles, podcasts, papers found by web
+     search. The provider (T8) is the HOST MODEL's built-in WebSearch, not a
+     bundled scraper or a paid API: the host model runs the searches it already
+     does during planning and passes results into snoop via the plan's
+     `work_search_results` (snoop.py builds a `search_fn` from them). A
+     `search_fn` callable is the injection point (tests pass one directly;
+     standalone CLI runs without a host model simply get no results here and
+     fall back to anchored sources). The binding gate is the safety guarantee
      (D3): a result is KEPT only when one of its sources cross-links back to a
      bound signal (e.g. a URL on the person's bound personal domain). A bare
      conference page that merely names the person comes back "unbound" and is
@@ -38,11 +41,14 @@ from .schema import GitHubRepo, Person, ResolverResult, Source, WorkItem
 # (a URL on the page that links back to the person, e.g. their bound domain).
 SearchFn = Callable[[str], list[dict]]
 
-# T8: the real free-text search provider is not wired (blocked on a search
-# provider / ToS decision). Surfaced as error_detail so the caller can render
-# the capability degradation rather than silently shipping fewer contributions.
-_T8_NOT_CONFIGURED = (
-    "free-text search not configured (blocked on T8: search provider/ToS decision)"
+# When search is enabled but no results were supplied this run (no host-model
+# WebSearch results in the plan, e.g. a standalone CLI run). Surfaced as
+# error_detail so the caller can show the gap rather than silently shipping
+# fewer contributions. NOT an error: anchored sources still ran.
+_SEARCH_NO_RESULTS = (
+    "free-text search: no results supplied this run "
+    "(host model passes them via plan.work_search_results; "
+    "standalone runs use anchored sources only)"
 )
 
 # Cap on free-text results processed per person. Search is unbounded; the
@@ -177,7 +183,7 @@ def collect_work_items(
 
     error_detail: str | None = None
     if enable_search and search_fn is None:
-        error_detail = _T8_NOT_CONFIGURED
+        error_detail = _SEARCH_NO_RESULTS
 
     status = "ok" if contributions else "empty"
     return ResolverResult(
