@@ -642,6 +642,13 @@ def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
     parsed = _json.loads(out)
     assert parsed["person"]["name"] == "X"
     assert parsed["candidates"] == []
+    # Profile-expansion contract: additive `profile` key with stable sections,
+    # existing top-level keys unchanged.
+    assert "profile" in parsed
+    for section in ("social_links", "channels", "work_items", "roles",
+                    "consistency_notes"):
+        assert section in parsed["profile"]
+        assert isinstance(parsed["profile"][section], list)
 
 
 def test_format_json_report_includes_former_employers():

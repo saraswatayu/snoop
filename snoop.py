@@ -47,7 +47,7 @@ from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
 from lib.profile_build import build_profile
-from lib.schema import EmailCandidate, Person, ResolverResult
+from lib.schema import EmailCandidate, Person, Profile, ResolverResult
 from lib.score import is_personal_provider, score_all
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
 
@@ -601,15 +601,60 @@ def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[E
     return eligible[:top_k]
 
 
+def _profile_json(profile: "Profile") -> dict:
+    """Serialize the profile sections (additive; consumers can ignore). Every
+    fact carries its bind_tier so a machine consumer can apply the same
+    asserted/possibly distinction the card shows."""
+    def srcs(f):
+        return [{"type": s.type, "url": s.url,
+                 "observed_at": s.observed_at.isoformat(), "detail": s.detail}
+                for s in f.sources]
+    return {
+        "social_links": [
+            {"platform": s.platform, "url": s.url, "handle": s.handle,
+             "bind_tier": s.bind_tier, "sources": srcs(s)}
+            for s in profile.social_links
+        ],
+        "channels": [
+            {"channel_type": c.channel_type, "value": c.value,
+             "evidence": c.evidence, "rank_hint": c.rank_hint,
+             "bind_tier": c.bind_tier, "sources": srcs(c)}
+            for c in profile.channels
+        ],
+        "work_items": [
+            {"title": w.title, "url": w.url, "item_type": w.item_type,
+             "published_at": w.published_at, "summary": w.summary,
+             "bind_tier": w.bind_tier, "sources": srcs(w)}
+            for w in profile.work_items
+        ],
+        "roles": [
+            {"employer": r.employer, "title": r.title, "since": r.since,
+             "until": r.until, "summary": r.summary, "bind_tier": r.bind_tier,
+             "sources": srcs(r)}
+            for r in profile.roles
+        ],
+        "consistency_notes": [
+            {"note": n.note, "severity": n.severity, "bind_tier": n.bind_tier,
+             "sources": srcs(n)}
+            for n in profile.consistency_notes
+        ],
+    }
+
+
 def _format_json_report(
     person: Person,
     candidates: list[EmailCandidate],
     *,
+    profile: "Profile | None" = None,
     warnings: list[str] | None = None,
 ) -> str:
     """Machine-readable equivalent of the markdown card. Useful for
-    pipelining `snoop --json` into another tool."""
-    return json.dumps({
+    pipelining `snoop --json` into another tool.
+
+    The top-level keys (warnings, person, candidates) are stable. The
+    profile-expansion sections live under an additive `profile` key (present
+    when a Profile was built) so existing consumers are unaffected."""
+    report = {
         "warnings": warnings or [],
         "person": {
             "name": person.name,
@@ -667,7 +712,10 @@ def _format_json_report(
             }
             for c in candidates
         ],
-    }, indent=2, default=str)
+    }
+    if profile is not None:
+        report["profile"] = _profile_json(profile)
+    return json.dumps(report, indent=2, default=str)
 
 
 # ---- main -------------------------------------------------------------------
@@ -724,12 +772,14 @@ def main(argv: list[str] | None = None) -> int:
     if not candidates:
         # Empty pipeline — still render so the user sees identity state
         # and resolver notes. Respect --json mode.
+        empty_profile = build_profile(
+            person, [], enable_search=not args.no_search,
+        )
         if args.json:
-            sys.stdout.write(_format_json_report(person, [], warnings=warnings))
+            sys.stdout.write(_format_json_report(
+                person, [], profile=empty_profile, warnings=warnings,
+            ))
         else:
-            empty_profile = build_profile(
-                person, [], enable_search=not args.no_search,
-            )
             sys.stdout.write(render.render_profile_card(
                 empty_profile, intent=args.intent, verbose=args.verbose,
                 warnings=warnings,
@@ -779,15 +829,17 @@ def main(argv: list[str] | None = None) -> int:
             # Re-score after SMTP modifies deliverable
             score_all(candidates, person)
 
+    # Default output is the person PROFILE (D2-B): build it from the scored
+    # candidates + the producers. --no-search is the DX-D1 escape hatch.
+    profile = build_profile(
+        person, candidates, enable_search=not args.no_search,
+    )
     if args.json:
-        sys.stdout.write(_format_json_report(person, candidates, warnings=warnings))
+        sys.stdout.write(_format_json_report(
+            person, candidates, profile=profile, warnings=warnings,
+        ))
     else:
-        # Default output is the person PROFILE (D2-B): build it from the scored
-        # candidates + the producers, then render the profile card (which leads
-        # with the email answer). --no-search is the DX-D1 escape hatch.
-        profile = build_profile(
-            person, candidates, enable_search=not args.no_search,
-        )
+        # The profile card leads with the email answer, then the sections.
         output = render.render_profile_card(
             profile,
             intent=args.intent,
