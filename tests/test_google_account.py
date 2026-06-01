@@ -160,6 +160,42 @@ def test_parse_falls_back_to_name_array_when_best_display_name_absent():
     assert result["display_name"] == "Fallback Name"
 
 
+def test_parse_extracts_non_default_profile_photo():
+    """A real (non-default) avatar is captured as a human-review artifact."""
+    body = _people_response({
+        "personId": "1",
+        "photo": [{"url": "https://lh3.googleusercontent.com/a/real-pic=s96", "isDefault": False}],
+    })
+    result = ga._parse_lookup_response(body)
+    assert result["photo_url"] == "https://lh3.googleusercontent.com/a/real-pic=s96"
+
+
+def test_parse_skips_default_silhouette_avatar():
+    """A default/placeholder avatar tells a human nothing — drop it so we
+    never surface a misleading 'photo' for a generic silhouette."""
+    body = _people_response({
+        "personId": "1",
+        "photo": [{"url": "https://lh3.googleusercontent.com/default-user=s96", "isDefault": True}],
+    })
+    result = ga._parse_lookup_response(body)
+    assert result["photo_url"] is None
+
+
+def test_parse_accepts_photos_plural_key():
+    """The response key has been seen as both 'photo' and 'photos'."""
+    body = _people_response({
+        "personId": "1",
+        "photos": [{"url": "https://lh3.googleusercontent.com/a/plural=s96"}],
+    })
+    result = ga._parse_lookup_response(body)
+    assert result["photo_url"] == "https://lh3.googleusercontent.com/a/plural=s96"
+
+
+def test_parse_photo_url_none_when_absent():
+    result = ga._parse_lookup_response(_people_response({"personId": "1"}))
+    assert result["photo_url"] is None
+
+
 def test_parse_exists_unverifiable_when_no_identifying_fields():
     """An empty person record (no personId, no name) means Google
     acknowledged the lookup but didn't return identifying info.
@@ -270,6 +306,77 @@ def test_fetch_marks_verified_when_account_exists_with_profile():
     assert cands[0].account_display_name == "Peter Steinberger"
     src = next(s for s in cands[0].sources if s.type == "google_account")
     assert "Peter Steinberger" in src.detail
+
+
+def test_real_display_name_keeps_a_real_name():
+    assert ga._real_display_name("Jordan Vega", "jvega@globex.com") == "Jordan Vega"
+
+
+def test_real_display_name_drops_email_placeholder():
+    """Locked-down Workspace tenants echo the email as the display name."""
+    assert ga._real_display_name("jvega@globex.com", "jvega@globex.com") is None
+    assert ga._real_display_name("JVega@Globex.com", "jvega@globex.com") is None
+
+
+def test_real_display_name_drops_localpart_placeholder():
+    assert ga._real_display_name("jvega", "jvega@globex.com") is None
+
+
+def test_real_display_name_none_when_empty():
+    assert ga._real_display_name(None, "x@globex.com") is None
+    assert ga._real_display_name("   ", "x@globex.com") is None
+
+
+def test_fetch_treats_email_display_name_as_no_name_but_keeps_photo():
+    """The misleading-name_match guard: an email-as-display-name must NOT
+    populate account_display_name (else the bundle shows name_match=no for a
+    placeholder). The photo still surfaces as the real disambiguator."""
+    body = _people_response({
+        "personId": "1",
+        "metadata": {"bestDisplayName": {"displayName": "jvega@globex.com"}},
+        "photo": [{"url": "https://lh3.googleusercontent.com/a/avatar=s96", "isDefault": False}],
+    })
+    http = make_http_get({"people/lookup": (200, body)})
+    cands = [EmailCandidate(address="jvega@globex.com")]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+        target_domains=["globex.com"], target_name="Jordan Vega",
+    )
+    assert cands[0].account_exists == "verified"
+    assert cands[0].account_display_name is None
+    assert cands[0].account_photo_url == "https://lh3.googleusercontent.com/a/avatar=s96"
+    src = next(s for s in cands[0].sources if s.type == "google_account")
+    assert "display name" not in src.detail
+
+
+def test_fetch_sets_photo_url_and_notes_artifact_in_source():
+    body = _people_response({
+        "personId": "1234567890",
+        "metadata": {"bestDisplayName": {"displayName": "Peter Steinberger"}},
+        "photo": [{"url": "https://lh3.googleusercontent.com/a/pete=s96", "isDefault": False}],
+    })
+    http = make_http_get({"people/lookup": (200, body)})
+    cands = [EmailCandidate(address="pete@google.com")]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+    )
+    assert cands[0].account_photo_url == "https://lh3.googleusercontent.com/a/pete=s96"
+    src = next(s for s in cands[0].sources if s.type == "google_account")
+    assert "human-review artifact" in src.detail
+
+
+def test_fetch_leaves_photo_url_none_for_default_avatar():
+    body = _people_response({
+        "personId": "1234567890",
+        "photo": [{"url": "https://lh3.googleusercontent.com/default=s96", "isDefault": True}],
+    })
+    http = make_http_get({"people/lookup": (200, body)})
+    cands = [EmailCandidate(address="pete@google.com")]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+    )
+    assert cands[0].account_exists == "verified"
+    assert cands[0].account_photo_url is None
 
 
 def test_fetch_marks_verified_when_only_person_id_returned():
