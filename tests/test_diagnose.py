@@ -177,9 +177,17 @@ def test_diagnose_returns_all_probes():
     names = {c.name for c in caps}
     expected = {
         "gh_cli", "anon_github", "dnspython", "idna", "whois",
-        "google_account", "snoop_state_dir",
+        "google_account", "profile_search", "snoop_state_dir",
     }
     assert names == expected
+
+
+def test_profile_search_reports_unconfigured():
+    from lib.diagnose import _probe_profile_search
+    cap = _probe_profile_search()
+    assert cap.name == "profile_search"
+    assert cap.status == "degraded"
+    assert "T8" in cap.detail
 
 
 # ---- _probe_google_account --------------------------------------------------
