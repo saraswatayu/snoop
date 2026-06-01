@@ -249,6 +249,24 @@ def _probe_google_account() -> Capability:
     )
 
 
+def _probe_profile_search() -> Capability:
+    """The profile's free-text body-of-work search is fed by the HOST MODEL's
+    WebSearch results (plan.work_search_results), not a bundled provider. A
+    standalone CLI run has no host model, so it uses anchored sources only.
+    This is a by-design boundary, not a broken dependency."""
+    return Capability(
+        name="profile_search",
+        status="degraded",
+        detail=("free-text body-of-work search runs from host-model WebSearch "
+                "results (plan.work_search_results)"),
+        impact=(
+            "with a host model: talks/podcasts/papers (cross-link-gated) appear. "
+            "Standalone CLI: anchored sources only (repos, profile-linked feeds). "
+            "Pass --no-search to skip entirely."
+        ),
+    )
+
+
 def _probe_snoop_state_dir() -> Capability:
     snoop_dir = Path.home() / ".snoop"
     try:
@@ -297,6 +315,7 @@ def diagnose() -> list[Capability]:
         _probe_idna(),
         _probe_whois_binary(),
         _probe_google_account(),
+        _probe_profile_search(),
         _probe_snoop_state_dir(),
     ]
 
