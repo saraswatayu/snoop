@@ -1,13 +1,23 @@
 # snoop
 
-A [Claude Code](https://claude.com/claude-code) **skill** that finds and
-verifies a person's email address.
+A [Claude Code](https://claude.com/claude-code) **skill** that builds a
+**person profile for outreach** — who they are, the best way to reach them, and
+the context for a good first message. The reachable email leads the output; the
+profile sections follow.
 
 Give it a name + company (or a LinkedIn URL, or freeform text). It resolves
 the person across public sources — GitHub commits, GitHub profile + README,
 personal-site `mailto:` anchors, and (as a last resort) name × domain
-pattern guessing — scores each candidate on three independent fields, and
-emits a contact decision card.
+pattern guessing — scores each email candidate on three independent fields,
+then assembles a profile from five producers (self-published social links,
+observed reachability channels, body of work, role context, text-only
+identity-consistency notes) and emits a **person profile card**.
+
+Every profile fact is marked `[+]` (asserted) or `[?]` (possibly) by its
+binding to the person. Scope is deliberately bounded: only self-published,
+real-identity, source-bound facts. No pseudonym de-anonymization, no
+home-address / location / family targeting, no sensitive-attribute inference,
+no photo/biometric matching. One target per invocation, no bulk.
 
 SMTP `RCPT` probing is one verification signal among many. **It never sends
 mail.** Use it for legitimate outreach and verification only.

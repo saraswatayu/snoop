@@ -7,14 +7,32 @@ description: Use when the user wants to find, guess, or verify someone's email a
 
 ## Overview
 
-Find a person's reachable email and tell the user whether and how to use it.
+Build a **person profile for outreach**: who they are, the best way to reach
+them, and the context to write a good first message. The reachable email still
+leads the output (the "what do I paste" answer is first), and the profile
+sections follow.
 
 **Two halves:**
 
-1. **You, the model — produce a `--person-plan` JSON.** Resolve the target from whatever the user gave you into a structured plan: name variants, GitHub handle, X handle, personal domains, employer name and domains. The plan is YOUR upstream knowledge made explicit; the script validates it.
-2. **`snoop.py` — fan out, score, verify, render.** Runs the person-resolver + multi-source pipeline (git commits, GitHub profile, personal-site mailto:, name×domain pattern fallback) in parallel with per-resolver timeouts, dedupes across sources, scores each candidate on three fields, optionally SMTP-probes the top work candidates, and emits a markdown decision card.
+1. **You, the model — produce a `--person-plan` JSON.** Resolve the target from whatever the user gave you into a structured plan: name variants, GitHub handle, X handle, personal domains, employer name and domains. The plan is YOUR upstream knowledge made explicit; the script validates it. **This is unchanged by the profile expansion** — the same minimal plan produces the richer profile (no new required fields).
+2. **`snoop.py` — fan out, score, verify, render.** Runs the person-resolver + multi-source pipeline (git commits, GitHub profile, personal-site mailto:, name×domain pattern fallback), dedupes + scores email candidates, optionally SMTP-probes them, THEN assembles a profile from five producers (self-published social links, observed reachability channels, body of work, role context, text-only identity-consistency notes) and renders a **person profile card**.
 
 The script never sends mail; SMTP probing is RCPT-only.
+
+**What's in scope (and what isn't).** Every profile fact must be self-published
+under the person's own real identity (or directly user-supplied). The tool does
+NOT de-anonymize pseudonymous accounts, does NOT target home address / live
+location / family, does NOT infer sensitive attributes (health, sexuality,
+politics, religion), and does NOT do photo/biometric matching. Identity
+"consistency notes" are text-only and neutral. One target per invocation, no
+bulk — that guardrail keeps snoop manual research on public data, not scraping.
+
+**Provenance is visible.** Each profile field is marked `[+]` (asserted:
+bound-by-construction to the person via a validated profile or a cross-linked
+domain) or `[?]` (possibly: weaker binding). A domain merely declared in your
+`--person-plan` is an untrusted hint and renders `[?]`, never `[+]`. If identity
+itself is not a single confident match, a banner warns and every field
+downgrades to `[?]`.
 
 ## When to invoke
 
@@ -71,6 +89,7 @@ For longer plans, pass a file: `--person-plan @/tmp/plan.json`.
 | `--intent work\|personal\|either` | Default `work`. Controls which section ranks first and which candidate the decision line recommends. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--no-smtp` | Skip SMTP verification entirely. Faster, but loses the `deliverable` field. |
+| `--no-search` | Escape hatch for the profile's free-text body-of-work search path. Profile features are ON by default (DX); anchored sources (repos, profile-linked feeds) still run. (Free-text search provider is not yet wired — see T8 note in the output.) |
 | `--allow-google-account` | Opt-in: use Google's People API to verify candidate existence on Google-hosted domains. Reads your logged-in Chrome session cookies. **Solves Google Workspace catch-all blindness** (see §When to use it below). |
 | `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set. Needed for non-literal-google.com domains since v1 doesn't auto-detect MX. e.g. `--google-workspace-domain acme.com` for a YC startup on Gmail. |
 | `--max-per-section N` | Cap rows per Work/Personal/Other table in `--verbose` mode. Default 5. (No effect on default compact output.) |
@@ -131,6 +150,36 @@ If it bounces, try in order:
 ```
 
 Sections are conditional: `About` skips entirely when no dossier fields exist; `Recent on GitHub` skips when no repos; the `If it bounces` line is hidden when the pick is `verified` (see Verdict buckets below) and shown otherwise.
+
+### Profile sections (the default output now)
+
+After the email lead above, the card appends the profile sections, each line
+prefixed with a provenance marker (`[+]` asserted, `[?]` possibly):
+
+```
+[?] identity is NOT a single confident match — every field below is shown as possibly; confirm before relying.   ← only when ambiguous
+
+Other ways in:
+  [+] x_dm: @handle (X bio says DMs open)
+  [?] linkedin: linkedin.com/in/...
+Social:
+  [+] github: github.com/<handle>
+  [+] website: <their-site>
+Body of work:
+  [+] repo: owner/name — <description>
+  [?] talk: <title>            ← only via free-text search (today: provider unwired)
+Roles:
+  [+] <Title> at <Employer> (since–now)
+Identity check:
+  [+] INFO: you said "Dan", github profile says "Daniel Neil" (diminutive, consistent)
+```
+
+Each section is omitted when empty. Pass this through verbatim like the rest of
+the card. If you see `work_items: free-text search not configured (blocked on
+T8 ...)` in the notes / verbose, that is expected: the anchored body-of-work
+(repos, profile-linked feeds) still renders; only the free-text search path
+awaits a provider decision. The additive `profile` block in `--json` carries the
+same sections with `bind_tier` per fact for machine consumers.
 
 ### Verdict buckets — the load-bearing vocabulary
 
