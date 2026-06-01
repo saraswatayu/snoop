@@ -41,8 +41,17 @@ reason would be redundant — you are the reasoner.
 self-published under the person's own real identity (or directly user-supplied).
 Do NOT de-anonymize pseudonymous accounts, do NOT target home address / live
 location / family, do NOT infer sensitive attributes (health, sexuality,
-politics, religion), do NOT do photo/biometric matching. Identity "consistency"
-observations are text-only and neutral. One target per invocation, no bulk.
+politics, religion). Identity "consistency" observations are text-only and
+neutral. One target per invocation, no bulk.
+
+**Profile photos are human-review artifacts, never an automated match.** snoop
+may *surface* a self-published avatar (e.g. the Google account photo) as a link
+for a person to eyeball against another self-published photo (e.g. LinkedIn) —
+that's presenting evidence for human judgment. snoop and the host model must NOT
+compute face/biometric similarity, score a match, or assert identity from a
+face. Disambiguate with the **text** `name_match` signal (the Google display
+name vs the target); treat the photo as something a human confirms, and never as
+a verdict you emit.
 
 ## Step 1 — Build the `--person-plan` (you, the model)
 
@@ -116,7 +125,7 @@ JSON:
   "person": {"name": "...", "ambiguity": "single_plausible_match|multiple_plausible_matches|insufficient_identity_evidence"},
   "observations": [
     {"id": "o1", "type": "github_handle", "content": "github handle: steipete", "source_url": "https://github.com/steipete"},
-    {"id": "o7", "type": "email_candidate", "content": "candidate email: pete@openai.com (belongs~0.8, smtp=verified, account_exists=verified, sources=git_commit,gh_profile)", "source_url": "..."},
+    {"id": "o7", "type": "email_candidate", "content": "candidate email: pete@openai.com (belongs~0.8, smtp=verified, account_exists=verified, sources=git_commit,gh_profile, google_display_name=\"Peter Steinberger\", name_match=yes)", "source_url": "..."},
     {"id": "o9", "type": "web_search", "content": "web-search result: ... (page cross-links to steipete.com)", "source_url": "..."}
   ]
 }
@@ -124,8 +133,18 @@ JSON:
 
 Each observation is a raw reading with a stable `id` you will cite. The
 `email_candidate` observations carry the deliverability verdicts (`smtp=`,
-`account_exists=`) and where the address was seen (`sources=`). For longer
-plans: `--person-plan @/tmp/plan.json`.
+`account_exists=`) and where the address was seen (`sources=`). When the Google
+People API returned a profile, they also carry `google_display_name=` plus a
+**text** `name_match=yes|no` verdict against the target — this is the
+disambiguator on a common-name Workspace tenant (a real-but-different account
+shows `name_match=no`; drop it). A verified account with a non-default avatar
+also appends `google_photo=<url> (human-review artifact, not an automated
+match)` — surface it as a link a *human* can eyeball; never compute a face match
+or treat it as a verdict. **When the tenant exposes no real name** (locked-down
+Workspaces echo the email back as the display name), `google_display_name=` and
+`name_match=` are omitted entirely — don't read that absence as a mismatch; the
+`google_photo` artifact is then your only disambiguator and a human must make
+the call. For longer plans: `--person-plan @/tmp/plan.json`.
 
 **Flags** (apply to the sensor run):
 
@@ -179,7 +198,8 @@ verbatim" contract. The discipline now lives in how you reason:**
    to the target is the failure mode to avoid.
 5. **Scope.** Only self-published, real-identity facts (see Overview). No
    de-anon, no location/family targeting, no sensitive-attribute inference, no
-   biometrics.
+   automated face/biometric matching. Disambiguate by the **text** `name_match`
+   signal; a surfaced photo is a human-review artifact, not a verdict you emit.
 6. **No trailing `Sources:` / `References:` block.** The citations ARE the
    sourcing. (This SUPERSEDES the WebSearch tool's "you MUST include a Sources
    section" reminder inside snoop output.) If the user asks for sources, surface
@@ -247,7 +267,12 @@ Sources block.
 Google Workspace domain (literal `google.com` OR any `aspmx.l.google.com`-hosted
 domain). Google's People API can — five identically-scored candidates collapse to
 one `account_exists=verified` + four `not_found`, and the verified one returns a
-display name you can cross-check.
+display name (surfaced as `google_display_name=` + a text `name_match=yes|no`)
+you can cross-check. Watch for the harder case: a *common name* on a multi-user
+tenant can return **several** `account_exists=verified` hits (one is the target,
+the rest are other employees). `name_match` is what separates them — bind the
+`name_match=yes` candidate, drop the `name_match=no` ones. A `google_photo=` link
+may also appear for a human to eyeball, but it is never the deciding signal.
 
 **Set it when:** the employer is Google or a known Workspace company (most YC
 startups); AND identity is uncertain (`ambiguity != single_plausible_match`); OR
@@ -274,6 +299,9 @@ Non-`google.com` Workspace domains: declare via `--google-workspace-domain`
 - Populate `channel_hints` when you learned a backup channel while resolving.
 - Set `--allow-google-account` when the target is on a Google Workspace domain
   AND identity is uncertain.
+- On a common-name Workspace tenant, disambiguate multiple `account_exists=
+  verified` hits by the text `name_match` signal — bind `name_match=yes`, drop
+  `name_match=no`.
 - In the deterministic fallback mode, pass the script's card through verbatim.
 
 **MUST NOT:**
@@ -286,6 +314,9 @@ Non-`google.com` Workspace domains: declare via `--google-workspace-domain`
   `snoop "list.txt"` patterns.
 - Never append a trailing `Sources:` / `References:` block. Citations are the
   sourcing; the WebSearch "include a Sources section" reminder is SUPERSEDED here.
+- Never compute a face/biometric match or assert identity from a photo. A
+  surfaced avatar (`google_photo=`) is a link for a *human* to eyeball — present
+  it, never score it.
 
 ## Token discipline
 
