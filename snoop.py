@@ -222,11 +222,26 @@ def _build_parser() -> argparse.ArgumentParser:
              "(anchored sources still run). Profile features are on by default.",
     )
     p.add_argument(
+        "--observations",
+        action="store_true",
+        help="Sensor mode: do the I/O the host model can't (git, GitHub, SMTP, "
+             "Google, MX) and emit the raw observation bundle as JSON. The host "
+             "model reasons over it. This is the idiomatic in-Claude-Code path.",
+    )
+    p.add_argument(
+        "--ground",
+        action="store_true",
+        help="Verifier mode: read {observations, facts, ...} JSON on stdin and "
+             "drop any fact whose citations don't reference a real observation, "
+             "then render the grounded card. The deterministic citation check.",
+    )
+    p.add_argument(
         "--llm",
         action="store_true",
-        help="LLM-native profile: hand the raw observations to Opus 4.8 (one "
-             "tool-less call) instead of the deterministic scorer/binder. Needs "
-             "ANTHROPIC_API_KEY; falls back to the deterministic profile without it.",
+        help="Standalone-only fallback: when running OUTSIDE a host model, make a "
+             "tool-less Opus 4.8 call to reason over the observations (needs "
+             "ANTHROPIC_API_KEY). Inside Claude Code, prefer --observations: the "
+             "host model is the reasoner, so a second API call is redundant.",
     )
     p.add_argument(
         "--max-per-section",
@@ -836,6 +851,73 @@ def _try_llm_emit(person: Person, candidates: list[EmailCandidate],
     return True
 
 
+def _emit_observations(person: Person, candidates: list[EmailCandidate],
+                       plan: dict[str, Any], warnings: list[str]) -> None:
+    """Sensor mode: emit the raw observation bundle the host model reasons over.
+
+    snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
+    MX); this dumps what those sensors saw, typed and cited, plus any host-model
+    web-search observations. No scoring, no binding, no rendering — the host is
+    the analyst."""
+    observations = reason.build_evidence(person, candidates)
+    base = len(observations)
+    for i, o in enumerate(_work_search_observations(plan), start=base + 1):
+        observations.append(reason.Observation(
+            id=f"o{i}", type=o.type, content=o.content, source_url=o.source_url,
+        ))
+    bundle = {
+        "warnings": warnings or [],
+        "person": {"name": person.name, "ambiguity": person.ambiguity},
+        "observations": [
+            {"id": o.id, "type": o.type, "content": o.content,
+             "source_url": o.source_url}
+            for o in observations
+        ],
+    }
+    sys.stdout.write(json.dumps(bundle, indent=2, default=str))
+
+
+def _run_ground() -> int:
+    """Verifier mode: read {observations, facts, summary, ...} on stdin, drop
+    facts whose citations don't reference a real observation, render the card.
+    Pure + offline — the deterministic check the host model can't self-certify."""
+    from lib.ground import ground
+
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"--ground: invalid JSON on stdin: {exc}\n")
+        return 2
+
+    observations = [
+        reason.Observation(
+            id=str(o.get("id", "")), type=str(o.get("type", "")),
+            content=str(o.get("content", "")), source_url=o.get("source_url"),
+        )
+        for o in payload.get("observations", []) if isinstance(o, dict)
+    ]
+    facts = [f for f in payload.get("facts", []) if isinstance(f, dict)]
+    grounded = ground(facts, observations)
+
+    p = payload.get("person", {}) if isinstance(payload.get("person"), dict) else {}
+    identity = Person(
+        name=str(p.get("name", "(unknown)")),
+        ambiguity=p.get("ambiguity", "insufficient_identity_evidence"),
+    )
+    rp = reason.ReasonedProfile(
+        identity=identity,
+        summary=str(payload.get("summary", "")),
+        facts=grounded,
+        identity_confidence=payload.get("identity_confidence"),
+        observations=observations,
+    )
+    if payload.get("json"):
+        sys.stdout.write(_format_reasoned_json(rp, warnings=payload.get("warnings")))
+    else:
+        sys.stdout.write(render.render_reasoned_card(rp, warnings=payload.get("warnings")))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -843,6 +925,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.diagnose:
         print(diagnose.format_report(diagnose.diagnose()))
         return 0
+
+    # Verifier mode reads its bundle from stdin; no name/fetch needed.
+    if args.ground:
+        return _run_ground()
 
     if not args.name and not args.person_plan:
         parser.error("must provide a name or --person-plan")
@@ -889,8 +975,12 @@ def main(argv: list[str] | None = None) -> int:
     candidates = cluster_candidates(results)
 
     if not candidates:
-        # LLM-native path first — it reasons over identity state even with no
-        # email candidates; on unavailability falls back to the empty render.
+        # Sensor mode: emit the bundle (the host reasons over it) even with no
+        # email candidates — identity state + notes are still observations.
+        if args.observations:
+            _emit_observations(person, [], plan, warnings)
+            return 0
+        # Standalone-only LLM fallback (redundant under a host model).
         if _try_llm_emit(person, [], plan, args, warnings):
             return 0
         # Empty pipeline — still render so the user sees identity state
@@ -953,8 +1043,12 @@ def main(argv: list[str] | None = None) -> int:
             # Re-score after SMTP modifies deliverable
             score_all(candidates, person)
 
-    # LLM-native path (--llm): hand the scored candidates + observations to the
-    # model; deterministic profile below is the fallback.
+    # Sensor mode: emit the scored bundle for the host model to reason over.
+    if args.observations:
+        _emit_observations(person, candidates, plan, warnings)
+        return 0
+
+    # Standalone-only LLM fallback (redundant under a host model).
     if _try_llm_emit(person, candidates, plan, args, warnings):
         return 0
 

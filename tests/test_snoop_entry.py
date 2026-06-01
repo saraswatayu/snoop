@@ -1100,3 +1100,103 @@ def test_llm_falls_back_to_deterministic_when_unavailable(monkeypatch, capsys):
     # deterministic card still rendered (the email lead), plus the fallback note
     assert "alice@corp.com" in out
     assert "--llm unavailable" in out
+
+
+# ---- sensor mode (--observations) + verifier mode (--ground) -----------------
+
+
+def test_observations_emits_raw_bundle(monkeypatch, capsys):
+    """--observations dumps the typed observation bundle the host reasons over —
+    no scoring, no card."""
+    import json as _json
+    _llm_setup(monkeypatch)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert bundle["person"]["name"] == "Alice Smith"
+    assert isinstance(bundle["observations"], list) and bundle["observations"]
+    # the scored candidate shows up as an observation the host can cite
+    blob = "\n".join(o["content"] for o in bundle["observations"])
+    assert "alice@corp.com" in blob
+    assert all({"id", "type", "content"} <= set(o) for o in bundle["observations"])
+
+
+def test_observations_includes_work_search(monkeypatch, capsys):
+    import json as _json
+    _llm_setup(monkeypatch)
+    plan = '{"work_search_results":[{"title":"Talk on widgets","url":"https://c/x"}]}'
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--observations", "--person-plan", plan])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert any(o["type"] == "web_search" for o in bundle["observations"])
+
+
+def _ground_stdin(monkeypatch, payload):
+    import io
+    import json as _json
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(payload)))
+
+
+def test_ground_drops_uncited_facts_and_renders(monkeypatch, capsys):
+    """--ground keeps facts citing a real observation, drops the rest, renders."""
+    payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith, engineer.",
+        "observations": [
+            {"id": "o1", "type": "email_candidate",
+             "content": "candidate email: alice@corp.com (sources=gh_profile)"},
+        ],
+        "facts": [
+            {"kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+             "confidence": 0.9, "evidence_ids": ["o1"], "reasoning": "profile"},
+            {"kind": "work_item", "label": "", "value": "ghost talk", "detail": "",
+             "confidence": 0.8, "evidence_ids": ["o404"], "reasoning": "hallucinated"},
+        ],
+    }
+    _ground_stdin(monkeypatch, payload)
+    rc = snoop.main(["--ground"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Alice Smith, engineer." in out
+    assert "alice@corp.com" in out      # cited a real observation -> kept
+    assert "ghost talk" not in out      # cited o404 (nonexistent) -> dropped
+
+
+def test_ground_invalid_json_returns_error(monkeypatch, capsys):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
+    rc = snoop.main(["--ground"])
+    assert rc == 2
+
+
+def test_observations_to_ground_roundtrip(monkeypatch, capsys):
+    """The real in-Claude-Code loop: snoop --observations -> (host reasons) ->
+    snoop --ground. Here the 'host' is the test, fabricating a cited fact from
+    the emitted bundle."""
+    import json as _json
+    _llm_setup(monkeypatch)
+
+    # 1. sensor: get the bundle
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    email_obs = next(o for o in bundle["observations"] if o["type"] == "email_candidate")
+
+    # 2. "host" reasons: produce a fact citing that observation
+    payload = {
+        "person": bundle["person"],
+        "summary": "Alice Smith — best reached at her work address.",
+        "observations": bundle["observations"],
+        "facts": [{
+            "kind": "email", "label": "", "value": "alice@corp.com", "detail": "work",
+            "confidence": 0.9, "evidence_ids": [email_obs["id"]], "reasoning": "from bundle",
+        }],
+    }
+
+    # 3. verifier: ground it
+    _ground_stdin(monkeypatch, payload)
+    rc = snoop.main(["--ground"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Alice Smith — best reached" in out
+    assert "alice@corp.com" in out
+    assert "(unverified)" not in out.split("alice@corp.com")[0].splitlines()[-1]
