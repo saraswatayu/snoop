@@ -520,6 +520,9 @@ def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
                 if (merged.account_display_name is None
                         and c.account_display_name is not None):
                     merged.account_display_name = c.account_display_name
+                if (merged.account_photo_url is None
+                        and c.account_photo_url is not None):
+                    merged.account_photo_url = c.account_photo_url
     return list(by_addr.values())
 
 
@@ -733,6 +736,7 @@ def _format_json_report(
                 "mx_provider": c.mx_provider,
                 "account_exists": c.account_exists,
                 "account_display_name": c.account_display_name,
+                "account_photo_url": c.account_photo_url,
                 "employer_match": c.employer_match,
                 "employer_former_match": c.employer_former_match,
                 "is_personal_provider": c.is_personal_provider,

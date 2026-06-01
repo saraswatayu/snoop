@@ -34,6 +34,7 @@ import re
 from typing import Iterable, Literal
 
 from .binding import apply_identity_gate
+from .normalize import name_match
 from .schema import BindTier, EmailCandidate, Person, Profile
 
 
@@ -588,6 +589,27 @@ def _render_lead(
         lines.append(
             "⚠ no current-employer address found — this is a fallback, "
             "not a confirmed work email"
+        )
+
+    # Google identity cross-check: a TEXT name-match between the account's
+    # display name and the target — the disambiguator on a common-name
+    # Workspace tenant. The photo, when present, is surfaced ONLY for a human
+    # to eyeball (e.g. against a LinkedIn photo); snoop never compares faces
+    # or derives a match from it (see SKILL.md scope).
+    if pick.account_display_name:
+        if person.name and name_match(pick.account_display_name, person.name):
+            rel = "matches"
+        elif person.name:
+            rel = "differs from"
+        else:
+            rel = "vs"
+        lines.append(
+            f'Google name: "{pick.account_display_name}" {rel} "{person.name}"'
+        )
+    if pick.account_photo_url:
+        lines.append(
+            f"Google photo (for human review, not an automated match): "
+            f"{pick.account_photo_url}"
         )
 
     # About block
