@@ -43,6 +43,11 @@ SourceType = Literal[
     "pattern",          # name × domain template guess (lowest trust)
     "smtp",             # SMTP RCPT verdict — modifies score, not a source itself
     "manual_known",     # user passed via --known; ground truth
+    # --- profile-expansion source types (2026-06-01) ---
+    "channel_hint",     # a reachability channel declared in person.channel_hints
+    "github_repo",      # a public repo from the GitHub /repos surface (body of work)
+    "rss",              # an item from a blog/RSS feed on a (bound) personal domain
+    "web_search",       # a free-text search result (lowest trust; binding-gated, "possibly" at most)
 ]
 
 
