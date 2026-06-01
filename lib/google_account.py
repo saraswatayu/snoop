@@ -79,6 +79,7 @@ _FIELD_PATHS = [
     "person.metadata.best_display_name",
     "person.name",
     "person.email",
+    "person.photo",
     "person.read_only_profile_info",
 ]
 _CONTAINERS = [
@@ -163,10 +164,30 @@ def _build_lookup_params(email: str) -> list[tuple[str, str]]:
     return params
 
 
+def _real_display_name(display_name: str | None, email: str) -> str | None:
+    """Return a usable human name, or None.
+
+    Some locked-down Workspace tenants return the EMAIL ITSELF as the People
+    API "best display name" when no real profile name is visible to an external
+    querier. That's a placeholder, not a name — keeping it would
+    produce a misleading `name_match=no` (read as "different person") when the
+    truth is just "no name exposed." Treat display-name == email (or its
+    localpart) as no name; callers then fall back to the photo artifact.
+    """
+    if not display_name or not display_name.strip():
+        return None
+    dn = display_name.strip()
+    addr = email.strip().lower()
+    local = addr.split("@", 1)[0]
+    if dn.lower() in (addr, local):
+        return None
+    return dn
+
+
 def _blank() -> dict[str, Any]:
     return {
         "exists": False, "profile_visible": False,
-        "gaia_id": None, "display_name": None,
+        "gaia_id": None, "display_name": None, "photo_url": None,
         "rate_limited": False, "parse_error": None,
     }
 
@@ -185,6 +206,7 @@ def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
       profile_visible: bool  (False == exists_unverifiable)
       gaia_id:       str | None
       display_name:  str | None
+      photo_url:     str | None  (non-default avatar only; human-review artifact)
       rate_limited:  bool
       parse_error:   str | None
 
@@ -254,6 +276,21 @@ def _parse_lookup_response(payload_bytes: bytes) -> dict[str, Any]:
                 if isinstance(v, str) and v.strip():
                     out["display_name"] = v.strip()
                     break
+
+    # Profile photo — captured ONLY as a human-review artifact (a person can
+    # compare it against, e.g., a LinkedIn photo). snoop never compares faces.
+    # Drop default/placeholder avatars: a generic silhouette is useless for a
+    # human cross-check and would only mislead. Response key has been seen as
+    # both "photo" and "photos" across rotations; accept either.
+    photos = first.get("photo") or first.get("photos")
+    if isinstance(photos, list):
+        for p in photos:
+            if not isinstance(p, dict):
+                continue
+            url = p.get("url")
+            if isinstance(url, str) and url.strip() and not p.get("isDefault"):
+                out["photo_url"] = url.strip()
+                break
 
     # profile_visible: gaia_id alone is enough to confirm a queryable
     # account. display_name is bonus signal for name-matching but not
@@ -468,8 +505,12 @@ def fetch_google_account(
 
         if result["profile_visible"]:
             c.account_exists = "verified"
-            if result["display_name"]:
-                c.account_display_name = result["display_name"]
+            # Drop the email-as-display-name placeholder (see _real_display_name).
+            real_name = _real_display_name(result["display_name"], c.address)
+            if real_name:
+                c.account_display_name = real_name
+            if result.get("photo_url"):
+                c.account_photo_url = result["photo_url"]
             # Short-circuit ONLY when we can confirm this is the target
             # (name match) OR the caller didn't pass a target name and so
             # opted into the legacy "any verified short-circuits" behavior.
@@ -478,15 +519,15 @@ def fetch_google_account(
             # leave the actual target's address unprobed.
             if target_name is None:
                 verified_seen = True
-            elif result["display_name"] and name_match(
-                result["display_name"], target_name
-            ):
+            elif real_name and name_match(real_name, target_name):
                 verified_seen = True
             detail_parts = ["Google account confirmed"]
             if result["gaia_id"]:
                 detail_parts.append(f"Gaia {result['gaia_id'][:8]}…")
-            if result["display_name"]:
-                detail_parts.append(f"display name '{result['display_name']}'")
+            if real_name:
+                detail_parts.append(f"display name '{real_name}'")
+            if result.get("photo_url"):
+                detail_parts.append("profile photo available (human-review artifact)")
             c.sources.append(Source(
                 type="google_account",
                 url=None,

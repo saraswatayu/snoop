@@ -33,13 +33,28 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Callable
 
-from .binding import bind_best
+from .binding import bind_and_keep
 from .schema import GitHubRepo, Person, ResolverResult, Source, WorkItem
 
 # Injectable search provider signature. Each result dict has keys:
 #   title, url, item_type, published_at, summary, and optionally crosslink_url
 # (a URL on the page that links back to the person, e.g. their bound domain).
 SearchFn = Callable[[str], list[dict]]
+
+# Allowed WorkItem.item_type values. The host model fully controls the
+# item_type field on a search result (T8), so it is clamped to this set rather
+# than trusted; anything else collapses to "other".
+_ITEM_TYPES = frozenset({"repo", "article", "talk", "podcast", "paper", "other"})
+
+
+def _as_str(value: object) -> str | None:
+    """Coerce an untrusted result field to a non-empty str, else None.
+
+    Host-model search results are untrusted input: a field may be missing, a
+    non-string (int/dict), or empty. Anything that is not a non-empty string
+    becomes None so it never reaches url.strip() (binding._host) or a card line.
+    """
+    return value if isinstance(value, str) and value.strip() else None
 
 # When search is enabled but no results were supplied this run (no host-model
 # WebSearch results in the plan, e.g. a standalone CLI run). Surfaced as
@@ -62,17 +77,6 @@ def _anchored_work_items(person: Person, *, now: datetime) -> list[WorkItem]:
     for repo in person.gh_recent_repos:
         if not isinstance(repo, GitHubRepo):
             continue
-        sources = [
-            Source(
-                type="github_repo",
-                url=repo.html_url,
-                observed_at=now,
-                detail="recent public repo",
-            )
-        ]
-        binding = bind_best(sources, person)
-        if binding.tier == "unbound":
-            continue
         items.append(
             WorkItem(
                 title=repo.name,
@@ -80,21 +84,25 @@ def _anchored_work_items(person: Person, *, now: datetime) -> list[WorkItem]:
                 item_type="repo",
                 published_at=repo.pushed_at,
                 summary=repo.description,
-                sources=sources,
-                bind_tier=binding.tier,
-                bind_reasons=binding.reasons,
+                sources=[Source(
+                    type="github_repo",
+                    url=repo.html_url,
+                    observed_at=now,
+                    detail="recent public repo",
+                )],
             )
         )
-    return items
+    return bind_and_keep(items, person)
 
 
 def _crosslink_source(crosslink_url: str, *, now: datetime) -> Source:
     """Represent a result's back-link to the person as a Source.
 
     The crosslink is what lets a free-text hit bind: if it lands on a bound
-    personal domain, lib.binding resolves it to "asserted"/"possibly" and the
-    item survives the gate. Typed as "web_search" for simplicity (a feed-host
-    refinement to "rss" is a later concern; binding keys on host, not type).
+    personal domain, lib.binding lifts it from "unbound" (drop) to "possibly"
+    (kept) — but never to "asserted", because snoop never fetched the page to
+    verify the link (it is an unverified host-model claim). Typed "web_search"
+    so the binding gate applies that cap; binding keys on host AND type here.
     """
     return Source(
         type="web_search",
@@ -116,6 +124,10 @@ def _search_work_items(
     result URL, plus an additional cross-link Source when the result carries a
     "crosslink_url". Bind across all the item's sources and DROP any item whose
     tier is "unbound" (the namesake gate). Caps processing at _SEARCH_BUDGET.
+
+    Every field is untrusted host-model input: url/crosslink_url/title/summary/
+    published_at are coerced to str-or-None (so a non-string never reaches
+    url.strip()), and item_type is clamped to _ITEM_TYPES (fallback "other").
     """
     if search_fn is None:
         return []  # real provider not configured (T8)
@@ -125,7 +137,9 @@ def _search_work_items(
 
     items: list[WorkItem] = []
     for result in results[:_SEARCH_BUDGET]:
-        url = result.get("url")
+        if not isinstance(result, dict):
+            continue  # untrusted: skip a malformed (non-dict) result
+        url = _as_str(result.get("url"))
         sources = [
             Source(
                 type="web_search",
@@ -134,27 +148,24 @@ def _search_work_items(
                 detail="free-text search result",
             )
         ]
-        crosslink_url = result.get("crosslink_url")
+        crosslink_url = _as_str(result.get("crosslink_url"))
         if crosslink_url:
             sources.append(_crosslink_source(crosslink_url, now=now))
 
-        binding = bind_best(sources, person)
-        if binding.tier == "unbound":
-            continue  # namesake gate: no cross-link to a bound signal -> drop
-
+        item_type = result.get("item_type")
         items.append(
             WorkItem(
-                title=result.get("title") or url or "(untitled)",
+                title=_as_str(result.get("title")) or url or "(untitled)",
                 url=url,
-                item_type=result.get("item_type") or "other",
-                published_at=result.get("published_at"),
-                summary=result.get("summary"),
+                item_type=item_type if item_type in _ITEM_TYPES else "other",
+                published_at=_as_str(result.get("published_at")),
+                summary=_as_str(result.get("summary")),
                 sources=sources,
-                bind_tier=binding.tier,
-                bind_reasons=binding.reasons,
             )
         )
-    return items
+    # Bind across each item's sources; DROP unbound (the namesake gate: a result
+    # with no cross-link to a bound signal does not survive).
+    return bind_and_keep(items, person)
 
 
 def collect_work_items(

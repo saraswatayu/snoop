@@ -47,7 +47,6 @@ SourceType = Literal[
     # --- profile-expansion source types (2026-06-01) ---
     "channel_hint",     # a reachability channel declared in person.channel_hints
     "github_repo",      # a public repo from the GitHub /repos surface (body of work)
-    "rss",              # an item from a blog/RSS feed on a (bound) personal domain
     "web_search",       # a free-text search result (lowest trust; binding-gated, "possibly" at most)
 ]
 
@@ -165,6 +164,13 @@ class EmailCandidate:
     # the target's name to bind the name_match anchor (or flag a delta if
     # Google's name doesn't match the target's).
     account_display_name: str | None = None
+    # When account_exists=="verified" AND Google returned a non-default profile
+    # photo, this holds its URL. Surfaced ONLY as a human-review artifact — a
+    # person can eyeball it against, e.g., a LinkedIn photo. snoop never compares
+    # faces or derives a match signal from it (see SKILL.md scope). Default /
+    # placeholder avatars are dropped at capture (a generic silhouette tells you
+    # nothing). Set by lib.google_account.fetch_google_account.
+    account_photo_url: str | None = None
 
     # Domain-level facts
     employer_match: bool = False           # address domain ∈ resolved current employer.domains

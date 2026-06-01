@@ -145,3 +145,88 @@ def test_empty_email_list_observes_nothing():
     person = _bound_person()
     result = collect_channels(person, [], now=_now())
     assert result.status == "empty"
+
+
+# ---- iron rule + honest markers (red-team I2 / I3) --------------------------
+
+
+def test_email_channel_dropped_when_source_unbound():
+    """The iron rule reaches channels too: an email whose only source is an
+    unbindable web_search hit yields an unbound channel that must be dropped,
+    not surfaced — even though its belongs score is high."""
+    person = _bound_person()
+    emails = [EmailCandidate(
+        address="x@y.com", belongs_to_person=0.9,
+        sources=[_src("web_search", url="https://randomconf.example/x")],
+    )]
+    result = collect_channels(person, emails, now=_now())
+    assert not any(c.channel_type == "email" for c in result.contributions)
+
+
+def test_weak_belongs_email_channel_capped_to_possibly():
+    """I3: source provenance can bind 'asserted', but a weak/nil ownership score
+    must cap the email channel's marker to 'possibly' — the [+] marker reads as
+    'this address belongs to the person' and must not override belongs≈0."""
+    person = _bound_person()
+    emails = [EmailCandidate(
+        address="p@openai.com", belongs_to_person=0.1,
+        sources=[_src("gh_profile", url="https://github.com/steipete")],
+    )]
+    result = collect_channels(person, emails, now=_now())
+    email = next(c for c in result.contributions if c.channel_type == "email")
+    assert email.bind_tier == "possibly"
+
+
+def test_strong_belongs_email_channel_still_asserts():
+    """The cap is for weak scores only: a strong belongs from a validated profile
+    source still asserts (guards against over-capping)."""
+    person = _bound_person()
+    emails = [EmailCandidate(
+        address="p@openai.com", belongs_to_person=0.9,
+        sources=[_src("gh_profile", url="https://github.com/steipete")],
+    )]
+    result = collect_channels(person, emails, now=_now())
+    email = next(c for c in result.contributions if c.channel_type == "email")
+    assert email.bind_tier == "asserted"
+
+
+def test_personal_provider_email_channel_is_annotated():
+    """I2: a personal-provider address surfaced as an alternate channel carries
+    the 'personal address' caveat, so a work-intent card never presents a
+    personal address as if it were a vetted work channel."""
+    person = _bound_person()
+    emails = [EmailCandidate(
+        address="p.personal@gmail.com", belongs_to_person=0.9,
+        sources=[_src("gh_profile", url="https://github.com/steipete")],
+    )]
+    result = collect_channels(person, emails, now=_now())
+    email = next(c for c in result.contributions if c.channel_type == "email")
+    assert "personal address" in (email.evidence or "")
+
+
+def test_unscored_email_channel_evidence_is_honest():
+    """An abstained scorer (belongs_to_person=None) shows 'ownership unscored'
+    rather than a misleading 'belongs=0', and the marker is capped to possibly."""
+    person = _bound_person()
+    emails = [EmailCandidate(
+        address="p@openai.com", belongs_to_person=None,
+        sources=[_src("gh_profile", url="https://github.com/steipete")],
+    )]
+    result = collect_channels(person, emails, now=_now())
+    email = next(c for c in result.contributions if c.channel_type == "email")
+    assert email.evidence == "ownership unscored"
+    assert email.bind_tier == "possibly"
+
+
+def test_website_and_contact_form_channels_surface():
+    """Coverage for the two url-shaped hints not exercised by the ordering test;
+    both bind 'possibly' off the declared channel hint."""
+    person = _bound_person(channel_hints={
+        "website": "https://p.example",
+        "contact_form": "https://p.example/contact",
+    })
+    result = collect_channels(person, None, now=_now())
+    by_type = {c.channel_type: c for c in result.contributions}
+    assert {"website", "contact_form"} <= set(by_type)
+    assert by_type["website"].bind_tier == "possibly"
+    assert by_type["contact_form"].bind_tier == "possibly"

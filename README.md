@@ -5,13 +5,20 @@ A [Claude Code](https://claude.com/claude-code) **skill** that builds a
 the context for a good first message. The reachable email leads the output; the
 profile sections follow.
 
-Give it a name + company (or a LinkedIn URL, or freeform text). It resolves
-the person across public sources — GitHub commits, GitHub profile + README,
-personal-site `mailto:` anchors, and (as a last resort) name × domain
-pattern guessing — scores each email candidate on three independent fields,
-then assembles a profile from five producers (self-published social links,
-observed reachability channels, body of work, role context, text-only
-identity-consistency notes) and emits a **person profile card**.
+**snoop is a sensor; the host model is the analyst.** Its irreducible job is the
+I/O a model can't do itself — GitHub commits, the GitHub profile + README,
+personal-site `mailto:` anchors, the SMTP `RCPT` handshake, the Google People
+API, MX lookups, and (as a last resort) name × domain pattern guessing. Give it
+a name + company (or a LinkedIn URL, or freeform text) and `--observations`, and
+it emits a typed **observation bundle**: raw readings, each with a source URL and
+any probe verdict. The host model (Claude Code, already running) reasons over
+that bundle — picks the email, judges the namesake, builds the profile, writes
+the prose — and `snoop --ground` deterministically checks that every claim cites
+a real observation before rendering the card.
+
+Run `snoop` without `--observations` and it falls back to a fully deterministic
+contact decision card (its own scorer/binder/renderer) — the standalone path for
+use outside a host model.
 
 Every profile fact is marked `[+]` (asserted) or `[?]` (possibly) by its
 binding to the person. Scope is deliberately bounded: only self-published,
@@ -27,7 +34,9 @@ mail.** Use it for legitimate outreach and verification only.
 | File | Purpose |
 |---|---|
 | `SKILL.md` | The skill itself — instructions Claude Code loads. |
-| `snoop.py` | Entry point. Pipeline: resolve → fan-out resolvers → cluster → score → verify → render. |
+| `snoop.py` | Entry point. `--observations` (sensor) and `--ground` (verifier) are the primary in-Claude-Code modes; the no-flag run is the deterministic fallback (resolve → fan-out → cluster → score → verify → render). |
+| `lib/reason.py` | `build_evidence()` (the sensor's observation bundle) + `reason_profile()` (the standalone-only API-call reasoner). |
+| `lib/ground.py` | The deterministic verifier — drops facts whose citations don't reference a real observation. |
 | `lib/` | Resolvers (`git_emails`, `gh_profile`, `personal_site`, `pattern_gen`, `google_account`), scorer, renderer, diagnose, normalize, schema. |
 | `verify_email.py` | Legacy single-address verifier. Standalone CLI, no pipeline. |
 | `tests/` | pytest suite (`python3 -m pytest tests/`, no network). |

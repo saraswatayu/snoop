@@ -18,7 +18,9 @@ Pipeline:
               ↓
     re-score  (SMTP modifies deliverable)
               ↓
-    render_decision_card  (markdown contact card)
+    build_profile  (run 5 profile producers; bind every fact + merge)
+              ↓
+    render_profile_card  (profile card: email lead + provenance-marked sections)
 
 Legacy compatibility: the original verify_email.py script still works
 for single-address verification. snoop.py is the new rich-pipeline
@@ -38,7 +40,8 @@ from concurrent.futures import (
 from pathlib import Path
 from typing import Any, Callable
 
-from lib import __version__, diagnose, render
+from lib import __version__, diagnose, reason, render
+from lib.binding import apply_identity_gate
 from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
@@ -217,6 +220,28 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Escape hatch: skip the free-text body-of-work search path "
              "(anchored sources still run). Profile features are on by default.",
+    )
+    p.add_argument(
+        "--observations",
+        action="store_true",
+        help="Sensor mode: do the I/O the host model can't (git, GitHub, SMTP, "
+             "Google, MX) and emit the raw observation bundle as JSON. The host "
+             "model reasons over it. This is the idiomatic in-Claude-Code path.",
+    )
+    p.add_argument(
+        "--ground",
+        action="store_true",
+        help="Verifier mode: read {observations, facts, ...} JSON on stdin and "
+             "drop any fact whose citations don't reference a real observation, "
+             "then render the grounded card. The deterministic citation check.",
+    )
+    p.add_argument(
+        "--llm",
+        action="store_true",
+        help="Standalone-only fallback: when running OUTSIDE a host model, make a "
+             "tool-less Opus 4.8 call to reason over the observations (needs "
+             "ANTHROPIC_API_KEY). Inside Claude Code, prefer --observations: the "
+             "host model is the reasoner, so a second API call is redundant.",
     )
     p.add_argument(
         "--max-per-section",
@@ -495,6 +520,9 @@ def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
                 if (merged.account_display_name is None
                         and c.account_display_name is not None):
                     merged.account_display_name = c.account_display_name
+                if (merged.account_photo_url is None
+                        and c.account_photo_url is not None):
+                    merged.account_photo_url = c.account_photo_url
     return list(by_addr.values())
 
 
@@ -604,7 +632,18 @@ def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[E
 def _profile_json(profile: "Profile") -> dict:
     """Serialize the profile sections (additive; consumers can ignore). Every
     fact carries its bind_tier so a machine consumer can apply the same
-    asserted/possibly distinction the card shows."""
+    asserted/possibly distinction the card shows.
+
+    The emitted bind_tier is the EFFECTIVE tier — the per-field tier AFTER the
+    identity gate (apply_identity_gate). When the identity is not a single
+    confident match the human card downgrades every field to "possibly"; the
+    JSON must match, or a machine consumer would trust an "asserted" fact about
+    an unconfirmed identity that the human is told to doubt (namesake risk)."""
+    identity = profile.identity
+
+    def tier(f) -> str:
+        return apply_identity_gate(f.bind_tier, identity)
+
     def srcs(f):
         return [{"type": s.type, "url": s.url,
                  "observed_at": s.observed_at.isoformat(), "detail": s.detail}
@@ -612,29 +651,29 @@ def _profile_json(profile: "Profile") -> dict:
     return {
         "social_links": [
             {"platform": s.platform, "url": s.url, "handle": s.handle,
-             "bind_tier": s.bind_tier, "sources": srcs(s)}
+             "bind_tier": tier(s), "sources": srcs(s)}
             for s in profile.social_links
         ],
         "channels": [
             {"channel_type": c.channel_type, "value": c.value,
              "evidence": c.evidence, "rank_hint": c.rank_hint,
-             "bind_tier": c.bind_tier, "sources": srcs(c)}
+             "bind_tier": tier(c), "sources": srcs(c)}
             for c in profile.channels
         ],
         "work_items": [
             {"title": w.title, "url": w.url, "item_type": w.item_type,
              "published_at": w.published_at, "summary": w.summary,
-             "bind_tier": w.bind_tier, "sources": srcs(w)}
+             "bind_tier": tier(w), "sources": srcs(w)}
             for w in profile.work_items
         ],
         "roles": [
             {"employer": r.employer, "title": r.title, "since": r.since,
-             "until": r.until, "summary": r.summary, "bind_tier": r.bind_tier,
+             "until": r.until, "summary": r.summary, "bind_tier": tier(r),
              "sources": srcs(r)}
             for r in profile.roles
         ],
         "consistency_notes": [
-            {"note": n.note, "severity": n.severity, "bind_tier": n.bind_tier,
+            {"note": n.note, "severity": n.severity, "bind_tier": tier(n),
              "sources": srcs(n)}
             for n in profile.consistency_notes
         ],
@@ -697,6 +736,7 @@ def _format_json_report(
                 "mx_provider": c.mx_provider,
                 "account_exists": c.account_exists,
                 "account_display_name": c.account_display_name,
+                "account_photo_url": c.account_photo_url,
                 "employer_match": c.employer_match,
                 "employer_former_match": c.employer_former_match,
                 "is_personal_provider": c.is_personal_provider,
@@ -743,6 +783,145 @@ def _work_search_fn(plan: dict[str, Any]) -> Callable[[str], list[dict]] | None:
     return lambda _query: results
 
 
+def _work_search_observations(plan: dict[str, Any]) -> list[reason.Observation]:
+    """Shape host-model WebSearch results into raw observations for the LLM
+    path. Untrusted: each is just text the model weighs; the tool-less call and
+    grounding keep it safe. Non-string fields are coerced/dropped."""
+    raw = plan.get("work_search_results")
+    if not isinstance(raw, list):
+        return []
+    obs: list[reason.Observation] = []
+    for i, r in enumerate(raw, start=1):
+        if not isinstance(r, dict):
+            continue
+        title = r.get("title") if isinstance(r.get("title"), str) else ""
+        summary = r.get("summary") if isinstance(r.get("summary"), str) else ""
+        url = r.get("url") if isinstance(r.get("url"), str) else None
+        crosslink = r.get("crosslink_url") if isinstance(r.get("crosslink_url"), str) else ""
+        content = " ".join(p for p in (
+            f"web-search result: {title}".strip(),
+            summary,
+            f"(page cross-links to {crosslink})" if crosslink else "",
+        ) if p).strip()
+        if not content:
+            continue
+        obs.append(reason.Observation(
+            id=f"w{i}", type="web_search", content=content, source_url=url,
+        ))
+    return obs
+
+
+def _format_reasoned_json(profile: reason.ReasonedProfile, *,
+                          warnings: list[str] | None = None) -> str:
+    """Machine-readable form of the LLM-native profile. Every fact carries its
+    citations, confidence, and the deterministic `verified` flag."""
+    return json.dumps({
+        "warnings": warnings or [],
+        "person": {"name": profile.identity.name,
+                   "ambiguity": profile.identity.ambiguity},
+        "summary": profile.summary,
+        "identity_confidence": profile.identity_confidence,
+        "facts": [
+            {"kind": f.kind, "label": f.label, "value": f.value, "detail": f.detail,
+             "confidence": f.confidence, "verified": f.verified,
+             "evidence_ids": f.evidence_ids, "reasoning": f.reasoning}
+            for f in profile.facts
+        ],
+        "usage": profile.usage,
+    }, indent=2, default=str)
+
+
+def _try_llm_emit(person: Person, candidates: list[EmailCandidate],
+                  plan: dict[str, Any], args: argparse.Namespace,
+                  warnings: list[str]) -> bool:
+    """If --llm, run the reasoning path and emit. Returns True when it produced
+    output (caller returns), False to fall back to the deterministic path (e.g.
+    no API key). A wrong profile is acceptable here; a hard failure is not — any
+    unavailability degrades to deterministic rather than erroring out."""
+    if not args.llm:
+        return False
+    try:
+        rp = reason.reason_profile(
+            person, candidates,
+            extra_observations=_work_search_observations(plan),
+        )
+    except reason.ReasoningUnavailable as exc:
+        warnings.append(f"--llm unavailable: {exc}; using deterministic profile")
+        return False
+    if args.json:
+        sys.stdout.write(_format_reasoned_json(rp, warnings=warnings))
+    else:
+        sys.stdout.write(render.render_reasoned_card(rp, warnings=warnings))
+    return True
+
+
+def _emit_observations(person: Person, candidates: list[EmailCandidate],
+                       plan: dict[str, Any], warnings: list[str]) -> None:
+    """Sensor mode: emit the raw observation bundle the host model reasons over.
+
+    snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
+    MX); this dumps what those sensors saw, typed and cited, plus any host-model
+    web-search observations. No scoring, no binding, no rendering — the host is
+    the analyst."""
+    observations = reason.build_evidence(person, candidates)
+    base = len(observations)
+    for i, o in enumerate(_work_search_observations(plan), start=base + 1):
+        observations.append(reason.Observation(
+            id=f"o{i}", type=o.type, content=o.content, source_url=o.source_url,
+        ))
+    bundle = {
+        "warnings": warnings or [],
+        "person": {"name": person.name, "ambiguity": person.ambiguity},
+        "observations": [
+            {"id": o.id, "type": o.type, "content": o.content,
+             "source_url": o.source_url}
+            for o in observations
+        ],
+    }
+    sys.stdout.write(json.dumps(bundle, indent=2, default=str))
+
+
+def _run_ground() -> int:
+    """Verifier mode: read {observations, facts, summary, ...} on stdin, drop
+    facts whose citations don't reference a real observation, render the card.
+    Pure + offline — the deterministic check the host model can't self-certify."""
+    from lib.ground import ground
+
+    try:
+        payload = json.load(sys.stdin)
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"--ground: invalid JSON on stdin: {exc}\n")
+        return 2
+
+    observations = [
+        reason.Observation(
+            id=str(o.get("id", "")), type=str(o.get("type", "")),
+            content=str(o.get("content", "")), source_url=o.get("source_url"),
+        )
+        for o in payload.get("observations", []) if isinstance(o, dict)
+    ]
+    facts = [f for f in payload.get("facts", []) if isinstance(f, dict)]
+    grounded = ground(facts, observations)
+
+    p = payload.get("person", {}) if isinstance(payload.get("person"), dict) else {}
+    identity = Person(
+        name=str(p.get("name", "(unknown)")),
+        ambiguity=p.get("ambiguity", "insufficient_identity_evidence"),
+    )
+    rp = reason.ReasonedProfile(
+        identity=identity,
+        summary=str(payload.get("summary", "")),
+        facts=grounded,
+        identity_confidence=payload.get("identity_confidence"),
+        observations=observations,
+    )
+    if payload.get("json"):
+        sys.stdout.write(_format_reasoned_json(rp, warnings=payload.get("warnings")))
+    else:
+        sys.stdout.write(render.render_reasoned_card(rp, warnings=payload.get("warnings")))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -750,6 +929,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.diagnose:
         print(diagnose.format_report(diagnose.diagnose()))
         return 0
+
+    # Verifier mode reads its bundle from stdin; no name/fetch needed.
+    if args.ground:
+        return _run_ground()
 
     if not args.name and not args.person_plan:
         parser.error("must provide a name or --person-plan")
@@ -796,6 +979,14 @@ def main(argv: list[str] | None = None) -> int:
     candidates = cluster_candidates(results)
 
     if not candidates:
+        # Sensor mode: emit the bundle (the host reasons over it) even with no
+        # email candidates — identity state + notes are still observations.
+        if args.observations:
+            _emit_observations(person, [], plan, warnings)
+            return 0
+        # Standalone-only LLM fallback (redundant under a host model).
+        if _try_llm_emit(person, [], plan, args, warnings):
+            return 0
         # Empty pipeline — still render so the user sees identity state
         # and resolver notes. Respect --json mode.
         empty_profile = build_profile(
@@ -855,6 +1046,15 @@ def main(argv: list[str] | None = None) -> int:
             verify_candidates(smtp_targets, budget=default_budget())
             # Re-score after SMTP modifies deliverable
             score_all(candidates, person)
+
+    # Sensor mode: emit the scored bundle for the host model to reason over.
+    if args.observations:
+        _emit_observations(person, candidates, plan, warnings)
+        return 0
+
+    # Standalone-only LLM fallback (redundant under a host model).
+    if _try_llm_emit(person, candidates, plan, args, warnings):
+        return 0
 
     # Default output is the person PROFILE (D2-B): build it from the scored
     # candidates + the producers. --no-search is the DX-D1 escape hatch.

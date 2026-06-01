@@ -41,27 +41,42 @@ def build_profile(
 
     Returns:
         Profile with emails plus every bound contribution from the producers
-        routed into its section. Search/T8 notes (and any producer error_detail)
-        are appended to person.notes so the renderer can surface them.
+        routed into its section. Search/T8 notes (and any producer error_detail
+        or crash) are appended to person.notes so the renderer can surface them.
+
+    Robustness: each producer is isolated in its own try/except, mirroring the
+    email fan-out's _run_resolver contract. A single producer raising (e.g. a
+    malformed channel_hints value, an unexpected gh_recent_repos type, a
+    host-model search_fn that throws) must NOT lose the whole profile — the
+    email answer and the surviving sections still render. The failure is
+    recorded as a note instead.
     """
     profile = Profile(identity=person, emails=list(candidates))
 
-    results = [
-        collect_social_links(person, now=now),
-        collect_channels(person, candidates, now=now),
-        collect_work_items(person, enable_search=enable_search,
-                           search_fn=search_fn, now=now),
-        collect_role_context(person, now=now),
-        collect_consistency_notes(person, now=now),
+    producers = [
+        ("social_links", lambda: collect_social_links(person, now=now)),
+        ("reachability", lambda: collect_channels(person, candidates, now=now)),
+        ("work_items", lambda: collect_work_items(
+            person, enable_search=enable_search, search_fn=search_fn, now=now)),
+        ("role_context", lambda: collect_role_context(person, now=now)),
+        ("consistency_notes", lambda: collect_consistency_notes(person, now=now)),
     ]
 
-    for result in results:
+    def _note(text: str) -> None:
+        if text not in person.notes:
+            person.notes.append(text)
+
+    for name, run in producers:
+        try:
+            result = run()
+        except Exception as exc:  # one bad producer must not lose the card
+            _note(f"{name}: profile producer failed "
+                  f"({type(exc).__name__}: {exc})")
+            continue
         for contribution in result.contributions:
             profile.add(contribution)
         # Surface capability degradations (e.g. work_items' T8 note) once.
         if result.error_detail:
-            note = f"{result.resolver}: {result.error_detail}"
-            if note not in person.notes:
-                person.notes.append(note)
+            _note(f"{result.resolver}: {result.error_detail}")
 
     return profile

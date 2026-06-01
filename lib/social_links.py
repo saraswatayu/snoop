@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .binding import bind_best
+from .binding import bind_and_keep
 from .schema import Person, ResolverResult, SocialLink, Source
 
 
@@ -123,14 +123,10 @@ def collect_social_links(
             )],
         ))
 
-    # bind, drop unbound, dedupe by (platform, lowercased url), sort.
+    # bind + drop unbound (shared helper), then dedupe by (platform, lowercased
+    # url) keeping the first, and sort.
     by_key: dict[tuple[str, str], SocialLink] = {}
-    for link in links:
-        binding = bind_best(link.sources, person)
-        if binding.tier == "unbound":
-            continue
-        link.bind_tier = binding.tier
-        link.bind_reasons = binding.reasons
+    for link in bind_and_keep(links, person):
         key = (link.platform, link.url.lower())
         if key not in by_key:
             by_key[key] = link

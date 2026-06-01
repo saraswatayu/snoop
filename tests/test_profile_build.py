@@ -105,3 +105,25 @@ def test_contributions_flatten_covers_all_added():
     assert "channel" in kinds
     assert "work_item" in kinds
     assert "role" in kinds
+
+
+def test_one_producer_crash_does_not_lose_the_profile(monkeypatch):
+    """C2: producers are isolated. One raising must NOT abort the whole profile —
+    the email answer and the surviving sections still build, and the failure is
+    recorded as a note instead of propagating (mirrors the email fan-out)."""
+    import lib.profile_build as pb
+
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    monkeypatch.setattr(pb, "collect_social_links", boom)
+    person = _rich_person()
+    profile = pb.build_profile(person, [_candidate()], now=_now())
+
+    # The email answer (the original deliverable) survives.
+    assert len(profile.emails) == 1
+    # A surviving producer still ran (the diminutive name -> a consistency note).
+    assert profile.consistency_notes
+    # The crashed producer left no section but DID leave a diagnostic note.
+    assert profile.social_links == []
+    assert any("social_links" in n and "kaboom" in n for n in person.notes)

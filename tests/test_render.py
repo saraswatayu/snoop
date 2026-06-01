@@ -294,6 +294,57 @@ def test_about_block_surfaces_gh_company_only_when_differs_from_employer():
     assert "Anthropic" in out_diff
 
 
+# ---- Google identity cross-check (name + photo) -----------------------------
+
+
+def _google_verified_candidate(addr, display_name, *, photo_url=None):
+    return EmailCandidate(
+        address=addr,
+        sources=[Source(type="google_account", url=None, observed_at=NOW,
+                        detail="Google account confirmed")],
+        smtp_verdict="catch_all",
+        account_exists="verified",
+        account_display_name=display_name,
+        account_photo_url=photo_url,
+        belongs_to_person=0.85,
+    )
+
+
+def test_render_surfaces_google_name_match():
+    p = make_person()
+    c = _google_verified_candidate("peter@openai.com", "Peter Steinberger")
+    out = render_decision_card(p, [c], intent="work")
+    assert 'Google name: "Peter Steinberger" matches "Peter Steinberger"' in out
+
+
+def test_render_flags_google_name_mismatch():
+    """Common-name namesake: the account exists but the display name is a
+    different person — surfaced as a text mismatch, not a face comparison."""
+    p = make_person()
+    c = _google_verified_candidate("peter@openai.com", "Peter Nowak")
+    out = render_decision_card(p, [c], intent="work")
+    assert "differs from" in out
+    assert "Peter Nowak" in out
+
+
+def test_render_photo_is_labelled_human_review_only():
+    p = make_person()
+    c = _google_verified_candidate(
+        "peter@openai.com", "Peter Steinberger",
+        photo_url="https://lh3.googleusercontent.com/a/pete=s96",
+    )
+    out = render_decision_card(p, [c], intent="work")
+    assert "https://lh3.googleusercontent.com/a/pete=s96" in out
+    assert "for human review, not an automated match" in out
+
+
+def test_render_omits_photo_line_when_absent():
+    p = make_person()
+    c = _google_verified_candidate("peter@openai.com", "Peter Steinberger")
+    out = render_decision_card(p, [c], intent="work")
+    assert "Google photo" not in out
+
+
 # ---- recent repos block -----------------------------------------------------
 
 

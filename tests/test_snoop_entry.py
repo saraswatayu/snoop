@@ -928,3 +928,275 @@ def test_pipeline_marks_timed_out_resolvers(monkeypatch):
     # At least one of the slow resolvers timed out
     timed_out = [s for s in statuses.values() if s == "timeout"]
     assert timed_out, f"expected at least one timeout, got statuses: {statuses}"
+
+
+# ---- profile expansion: --json gate, --no-search escape hatch ---------------
+
+
+def test_profile_json_applies_identity_gate():
+    """C4: --json must emit the EFFECTIVE (gated) tier. For an ambiguous identity
+    an 'asserted' field is downgraded to 'possibly', matching what the human card
+    shows — or a machine consumer would trust a fact the human is told to doubt."""
+    import json as _json
+    from lib.schema import Profile, SocialLink
+    person = Person(name="Z", ambiguity="multiple_plausible_matches")
+    profile = Profile(identity=person, social_links=[
+        SocialLink(platform="github", url="https://github.com/z", bind_tier="asserted"),
+    ])
+    parsed = _json.loads(snoop._format_json_report(person, [], profile=profile))
+    assert parsed["profile"]["social_links"][0]["bind_tier"] == "possibly"
+
+
+def test_profile_json_roundtrips_bind_tier_for_single_match():
+    """When the identity IS a single confident match, an asserted field stays
+    asserted in JSON and its sources round-trip."""
+    import json as _json
+    from lib.schema import Profile, SocialLink
+    person = Person(
+        name="P", handles={"github": "p"}, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", "P"), ("github_employer_match", "E")],
+    )
+    profile = Profile(identity=person, social_links=[SocialLink(
+        platform="github", url="https://github.com/p", bind_tier="asserted",
+        sources=[src("gh_profile", url="https://github.com/p")],
+    )])
+    parsed = _json.loads(snoop._format_json_report(person, [], profile=profile))
+    sl = parsed["profile"]["social_links"][0]
+    assert sl["bind_tier"] == "asserted"
+    assert sl["sources"][0]["type"] == "gh_profile"
+
+
+def _no_search_setup(monkeypatch):
+    """Mock resolvers empty + capture the build_profile kwargs so a test can
+    prove whether the search path was wired on or off."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    captured = {}
+    real_build = snoop.build_profile
+
+    def spy_build(person, candidates, **kw):
+        captured.update(kw)
+        return real_build(person, candidates, **kw)
+
+    monkeypatch.setattr(snoop, "build_profile", spy_build)
+    return captured
+
+
+_PLAN_WITH_SEARCH = (
+    '{"work_search_results":[{"title":"T","url":"https://x.example"}]}'
+)
+
+
+def test_no_search_flag_suppresses_search_path(monkeypatch):
+    """--no-search is the escape hatch: build_profile must be called with the
+    search path off (enable_search=False, search_fn=None) even when the plan
+    carries host-model work_search_results."""
+    captured = _no_search_setup(monkeypatch)
+    rc = snoop.main(["X", "--no-smtp", "--no-search",
+                     "--person-plan", _PLAN_WITH_SEARCH])
+    assert rc == 0
+    assert captured["enable_search"] is False
+    assert captured["search_fn"] is None
+
+
+def test_search_path_wired_without_no_search_flag(monkeypatch):
+    """Without --no-search, the host-model results ARE wired into build_profile
+    (guards against the flag silently disabling search for everyone)."""
+    captured = _no_search_setup(monkeypatch)
+    rc = snoop.main(["X", "--no-smtp", "--person-plan", _PLAN_WITH_SEARCH])
+    assert rc == 0
+    assert captured["enable_search"] is True
+    assert captured["search_fn"] is not None
+
+
+# ---- --llm LLM-native path --------------------------------------------------
+
+
+def _llm_setup(monkeypatch):
+    """Mock resolvers so one candidate exists, and stub out fetchers/SMTP."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: ResolverResult(
+        resolver="pattern_gen",
+        candidates=[EmailCandidate(address="alice@corp.com", sources=[src("pattern")],
+                                   employer_match=True)],
+        status="ok",
+    ))
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+
+
+def _fake_reasoned(person):
+    from lib.ground import GroundedFact
+    from lib.reason import ReasonedProfile
+    return ReasonedProfile(
+        identity=person,
+        summary="Alice Smith, engineer at Corp.",
+        identity_confidence=0.9,
+        facts=[GroundedFact(
+            kind="email", label="", value="alice@corp.com", detail="profile email",
+            confidence=0.9, reasoning="from profile", evidence_ids=["o1"],
+            grounded=True, verified=True,
+        )],
+        usage={"input_tokens": 100, "output_tokens": 40},
+    )
+
+
+def test_llm_flag_emits_reasoned_card(monkeypatch, capsys):
+    """--llm routes through reason.reason_profile and renders its card."""
+    _llm_setup(monkeypatch)
+    captured = {}
+
+    def fake_reason(person, candidates, **kw):
+        captured["candidates"] = candidates
+        return _fake_reasoned(person)
+
+    monkeypatch.setattr(snoop.reason, "reason_profile", fake_reason)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--llm"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Alice Smith, engineer at Corp." in out
+    assert "Email:" in out and "alice@corp.com" in out
+    # the scored candidate reached the reasoning call
+    assert any(c.address == "alice@corp.com" for c in captured["candidates"])
+
+
+def test_llm_json_emits_reasoned_json(monkeypatch, capsys):
+    import json as _json
+    _llm_setup(monkeypatch)
+    monkeypatch.setattr(snoop.reason, "reason_profile",
+                        lambda person, candidates, **kw: _fake_reasoned(person))
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--llm", "--json"])
+    assert rc == 0
+    parsed = _json.loads(capsys.readouterr().out)
+    assert parsed["summary"].startswith("Alice Smith")
+    assert parsed["facts"][0]["value"] == "alice@corp.com"
+    assert parsed["facts"][0]["verified"] is True
+
+
+def test_llm_falls_back_to_deterministic_when_unavailable(monkeypatch, capsys):
+    """No API key (ReasoningUnavailable) must degrade to the deterministic card,
+    not error — and surface a warning."""
+    _llm_setup(monkeypatch)
+
+    def boom(person, candidates, **kw):
+        raise snoop.reason.ReasoningUnavailable("no creds")
+
+    monkeypatch.setattr(snoop.reason, "reason_profile", boom)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--llm"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # deterministic card still rendered (the email lead), plus the fallback note
+    assert "alice@corp.com" in out
+    assert "--llm unavailable" in out
+
+
+# ---- sensor mode (--observations) + verifier mode (--ground) -----------------
+
+
+def test_observations_emits_raw_bundle(monkeypatch, capsys):
+    """--observations dumps the typed observation bundle the host reasons over —
+    no scoring, no card."""
+    import json as _json
+    _llm_setup(monkeypatch)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert bundle["person"]["name"] == "Alice Smith"
+    assert isinstance(bundle["observations"], list) and bundle["observations"]
+    # the scored candidate shows up as an observation the host can cite
+    blob = "\n".join(o["content"] for o in bundle["observations"])
+    assert "alice@corp.com" in blob
+    assert all({"id", "type", "content"} <= set(o) for o in bundle["observations"])
+
+
+def test_observations_includes_work_search(monkeypatch, capsys):
+    import json as _json
+    _llm_setup(monkeypatch)
+    plan = '{"work_search_results":[{"title":"Talk on widgets","url":"https://c/x"}]}'
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--observations", "--person-plan", plan])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert any(o["type"] == "web_search" for o in bundle["observations"])
+
+
+def _ground_stdin(monkeypatch, payload):
+    import io
+    import json as _json
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(payload)))
+
+
+def test_ground_drops_uncited_facts_and_renders(monkeypatch, capsys):
+    """--ground keeps facts citing a real observation, drops the rest, renders."""
+    payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith, engineer.",
+        "observations": [
+            {"id": "o1", "type": "email_candidate",
+             "content": "candidate email: alice@corp.com (sources=gh_profile)"},
+        ],
+        "facts": [
+            {"kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+             "confidence": 0.9, "evidence_ids": ["o1"], "reasoning": "profile"},
+            {"kind": "work_item", "label": "", "value": "ghost talk", "detail": "",
+             "confidence": 0.8, "evidence_ids": ["o404"], "reasoning": "hallucinated"},
+        ],
+    }
+    _ground_stdin(monkeypatch, payload)
+    rc = snoop.main(["--ground"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Alice Smith, engineer." in out
+    assert "alice@corp.com" in out      # cited a real observation -> kept
+    assert "ghost talk" not in out      # cited o404 (nonexistent) -> dropped
+
+
+def test_ground_invalid_json_returns_error(monkeypatch, capsys):
+    import io
+    monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
+    rc = snoop.main(["--ground"])
+    assert rc == 2
+
+
+def test_observations_to_ground_roundtrip(monkeypatch, capsys):
+    """The real in-Claude-Code loop: snoop --observations -> (host reasons) ->
+    snoop --ground. Here the 'host' is the test, fabricating a cited fact from
+    the emitted bundle."""
+    import json as _json
+    _llm_setup(monkeypatch)
+
+    # 1. sensor: get the bundle
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    email_obs = next(o for o in bundle["observations"] if o["type"] == "email_candidate")
+
+    # 2. "host" reasons: produce a fact citing that observation
+    payload = {
+        "person": bundle["person"],
+        "summary": "Alice Smith — best reached at her work address.",
+        "observations": bundle["observations"],
+        "facts": [{
+            "kind": "email", "label": "", "value": "alice@corp.com", "detail": "work",
+            "confidence": 0.9, "evidence_ids": [email_obs["id"]], "reasoning": "from bundle",
+        }],
+    }
+
+    # 3. verifier: ground it
+    _ground_stdin(monkeypatch, payload)
+    rc = snoop.main(["--ground"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Alice Smith — best reached" in out
+    assert "alice@corp.com" in out
+    assert "(unverified)" not in out.split("alice@corp.com")[0].splitlines()[-1]

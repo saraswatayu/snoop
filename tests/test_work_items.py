@@ -217,3 +217,34 @@ def test_search_budget_via_collect_combines_with_anchored():
     assert kinds.count("repo") == 1
     assert kinds.count("talk") == 5
     assert len(result.contributions) == 6
+
+
+def test_non_string_url_in_search_result_does_not_crash():
+    """C3: host-model results are untrusted. A non-string url/crosslink_url, or a
+    non-dict result, must be coerced/skipped — never crash via url.strip()."""
+    person = _bound_person()
+    bad = [
+        {"url": 123, "title": "t"},                        # non-str url
+        {"url": "https://x.example", "crosslink_url": {"nope": 1}},  # non-str crosslink
+        {"title": ["not", "a", "string"]},                 # non-str title, no url
+        "this is not a dict",                              # wrong shape entirely
+    ]
+    result = collect_work_items(person, search_fn=_search_fn(bad), now=NOW)
+    # No exception, and nothing falsely attributed (none cross-links to a bound
+    # signal, so the namesake gate drops them all).
+    assert result.status in ("ok", "empty")
+    assert all(i.item_type != "repo" for i in result.contributions if i.url is None)
+
+
+def test_search_result_item_type_is_clamped():
+    """C3: item_type is host-controlled. An out-of-set value collapses to 'other'
+    rather than reaching the card/JSON as an arbitrary string."""
+    person = _bound_person()  # steipete.com is cross-link bound
+    results = [{
+        "url": "https://steipete.com/talk",   # on the bound domain -> survives gate
+        "title": "Talk",
+        "item_type": "evil-injection",
+    }]
+    items = _search_work_items(person, search_fn=_search_fn(results), now=NOW)
+    assert items and items[0].item_type == "other"
+    assert items[0].bind_tier == "possibly"  # web_search never asserts (I1)
