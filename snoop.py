@@ -46,6 +46,7 @@ from lib.google_account import fetch_google_account
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
+from lib.profile_build import build_profile
 from lib.schema import EmailCandidate, Person, ResolverResult
 from lib.score import is_personal_provider, score_all
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
@@ -210,6 +211,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-smtp",
         action="store_true",
         help="Skip SMTP probing entirely (faster; loses deliverable signal).",
+    )
+    p.add_argument(
+        "--no-search",
+        action="store_true",
+        help="Escape hatch: skip the free-text body-of-work search path "
+             "(anchored sources still run). Profile features are on by default.",
     )
     p.add_argument(
         "--max-per-section",
@@ -720,8 +727,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             sys.stdout.write(_format_json_report(person, [], warnings=warnings))
         else:
-            sys.stdout.write(render.render_decision_card(
-                person, [], intent=args.intent, verbose=args.verbose,
+            empty_profile = build_profile(
+                person, [], enable_search=not args.no_search,
+            )
+            sys.stdout.write(render.render_profile_card(
+                empty_profile, intent=args.intent, verbose=args.verbose,
                 warnings=warnings,
             ))
         return 0
@@ -772,8 +782,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         sys.stdout.write(_format_json_report(person, candidates, warnings=warnings))
     else:
-        output = render.render_decision_card(
-            person, candidates,
+        # Default output is the person PROFILE (D2-B): build it from the scored
+        # candidates + the producers, then render the profile card (which leads
+        # with the email answer). --no-search is the DX-D1 escape hatch.
+        profile = build_profile(
+            person, candidates, enable_search=not args.no_search,
+        )
+        output = render.render_profile_card(
+            profile,
             intent=args.intent,
             max_per_section=args.max_per_section,
             verbose=args.verbose,
