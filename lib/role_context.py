@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .binding import bind_best
+from .binding import bind_and_keep
 from .schema import Employer, Person, ResolverResult, RoleFact, Source
 
 
@@ -76,14 +76,7 @@ def collect_role_context(
                 fe, current=False, corroborated=False, now=start,
             ))
 
-    bound: list[RoleFact] = []
-    for fact in facts:
-        binding = bind_best(fact.sources, person)
-        if binding.tier == "unbound":
-            continue
-        fact.bind_tier = binding.tier
-        fact.bind_reasons = binding.reasons
-        bound.append(fact)
+    bound = bind_and_keep(facts, person)
 
     elapsed = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
     return ResolverResult(

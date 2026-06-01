@@ -77,3 +77,16 @@ def test_note_is_possibly_when_handle_unbound():
     )
     result = collect_consistency_notes(person, now=_now())
     assert result.contributions[0].bind_tier == "possibly"
+
+
+def test_genuine_name_disagreement_is_mismatch():
+    """The anti-catfish module's core NEGATIVE signal: two unrelated names
+    produce a severity='mismatch' note naming both forms. A diminutive is 'info'
+    (already covered); a real disagreement must not collapse to info/None."""
+    person = _person(name="Alice Smith", gh_name="Bob Jones")
+    result = collect_consistency_notes(person, now=_now())
+    mismatches = [n for n in result.contributions if n.severity == "mismatch"]
+    assert len(mismatches) == 1
+    note = mismatches[0]
+    assert "Bob Jones" in note.note and "Alice Smith" in note.note
+    assert note.note.startswith("MISMATCH")

@@ -18,7 +18,9 @@ Pipeline:
               ↓
     re-score  (SMTP modifies deliverable)
               ↓
-    render_decision_card  (markdown contact card)
+    build_profile  (run 5 profile producers; bind every fact + merge)
+              ↓
+    render_profile_card  (profile card: email lead + provenance-marked sections)
 
 Legacy compatibility: the original verify_email.py script still works
 for single-address verification. snoop.py is the new rich-pipeline
@@ -39,6 +41,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lib import __version__, diagnose, render
+from lib.binding import apply_identity_gate
 from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
@@ -604,7 +607,18 @@ def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[E
 def _profile_json(profile: "Profile") -> dict:
     """Serialize the profile sections (additive; consumers can ignore). Every
     fact carries its bind_tier so a machine consumer can apply the same
-    asserted/possibly distinction the card shows."""
+    asserted/possibly distinction the card shows.
+
+    The emitted bind_tier is the EFFECTIVE tier — the per-field tier AFTER the
+    identity gate (apply_identity_gate). When the identity is not a single
+    confident match the human card downgrades every field to "possibly"; the
+    JSON must match, or a machine consumer would trust an "asserted" fact about
+    an unconfirmed identity that the human is told to doubt (namesake risk)."""
+    identity = profile.identity
+
+    def tier(f) -> str:
+        return apply_identity_gate(f.bind_tier, identity)
+
     def srcs(f):
         return [{"type": s.type, "url": s.url,
                  "observed_at": s.observed_at.isoformat(), "detail": s.detail}
@@ -612,29 +626,29 @@ def _profile_json(profile: "Profile") -> dict:
     return {
         "social_links": [
             {"platform": s.platform, "url": s.url, "handle": s.handle,
-             "bind_tier": s.bind_tier, "sources": srcs(s)}
+             "bind_tier": tier(s), "sources": srcs(s)}
             for s in profile.social_links
         ],
         "channels": [
             {"channel_type": c.channel_type, "value": c.value,
              "evidence": c.evidence, "rank_hint": c.rank_hint,
-             "bind_tier": c.bind_tier, "sources": srcs(c)}
+             "bind_tier": tier(c), "sources": srcs(c)}
             for c in profile.channels
         ],
         "work_items": [
             {"title": w.title, "url": w.url, "item_type": w.item_type,
              "published_at": w.published_at, "summary": w.summary,
-             "bind_tier": w.bind_tier, "sources": srcs(w)}
+             "bind_tier": tier(w), "sources": srcs(w)}
             for w in profile.work_items
         ],
         "roles": [
             {"employer": r.employer, "title": r.title, "since": r.since,
-             "until": r.until, "summary": r.summary, "bind_tier": r.bind_tier,
+             "until": r.until, "summary": r.summary, "bind_tier": tier(r),
              "sources": srcs(r)}
             for r in profile.roles
         ],
         "consistency_notes": [
-            {"note": n.note, "severity": n.severity, "bind_tier": n.bind_tier,
+            {"note": n.note, "severity": n.severity, "bind_tier": tier(n),
              "sources": srcs(n)}
             for n in profile.consistency_notes
         ],

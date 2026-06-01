@@ -928,3 +928,88 @@ def test_pipeline_marks_timed_out_resolvers(monkeypatch):
     # At least one of the slow resolvers timed out
     timed_out = [s for s in statuses.values() if s == "timeout"]
     assert timed_out, f"expected at least one timeout, got statuses: {statuses}"
+
+
+# ---- profile expansion: --json gate, --no-search escape hatch ---------------
+
+
+def test_profile_json_applies_identity_gate():
+    """C4: --json must emit the EFFECTIVE (gated) tier. For an ambiguous identity
+    an 'asserted' field is downgraded to 'possibly', matching what the human card
+    shows — or a machine consumer would trust a fact the human is told to doubt."""
+    import json as _json
+    from lib.schema import Profile, SocialLink
+    person = Person(name="Z", ambiguity="multiple_plausible_matches")
+    profile = Profile(identity=person, social_links=[
+        SocialLink(platform="github", url="https://github.com/z", bind_tier="asserted"),
+    ])
+    parsed = _json.loads(snoop._format_json_report(person, [], profile=profile))
+    assert parsed["profile"]["social_links"][0]["bind_tier"] == "possibly"
+
+
+def test_profile_json_roundtrips_bind_tier_for_single_match():
+    """When the identity IS a single confident match, an asserted field stays
+    asserted in JSON and its sources round-trip."""
+    import json as _json
+    from lib.schema import Profile, SocialLink
+    person = Person(
+        name="P", handles={"github": "p"}, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", "P"), ("github_employer_match", "E")],
+    )
+    profile = Profile(identity=person, social_links=[SocialLink(
+        platform="github", url="https://github.com/p", bind_tier="asserted",
+        sources=[src("gh_profile", url="https://github.com/p")],
+    )])
+    parsed = _json.loads(snoop._format_json_report(person, [], profile=profile))
+    sl = parsed["profile"]["social_links"][0]
+    assert sl["bind_tier"] == "asserted"
+    assert sl["sources"][0]["type"] == "gh_profile"
+
+
+def _no_search_setup(monkeypatch):
+    """Mock resolvers empty + capture the build_profile kwargs so a test can
+    prove whether the search path was wired on or off."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    captured = {}
+    real_build = snoop.build_profile
+
+    def spy_build(person, candidates, **kw):
+        captured.update(kw)
+        return real_build(person, candidates, **kw)
+
+    monkeypatch.setattr(snoop, "build_profile", spy_build)
+    return captured
+
+
+_PLAN_WITH_SEARCH = (
+    '{"work_search_results":[{"title":"T","url":"https://x.example"}]}'
+)
+
+
+def test_no_search_flag_suppresses_search_path(monkeypatch):
+    """--no-search is the escape hatch: build_profile must be called with the
+    search path off (enable_search=False, search_fn=None) even when the plan
+    carries host-model work_search_results."""
+    captured = _no_search_setup(monkeypatch)
+    rc = snoop.main(["X", "--no-smtp", "--no-search",
+                     "--person-plan", _PLAN_WITH_SEARCH])
+    assert rc == 0
+    assert captured["enable_search"] is False
+    assert captured["search_fn"] is None
+
+
+def test_search_path_wired_without_no_search_flag(monkeypatch):
+    """Without --no-search, the host-model results ARE wired into build_profile
+    (guards against the flag silently disabling search for everyone)."""
+    captured = _no_search_setup(monkeypatch)
+    rc = snoop.main(["X", "--no-smtp", "--person-plan", _PLAN_WITH_SEARCH])
+    assert rc == 0
+    assert captured["enable_search"] is True
+    assert captured["search_fn"] is not None

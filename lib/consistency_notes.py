@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .binding import bind_best
+from .binding import bind_and_keep
 from .schema import ConsistencyNote, Person, ResolverResult, Source
 
 _ORG_SUFFIXES = {"inc", "llc", "ltd", "corp", "co", "company", "gmbh", "ag", "sa"}
@@ -83,14 +83,7 @@ def collect_consistency_notes(
             )],
         ))
 
-    bound: list[ConsistencyNote] = []
-    for note in notes:
-        binding = bind_best(note.sources, person)
-        if binding.tier == "unbound":
-            continue
-        note.bind_tier = binding.tier
-        note.bind_reasons = binding.reasons
-        bound.append(note)
+    bound = bind_and_keep(notes, person)
 
     elapsed = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
     return ResolverResult(

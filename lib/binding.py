@@ -18,6 +18,14 @@ A source is **asserted** (bound-by-construction) when:
   - it is derived from the VALIDATED profile surface (the github handle is
     bound by >=2 validating anchors).
 
+A ``web_search`` source is the one exception to the host-match rule: it can
+NEVER be asserted, only "possibly" at most. A free-text result merely *mentions*
+the person, and the only thing tying it back is a ``crosslink_url`` that the
+host model supplied and snoop never fetched the page to verify. "asserted" means
+snoop can prove the tie itself; for free-text discovery it cannot, so a
+cross-link to a bound domain lifts the result from "unbound" (drop) to
+"possibly" (keep, marked uncertain) but no further (outside-voice Codex #3).
+
 A domain merely DECLARED in the model-produced ``--person-plan`` is NOT bound
 (outside-voice Codex #2). It yields "possibly" at most. A source with no tie at
 all is "unbound" — the caller drops it (this is what makes free-text search
@@ -26,10 +34,12 @@ signal, never gets attributed).
 
       Source ─┐
               ├─ manual_known ─────────────────────────▶ asserted
+              ├─ web_search & host ∈ bound domains ─────▶ possibly  (never asserted)
               ├─ host ∈ cross-link-bound domains ───────▶ asserted
               ├─ profile-typed & handle validated ──────▶ asserted
               ├─ host ∈ declared (unvalidated) domains ─▶ possibly
               ├─ profile-typed, handle NOT validated ───▶ possibly
+              ├─ provided-for-this-person channel ──────▶ possibly
               └─ otherwise ────────────────────────────▶ unbound  (drop)
 """
 
@@ -82,9 +92,11 @@ def _host(url: str | None) -> str | None:
     binds 'foo.com' to 'https://barfoo.com'. Mirrors
     person_resolve._blog_matches_personal_domain.
     """
-    if not url:
-        return None
+    if not isinstance(url, str):
+        return None  # untrusted callers (host-model search) may pass non-str
     raw = url.strip()
+    if not raw:
+        return None
     parsed = urllib.parse.urlsplit(raw if "://" in raw else "//" + raw)
     host = (parsed.hostname or "").lower()
     if host.startswith("www."):
@@ -127,6 +139,19 @@ def bind_source(source: Source, identity: Identity) -> Binding:
     if host:
         for d in _bound_domains(identity):
             if _host_matches(host, d):
+                # A free-text web_search result can cross-link to a bound
+                # domain, but snoop never verified that link itself (the
+                # crosslink_url is an unverified host-model claim), so it is
+                # never bound-by-construction: cap to "possibly". A non-search
+                # source observed ON the bound domain IS snoop's own evidence
+                # and asserts. (first-principles: asserted == snoop can prove
+                # the tie; for free-text discovery it cannot.)
+                if source.type == "web_search":
+                    return Binding(
+                        "possibly",
+                        [f"web_search result cross-links to bound domain '{d}' "
+                         "(unverified link → possibly, never asserted)"],
+                    )
                 return Binding(
                     "asserted",
                     [f"source host '{host}' is a bound personal domain ('{d}')"],
@@ -186,3 +211,23 @@ def apply_identity_gate(tier: BindTier, identity: Identity) -> BindTier:
     if identity.ambiguity != "single_plausible_match" and tier == "asserted":
         return "possibly"
     return tier
+
+
+def bind_and_keep(facts, identity):
+    """Bind each fact to the identity and keep only the ones that tie to it.
+
+    The single application of the binding rules shared by every producer: for
+    each fact, take the strongest binding across its sources, drop it when that
+    is "unbound", and otherwise stamp `bind_tier`/`bind_reasons` on the fact in
+    place. Returns the survivors in input order. Replaces the per-producer
+    bind→drop→stamp loop that was copy-pasted across the five resolvers.
+    """
+    kept = []
+    for fact in facts:
+        binding = bind_best(fact.sources, identity)
+        if binding.tier == "unbound":
+            continue
+        fact.bind_tier = binding.tier
+        fact.bind_reasons = binding.reasons
+        kept.append(fact)
+    return kept

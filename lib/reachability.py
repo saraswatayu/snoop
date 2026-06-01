@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from .binding import bind_best
+from .binding import bind_and_keep
 from .schema import (
     Channel,
     EmailCandidate,
@@ -30,6 +30,7 @@ from .schema import (
     ResolverResult,
     Source,
 )
+from .score import is_personal_provider
 
 # Base ordering weights for the OBSERVED channels. Higher == surfaced first.
 # These encode an evidence-based preference, not a delivery guarantee: a
@@ -44,6 +45,12 @@ _RANK_BASE: dict[str, float] = {
     "website": 0.25,
     "contact_form": 0.20,
 }
+
+# An email channel's [+] marker asserts the address belongs to the person.
+# Below this ownership score (or when the scorer abstained) the marker is capped
+# to [?] so source provenance alone can never claim "asserted" for a weak/nil
+# belongs (red-team I3).
+_BELONGS_FLOOR = 0.5
 
 
 def collect_channels(
@@ -69,17 +76,27 @@ def collect_channels(
     """
     start = datetime.now(timezone.utc) if now is None else now
     contributions: list[Channel] = []
+    email_weak = False  # I3: cap the email channel's tier when ownership is nil
 
     # --- email: take the strongest candidate by belongs_to_person ---
     if emails:
         top = max(emails, key=lambda c: c.belongs_to_person or 0.0)
         belongs = top.belongs_to_person or 0.0
+        email_weak = belongs < _BELONGS_FLOOR
+        # I2: a personal-provider address surfaced as an alternate channel
+        # carries the same caveat the lead uses, so a work-intent card never
+        # presents a personal address as if it were a vetted work channel.
+        domain = top.address.rsplit("@", 1)[-1]
+        personal = is_personal_provider(domain)
         if top.smtp_verdict == "verified":
-            evidence = "SMTP verified"
+            base_evidence = "SMTP verified"
+        elif top.belongs_to_person is None:
+            base_evidence = "ownership unscored"
         else:
-            evidence = f"belongs={belongs:g}"
+            base_evidence = f"belongs={belongs:g}"
+        evidence = f"personal address; {base_evidence}" if personal else base_evidence
         # rank_hint rides on belongs so a weak email cannot outrank a strong
-        # non-email signal; this keeps the contribution inside the email band.
+        # non-email signal (it may fall below x_dm — that is intended).
         rank = _RANK_BASE["email"] - (1.0 - belongs) * 0.25
         contributions.append(Channel(
             channel_type="email",
@@ -126,14 +143,20 @@ def collect_channels(
         ))
 
     # --- bind each channel; drop any that do not tie to this person ---
-    bound: list[Channel] = []
-    for ch in contributions:
-        binding = bind_best(ch.sources, person)
-        if binding.tier == "unbound":
-            continue
-        ch.bind_tier = binding.tier
-        ch.bind_reasons = binding.reasons
-        bound.append(ch)
+    bound = bind_and_keep(contributions, person)
+
+    # I3: a weak/nil ownership score must not let the email channel show [+].
+    # Source provenance (where the address was seen) can bind "asserted", but the
+    # email channel's marker is read as "this address belongs to the person" —
+    # cap it to "possibly" when belongs is below the floor or unscored.
+    if email_weak:
+        for ch in bound:
+            if ch.channel_type == "email" and ch.bind_tier == "asserted":
+                ch.bind_tier = "possibly"
+                ch.bind_reasons = [
+                    *ch.bind_reasons,
+                    "ownership score weak/unscored; email channel capped to possibly",
+                ]
 
     # Stable sort by rank_hint descending. None ranks sink to the bottom.
     bound.sort(key=lambda c: (c.rank_hint if c.rank_hint is not None else -1.0),

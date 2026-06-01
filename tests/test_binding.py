@@ -9,8 +9,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from lib.binding import apply_identity_gate, bind_best, bind_source
-from lib.schema import Identity, Source
+from lib.binding import (
+    _host,
+    apply_identity_gate,
+    bind_and_keep,
+    bind_best,
+    bind_source,
+)
+from lib.schema import Identity, SocialLink, Source
 
 
 def _now():
@@ -139,3 +145,47 @@ def test_web_search_hit_with_no_crosslink_is_unbound():
     NOT be attributed (it is NOT a 'provided' channel)."""
     b = bind_source(_src("web_search", url="https://randomconf.example/p-s"), _identity())
     assert b.tier == "unbound"
+
+
+def test_web_search_on_bound_domain_is_possibly_never_asserted():
+    """I1 (first principles): a free-text web_search hit whose URL lands on a
+    cross-link-bound personal domain is KEPT but only as 'possibly' — snoop never
+    fetched the page to verify the link, so it is not bound-by-construction. The
+    crosslink lifts it from unbound (drop) to possibly, never to asserted."""
+    ident = _identity(anchors=[("github_personal_domain_match", "steipete.com")])
+    b = bind_source(_src("web_search", url="https://steipete.com/talks/x"), ident)
+    assert b.tier == "possibly"
+
+
+def test_non_web_search_on_bound_domain_still_asserts():
+    """The web_search cap is specific to free-text discovery: a non-search source
+    observed ON the bound domain is snoop's own evidence and still asserts."""
+    ident = _identity(anchors=[("github_personal_domain_match", "steipete.com")])
+    b = bind_source(_src("github_repo", url="https://steipete.com/x"), ident)
+    assert b.tier == "asserted"
+
+
+def test_host_returns_none_for_non_string_url():
+    """Defense-in-depth: host-model search results are untrusted and may carry a
+    non-string url/crosslink_url. _host must return None, not raise, so the value
+    never reaches url.strip()."""
+    assert _host(123) is None          # type: ignore[arg-type]
+    assert _host({"x": 1}) is None     # type: ignore[arg-type]
+    assert _host(None) is None
+    assert _host("   ") is None
+
+
+def test_bind_and_keep_drops_unbound_and_stamps_tier():
+    """The shared helper binds each fact, drops the unbound ones, and stamps
+    bind_tier/bind_reasons on the survivors in input order."""
+    ident = _identity(anchors=[
+        ("github_name_match", "x"), ("github_employer_match", "y"),
+    ])
+    keep = SocialLink(platform="github", url="https://github.com/x",
+                      sources=[_src("gh_profile", url="https://github.com/x")])
+    drop = SocialLink(platform="rando", url="https://rando.example/x",
+                      sources=[_src("web_search", url="https://rando.example/x")])
+    kept = bind_and_keep([keep, drop], ident)
+    assert [k.platform for k in kept] == ["github"]
+    assert kept[0].bind_tier in ("asserted", "possibly")
+    assert kept[0].bind_reasons  # stamped, not left at the default
