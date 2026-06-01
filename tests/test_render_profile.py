@@ -75,6 +75,25 @@ def test_identity_gate_downgrades_when_ambiguous():
     assert "[?]" in out
 
 
+def test_profile_card_does_not_duplicate_links_or_repos():
+    """The lead's About link rows and Recent-on-GitHub block are suppressed in
+    the profile card — Social/Reach and Body-of-work cover them with markers."""
+    person = _person()
+    person.gh_bio = "Building drug-dev infra"
+    person.gh_location = "NYC"
+    profile = build_profile(person, [_candidate()], now=_now())
+    out = render_profile_card(profile)
+    # About keeps the non-link dossier (bio/location) but drops the link rows...
+    assert "About:" in out
+    about = out.split("About:")[1].split("Other ways in:")[0]
+    assert "Bio:" in about and "NYC" in about
+    assert "github.com/danielneil" not in about  # the github link lives in Social now
+    assert "x.com/danielneil" not in about        # the x link lives in Social now
+    # ...and the lead's "Recent on GitHub" block is gone (Body of work covers repos)
+    assert "Recent on GitHub:" not in out
+    assert "Body of work:" in out
+
+
 def test_empty_profile_still_renders_lead():
     person = Person(name="Nobody", ambiguity="insufficient_identity_evidence")
     profile = build_profile(person, [], now=_now())

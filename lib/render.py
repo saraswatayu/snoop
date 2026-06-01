@@ -197,16 +197,21 @@ def _format_linkedin_url(value: object) -> str | None:
     return s.rstrip("/")
 
 
-def _about_block(person: Person) -> list[str]:
+def _about_block(person: Person, *, include_link_rows: bool = True) -> list[str]:
     """The dossier — compact summary of what we know about the person.
 
     Skips entirely if no fields populated. Each line is `  Label:   value`
     with two-space indent for visual grouping under the lead.
+
+    `include_link_rows=False` (profile card) drops the GitHub / LinkedIn / Web /
+    X link rows, because the profile's `Social:` section already lists them with
+    provenance markers — showing both is duplication. The bio still surfaces
+    (as its own row) along with company-mismatch and location.
     """
     rows: list[tuple[str, str]] = []
 
     gh_handle = person.handles.get("github")
-    if gh_handle:
+    if include_link_rows and gh_handle:
         gh_url = f"github.com/{gh_handle}"
         if person.gh_bio:
             # Collapse internal whitespace (newlines, tabs, multi-space) so
@@ -219,16 +224,23 @@ def _about_block(person: Person) -> list[str]:
             rows.append(("GitHub", f'{gh_url} — "{bio}"'))
         else:
             rows.append(("GitHub", gh_url))
+    elif person.gh_bio:
+        # Profile mode: no GitHub link row, but the bio is still worth showing.
+        bio = " ".join(person.gh_bio.split())
+        if len(bio) > 80:
+            bio = bio[:77] + "…"
+        rows.append(("Bio", bio))
 
-    linkedin = _format_linkedin_url(person.channel_hints.get("linkedin"))
-    if linkedin:
-        rows.append(("LinkedIn", linkedin))
+    if include_link_rows:
+        linkedin = _format_linkedin_url(person.channel_hints.get("linkedin"))
+        if linkedin:
+            rows.append(("LinkedIn", linkedin))
 
-    if person.gh_blog:
-        rows.append(("Web", _format_blog_url(person.gh_blog)))
+        if person.gh_blog:
+            rows.append(("Web", _format_blog_url(person.gh_blog)))
 
-    if person.gh_twitter:
-        rows.append(("X", f"@{person.gh_twitter}"))
+        if person.gh_twitter:
+            rows.append(("X", f"@{person.gh_twitter}"))
 
     if person.gh_company and person.employer and person.gh_company != person.employer.name:
         # Surface GitHub's company text only when it differs from the
@@ -485,9 +497,15 @@ def _render_lead(
     candidates: list[EmailCandidate],
     intent: Intent,
     fell_back: bool,
+    *,
+    include_dossier_blocks: bool = True,
 ) -> list[str]:
     """The compact lead block — name, address, verdict, About, Recent,
-    Why, Note, fallback list. This IS the default output."""
+    Why, Note, fallback list. This IS the default output.
+
+    `include_dossier_blocks=False` is used by the profile card so the lead
+    does not duplicate the producer-driven Social / Reach / Body-of-work
+    sections (drops About link rows and the Recent-on-GitHub block)."""
     lines = [_employer_header(person)]
 
     if pick is None:
@@ -509,11 +527,11 @@ def _render_lead(
                 "(github handle, personal domain, known address) via --person-plan."
             )
         # Suggest channels
-        about = _about_block(person)
+        about = _about_block(person, include_link_rows=include_dossier_blocks)
         if about:
             lines.append("")
             lines.extend(about)
-        recent = _recent_repos_block(person)
+        recent = _recent_repos_block(person) if include_dossier_blocks else []
         if recent:
             lines.extend(recent)
         hints = _channel_hints_inline(person)
@@ -544,13 +562,13 @@ def _render_lead(
         )
 
     # About block
-    about = _about_block(person)
+    about = _about_block(person, include_link_rows=include_dossier_blocks)
     if about:
         lines.append("")
         lines.extend(about)
 
     # Recent on GitHub (D4-C)
-    recent = _recent_repos_block(person)
+    recent = _recent_repos_block(person) if include_dossier_blocks else []
     if recent:
         lines.extend(recent)
 
@@ -748,7 +766,11 @@ def render_profile_card(
     # Email lead — reuse the contact-card lead so the address answer is first.
     pick, fell_back = _pick_best(candidates, intent)
     bucket = _verdict_bucket(pick)
-    lines.extend(_render_lead(person, pick, bucket, candidates, intent, fell_back))
+    # include_dossier_blocks=False: the Social / Reach / Body-of-work sections
+    # below already cover the links and repos with provenance markers, so the
+    # lead drops them (keeps bio, company-mismatch, location).
+    lines.extend(_render_lead(person, pick, bucket, candidates, intent, fell_back,
+                              include_dossier_blocks=False))
 
     pick_address = pick.address if pick is not None else None
     lines.extend(_reach_block(profile, person, pick_address=pick_address))
