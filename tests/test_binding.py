@@ -115,3 +115,27 @@ def test_identity_gate_caps_asserted_when_ambiguous():
 def test_identity_gate_passthrough_when_single_match():
     single = _identity(ambiguity="single_plausible_match")
     assert apply_identity_gate("asserted", single) == "asserted"
+
+
+def test_provided_channel_is_possibly_not_dropped():
+    """A channel_hint (host model found the person's LinkedIn during planning) is
+    observed-for-this-person — possibly, not unbound. Distinct from a namesake
+    web_search hit."""
+    b = bind_source(_src("channel_hint", url="https://linkedin.com/in/steipete"), _identity())
+    assert b.tier == "possibly"
+
+
+def test_github_repo_from_validated_handle_is_asserted():
+    ident = _identity(anchors=[
+        ("github_name_match", "Peter Steinberger"),
+        ("github_employer_match", "OpenAI"),
+    ])
+    b = bind_source(_src("github_repo", url="https://github.com/steipete/x"), ident)
+    assert b.tier == "asserted"
+
+
+def test_web_search_hit_with_no_crosslink_is_unbound():
+    """web_search is namesake-risky: with no cross-link to a bound signal it must
+    NOT be attributed (it is NOT a 'provided' channel)."""
+    b = bind_source(_src("web_search", url="https://randomconf.example/p-s"), _identity())
+    assert b.tier == "unbound"

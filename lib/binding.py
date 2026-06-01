@@ -52,7 +52,18 @@ _VALIDATING_ANCHORS = frozenset({
 })
 
 # Source types that originate from the github identity surface itself.
-_PROFILE_SOURCE_TYPES = frozenset({"gh_profile", "gh_readme", "git_commit"})
+_PROFILE_SOURCE_TYPES = frozenset({
+    "gh_profile", "gh_readme", "git_commit", "github_repo",
+})
+
+# Source types that are OBSERVED for this specific person (provided during plan
+# construction or read from a profile field) but are not bound-by-construction.
+# They tie to the person by provenance, so they are "possibly" rather than
+# "unbound" — distinct from a free-text web_search hit, which is namesake-risky
+# and must cross-link to bind.
+_PROVIDED_SOURCE_TYPES = frozenset({
+    "channel_hint", "linkedin", "hn_profile", "x_bio",
+})
 
 _TIER_ORDER = {"unbound": 0, "possibly": 1, "asserted": 2}
 
@@ -143,7 +154,12 @@ def bind_source(source: Source, identity: Identity) -> Binding:
             [f"{source.type} source but identity not independently bound (<2 anchors)"],
         )
 
-    # 6) no tie at all -> drop
+    # 6) observed-for-this-person channels (provided in the plan / a profile
+    #    field) — tied by provenance but not bound-by-construction
+    if source.type in _PROVIDED_SOURCE_TYPES:
+        return Binding("possibly", [f"observed channel ({source.type}); not bound-by-construction"])
+
+    # 7) no tie at all (e.g. a free-text web_search hit with no cross-link) -> drop
     return Binding("unbound", ["no binding evidence tying source to the person"])
 
 
