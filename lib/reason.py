@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .ground import GroundedFact, ground
+from .normalize import name_match
 from .schema import EmailCandidate, Person
 
 MODEL = "claude-opus-4-8"
@@ -214,10 +215,27 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
     for cand in candidates:
         src_types = ",".join(sorted({s.type for s in cand.sources})) or "none"
         belongs = "?" if cand.belongs_to_person is None else f"{cand.belongs_to_person:g}"
+        # When Google returned a display name, surface it WITH a text name-match
+        # verdict against the target. This is the load-bearing disambiguator on a
+        # common-name Workspace tenant: a pattern guess that hits a real-but-
+        # different account (e.g. jdoe@ vs jdoeh@) shows name_match=no, and the
+        # host model can drop it — text, not faces.
+        extra = ""
+        if cand.account_display_name:
+            extra += f', google_display_name="{cand.account_display_name}"'
+            if person.name:
+                nm = name_match(cand.account_display_name, person.name)
+                extra += f", name_match={'yes' if nm else 'no'}"
+        # The photo is a HUMAN-REVIEW artifact only — never an automated match
+        # signal (see SKILL.md scope). Labelled inline so the reader treats it
+        # as something to eyeball, not a verdict to trust.
+        if cand.account_photo_url:
+            extra += (f", google_photo={cand.account_photo_url}"
+                      " (human-review artifact, not an automated match)")
         add("email_candidate",
             f"candidate email: {cand.address} "
             f"(belongs~{belongs}, smtp={cand.smtp_verdict}, "
-            f"account_exists={cand.account_exists}, sources={src_types})",
+            f"account_exists={cand.account_exists}, sources={src_types}{extra})",
             next((s.url for s in cand.sources if s.url), None))
 
     for note in person.notes:
