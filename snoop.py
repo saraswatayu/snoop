@@ -40,7 +40,7 @@ from concurrent.futures import (
 from pathlib import Path
 from typing import Any, Callable
 
-from lib import __version__, diagnose, render
+from lib import __version__, diagnose, reason, render
 from lib.binding import apply_identity_gate
 from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
@@ -220,6 +220,13 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Escape hatch: skip the free-text body-of-work search path "
              "(anchored sources still run). Profile features are on by default.",
+    )
+    p.add_argument(
+        "--llm",
+        action="store_true",
+        help="LLM-native profile: hand the raw observations to Opus 4.8 (one "
+             "tool-less call) instead of the deterministic scorer/binder. Needs "
+             "ANTHROPIC_API_KEY; falls back to the deterministic profile without it.",
     )
     p.add_argument(
         "--max-per-section",
@@ -757,6 +764,78 @@ def _work_search_fn(plan: dict[str, Any]) -> Callable[[str], list[dict]] | None:
     return lambda _query: results
 
 
+def _work_search_observations(plan: dict[str, Any]) -> list[reason.Observation]:
+    """Shape host-model WebSearch results into raw observations for the LLM
+    path. Untrusted: each is just text the model weighs; the tool-less call and
+    grounding keep it safe. Non-string fields are coerced/dropped."""
+    raw = plan.get("work_search_results")
+    if not isinstance(raw, list):
+        return []
+    obs: list[reason.Observation] = []
+    for i, r in enumerate(raw, start=1):
+        if not isinstance(r, dict):
+            continue
+        title = r.get("title") if isinstance(r.get("title"), str) else ""
+        summary = r.get("summary") if isinstance(r.get("summary"), str) else ""
+        url = r.get("url") if isinstance(r.get("url"), str) else None
+        crosslink = r.get("crosslink_url") if isinstance(r.get("crosslink_url"), str) else ""
+        content = " ".join(p for p in (
+            f"web-search result: {title}".strip(),
+            summary,
+            f"(page cross-links to {crosslink})" if crosslink else "",
+        ) if p).strip()
+        if not content:
+            continue
+        obs.append(reason.Observation(
+            id=f"w{i}", type="web_search", content=content, source_url=url,
+        ))
+    return obs
+
+
+def _format_reasoned_json(profile: reason.ReasonedProfile, *,
+                          warnings: list[str] | None = None) -> str:
+    """Machine-readable form of the LLM-native profile. Every fact carries its
+    citations, confidence, and the deterministic `verified` flag."""
+    return json.dumps({
+        "warnings": warnings or [],
+        "person": {"name": profile.identity.name,
+                   "ambiguity": profile.identity.ambiguity},
+        "summary": profile.summary,
+        "identity_confidence": profile.identity_confidence,
+        "facts": [
+            {"kind": f.kind, "label": f.label, "value": f.value, "detail": f.detail,
+             "confidence": f.confidence, "verified": f.verified,
+             "evidence_ids": f.evidence_ids, "reasoning": f.reasoning}
+            for f in profile.facts
+        ],
+        "usage": profile.usage,
+    }, indent=2, default=str)
+
+
+def _try_llm_emit(person: Person, candidates: list[EmailCandidate],
+                  plan: dict[str, Any], args: argparse.Namespace,
+                  warnings: list[str]) -> bool:
+    """If --llm, run the reasoning path and emit. Returns True when it produced
+    output (caller returns), False to fall back to the deterministic path (e.g.
+    no API key). A wrong profile is acceptable here; a hard failure is not — any
+    unavailability degrades to deterministic rather than erroring out."""
+    if not args.llm:
+        return False
+    try:
+        rp = reason.reason_profile(
+            person, candidates,
+            extra_observations=_work_search_observations(plan),
+        )
+    except reason.ReasoningUnavailable as exc:
+        warnings.append(f"--llm unavailable: {exc}; using deterministic profile")
+        return False
+    if args.json:
+        sys.stdout.write(_format_reasoned_json(rp, warnings=warnings))
+    else:
+        sys.stdout.write(render.render_reasoned_card(rp, warnings=warnings))
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -810,6 +889,10 @@ def main(argv: list[str] | None = None) -> int:
     candidates = cluster_candidates(results)
 
     if not candidates:
+        # LLM-native path first — it reasons over identity state even with no
+        # email candidates; on unavailability falls back to the empty render.
+        if _try_llm_emit(person, [], plan, args, warnings):
+            return 0
         # Empty pipeline — still render so the user sees identity state
         # and resolver notes. Respect --json mode.
         empty_profile = build_profile(
@@ -869,6 +952,11 @@ def main(argv: list[str] | None = None) -> int:
             verify_candidates(smtp_targets, budget=default_budget())
             # Re-score after SMTP modifies deliverable
             score_all(candidates, person)
+
+    # LLM-native path (--llm): hand the scored candidates + observations to the
+    # model; deterministic profile below is the fallback.
+    if _try_llm_emit(person, candidates, plan, args, warnings):
+        return 0
 
     # Default output is the person PROFILE (D2-B): build it from the scored
     # candidates + the producers. --no-search is the DX-D1 escape hatch.

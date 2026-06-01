@@ -1013,3 +1013,90 @@ def test_search_path_wired_without_no_search_flag(monkeypatch):
     assert rc == 0
     assert captured["enable_search"] is True
     assert captured["search_fn"] is not None
+
+
+# ---- --llm LLM-native path --------------------------------------------------
+
+
+def _llm_setup(monkeypatch):
+    """Mock resolvers so one candidate exists, and stub out fetchers/SMTP."""
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: ResolverResult(
+        resolver="pattern_gen",
+        candidates=[EmailCandidate(address="alice@corp.com", sources=[src("pattern")],
+                                   employer_match=True)],
+        status="ok",
+    ))
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+
+
+def _fake_reasoned(person):
+    from lib.ground import GroundedFact
+    from lib.reason import ReasonedProfile
+    return ReasonedProfile(
+        identity=person,
+        summary="Alice Smith, engineer at Corp.",
+        identity_confidence=0.9,
+        facts=[GroundedFact(
+            kind="email", label="", value="alice@corp.com", detail="profile email",
+            confidence=0.9, reasoning="from profile", evidence_ids=["o1"],
+            grounded=True, verified=True,
+        )],
+        usage={"input_tokens": 100, "output_tokens": 40},
+    )
+
+
+def test_llm_flag_emits_reasoned_card(monkeypatch, capsys):
+    """--llm routes through reason.reason_profile and renders its card."""
+    _llm_setup(monkeypatch)
+    captured = {}
+
+    def fake_reason(person, candidates, **kw):
+        captured["candidates"] = candidates
+        return _fake_reasoned(person)
+
+    monkeypatch.setattr(snoop.reason, "reason_profile", fake_reason)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--llm"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Alice Smith, engineer at Corp." in out
+    assert "Email:" in out and "alice@corp.com" in out
+    # the scored candidate reached the reasoning call
+    assert any(c.address == "alice@corp.com" for c in captured["candidates"])
+
+
+def test_llm_json_emits_reasoned_json(monkeypatch, capsys):
+    import json as _json
+    _llm_setup(monkeypatch)
+    monkeypatch.setattr(snoop.reason, "reason_profile",
+                        lambda person, candidates, **kw: _fake_reasoned(person))
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--llm", "--json"])
+    assert rc == 0
+    parsed = _json.loads(capsys.readouterr().out)
+    assert parsed["summary"].startswith("Alice Smith")
+    assert parsed["facts"][0]["value"] == "alice@corp.com"
+    assert parsed["facts"][0]["verified"] is True
+
+
+def test_llm_falls_back_to_deterministic_when_unavailable(monkeypatch, capsys):
+    """No API key (ReasoningUnavailable) must degrade to the deterministic card,
+    not error — and surface a warning."""
+    _llm_setup(monkeypatch)
+
+    def boom(person, candidates, **kw):
+        raise snoop.reason.ReasoningUnavailable("no creds")
+
+    monkeypatch.setattr(snoop.reason, "reason_profile", boom)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--llm"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # deterministic card still rendered (the email lead), plus the fallback note
+    assert "alice@corp.com" in out
+    assert "--llm unavailable" in out
