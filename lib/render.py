@@ -32,7 +32,8 @@ from __future__ import annotations
 
 from typing import Iterable, Literal
 
-from .schema import EmailCandidate, Person
+from .binding import apply_identity_gate
+from .schema import EmailCandidate, Person, Profile
 
 
 Intent = Literal["work", "personal", "either"]
@@ -625,6 +626,136 @@ def render_decision_card(
         lines.append("")  # blank line separating warnings from the lead
 
     lines.extend(_render_lead(person, pick, bucket, candidates, intent, fell_back))
+
+    if verbose:
+        lines.extend(_verbose_identity_block(person))
+        if candidates:
+            lines.extend(_verbose_tables(candidates, intent, max_per_section))
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# ---- profile card (the profile-expansion default output, D2-B) --------------
+
+# Per-field provenance marker. The effective tier is the per-field bind_tier
+# AFTER the identity gate (apply_identity_gate): if the person is not a single
+# confident match, even an "asserted" field shows as "possibly".
+_TIER_MARK = {"asserted": "[+]", "possibly": "[?]", "unbound": "[·]"}
+
+
+def _eff_tier(fact: object, person: Person) -> str:
+    raw = getattr(fact, "bind_tier", "unbound")
+    return apply_identity_gate(raw, person)
+
+
+def _mark(fact: object, person: Person) -> str:
+    return _TIER_MARK.get(_eff_tier(fact, person), "[·]")
+
+
+def _identity_gate_banner(person: Person) -> list[str]:
+    """D4 level 1: when identity is not a single confident match, warn loudly
+    that every field is downgraded to 'possibly'."""
+    if person.ambiguity == "single_plausible_match":
+        return []
+    return [
+        "[?] identity is NOT a single confident match — every field below is "
+        "shown as possibly; confirm before relying.",
+    ]
+
+
+def _reach_block(profile: Profile, person: Person, *, pick_address: str | None) -> list[str]:
+    """Alternate reachability channels (the email pick already leads the card)."""
+    chans = [c for c in profile.channels
+             if not (c.channel_type == "email" and c.value == pick_address)]
+    if not chans:
+        return []
+    lines = ["", "Other ways in:"]
+    for c in chans:
+        ev = f" ({c.evidence})" if c.evidence else ""
+        lines.append(f"  {_mark(c, person)} {c.channel_type}: {c.value}{ev}")
+    return lines
+
+
+def _social_block(profile: Profile, person: Person) -> list[str]:
+    if not profile.social_links:
+        return []
+    lines = ["", "Social:"]
+    for s in profile.social_links:
+        lines.append(f"  {_mark(s, person)} {s.platform}: {s.url}")
+    return lines
+
+
+def _work_block(profile: Profile, person: Person, *, n: int = 5) -> list[str]:
+    if not profile.work_items:
+        return []
+    lines = ["", "Body of work:"]
+    for w in profile.work_items[:n]:
+        desc = f" — {w.summary}" if w.summary else ""
+        lines.append(f"  {_mark(w, person)} {w.item_type}: {w.title}{desc}")
+    return lines
+
+
+def _roles_block(profile: Profile, person: Person) -> list[str]:
+    if not profile.roles:
+        return []
+    lines = ["", "Roles:"]
+    for r in profile.roles:
+        title = f"{r.title} at " if r.title else ""
+        when = ""
+        if r.since or r.until:
+            when = f" ({r.since or '?'}–{r.until or 'now'})"
+        lines.append(f"  {_mark(r, person)} {title}{r.employer}{when}")
+    return lines
+
+
+def _consistency_block(profile: Profile, person: Person) -> list[str]:
+    if not profile.consistency_notes:
+        return []
+    lines = ["", "Identity check:"]
+    for note in profile.consistency_notes:
+        lines.append(f"  {_mark(note, person)} {note.note}")
+    return lines
+
+
+def render_profile_card(
+    profile: Profile,
+    *,
+    intent: Intent = "work",
+    max_per_section: int = 5,
+    verbose: bool = False,
+    warnings: list[str] | None = None,
+) -> str:
+    """Render the person PROFILE as markdown (the profile-expansion default).
+
+    The email/reachability answer still LEADS (D2-B keeps the "what do I paste"
+    speed): the card opens with the same contact lead as render_decision_card,
+    then appends the profile sections (other channels, social, body of work,
+    roles, identity-consistency notes). Every profile field carries a provenance
+    marker: [+] asserted, [?] possibly (D4). Free-text-search facts are already
+    "possibly" at most and (today) only present under search; the default card
+    shows the bound facts the producers surfaced.
+    """
+    person = profile.identity
+    candidates = profile.emails
+
+    lines: list[str] = []
+    if warnings:
+        for w in warnings:
+            lines.append(f"⚠ {w}")
+        lines.append("")
+    lines.extend(_identity_gate_banner(person))
+
+    # Email lead — reuse the contact-card lead so the address answer is first.
+    pick, fell_back = _pick_best(candidates, intent)
+    bucket = _verdict_bucket(pick)
+    lines.extend(_render_lead(person, pick, bucket, candidates, intent, fell_back))
+
+    pick_address = pick.address if pick is not None else None
+    lines.extend(_reach_block(profile, person, pick_address=pick_address))
+    lines.extend(_social_block(profile, person))
+    lines.extend(_work_block(profile, person, n=max_per_section))
+    lines.extend(_roles_block(profile, person))
+    lines.extend(_consistency_block(profile, person))
 
     if verbose:
         lines.extend(_verbose_identity_block(person))
