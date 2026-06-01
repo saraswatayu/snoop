@@ -22,6 +22,7 @@ Three structural choices from the dual-voice review:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, Union
@@ -327,8 +328,10 @@ class ResolverResult:
     # Profile expansion: resolvers that produce non-email facts return them here
     # as a tagged Contribution list (email resolvers keep using `candidates`
     # during the migration; both feed the same Profile). Defaulted so existing
-    # resolvers and their tests are unaffected.
-    contributions: list[Contribution] = field(default_factory=list)
+    # resolvers and their tests are unaffected. Typed as a covariant Sequence so
+    # a resolver may hand back e.g. a list[SocialLink] without an invariance
+    # complaint; nothing mutates this list in place (consumers read + dispatch).
+    contributions: Sequence[Contribution] = field(default_factory=list)
 
 
 # ---- Identity + Profile (the profile-expansion deliverable) ------------------
