@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 
 SourceType = Literal[
@@ -78,6 +78,34 @@ SmtpVerdict = Literal[
     "inconclusive",  # provider blocked RCPT (Google/M365) — zero information
     "invalid",       # RCPT 5xx rejection
     "unprobed",      # never tested (skipped: personal provider, budget exhausted, etc.)
+]
+
+
+# ---- profile expansion (2026-06-01) -----------------------------------------
+# snoop's deliverable grows from "an email" to "a person profile." Every fact
+# we surface is a Contribution: a provenance-bearing claim about the target,
+# tagged with its `kind` and a `bind_tier` saying how confident we are it
+# belongs to THIS person (see lib.binding). EmailCandidate is the original
+# Contribution (kind="email") and keeps its richer 3-axis scoring; the new
+# kinds use the simpler bind_tier model.
+
+# How strongly a fact is tied to the resolved person:
+#   "asserted" : source is bound-by-construction — cross-linked from a validated
+#                profile (e.g. GitHub blog→domain) or directly user-supplied.
+#   "possibly" : weaker per-result binding (e.g. a free-text search hit that
+#                cleared the anchor gate but isn't bound-by-construction).
+#   "unbound"  : no binding evidence — caller should drop, not render.
+# NOTE: a domain merely DECLARED in the model-produced --person-plan is an
+# untrusted hint, NOT bound-by-construction (outside-voice Codex #2).
+BindTier = Literal["asserted", "possibly", "unbound"]
+
+ContributionKind = Literal[
+    "email",             # EmailCandidate — the original deliverable
+    "work_item",         # a repo / article / talk / podcast / paper
+    "channel",           # an observed public reachability channel
+    "social_link",       # a social profile the person linked themselves
+    "role",              # employer / title / tenure fact
+    "consistency_note",  # text-only identity-consistency observation
 ]
 
 
@@ -145,6 +173,96 @@ class EmailCandidate:
     # Per-field reasons (renderable receipts)
     score_reasons: list[str] = field(default_factory=list)
 
+    # Contribution discriminant. EmailCandidate is the original/canonical
+    # Contribution; `kind` lets the merge step dispatch it uniformly with the
+    # new profile fact types. Appended (defaulted) so existing construction is
+    # unaffected.
+    kind: ContributionKind = "email"
+
+
+# ---- profile fact types (new Contribution kinds) ----------------------------
+# Each carries `sources` (provenance), a `bind_tier` (set by lib.binding), and
+# `bind_reasons` (renderable receipts), mirroring EmailCandidate's shape so the
+# renderer and merge step can treat all contributions uniformly.
+
+
+@dataclass
+class WorkItem:
+    """Something the person published: a repo, article, talk, podcast, paper."""
+    title: str
+    kind: ContributionKind = "work_item"
+    url: str | None = None
+    item_type: Literal["repo", "article", "talk", "podcast", "paper", "other"] = "other"
+    published_at: str | None = None      # ISO date if known
+    summary: str | None = None
+    sources: list[Source] = field(default_factory=list)
+    bind_tier: BindTier = "unbound"
+    bind_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class Channel:
+    """An OBSERVED public reachability channel — not a ranked 'best way in'
+    (outside-voice Codex #7: we can observe channels, not reliably rank intent
+    fit). `rank_hint` is an optional ordering signal, evidence-based, not a
+    promise."""
+    channel_type: str                     # email|x_dm|linkedin|bluesky|contact_form|calendly
+    value: str                            # the address / url / handle
+    kind: ContributionKind = "channel"
+    evidence: str | None = None           # e.g. "X bio says DMs open"
+    rank_hint: float | None = None        # optional, observed ordering signal
+    sources: list[Source] = field(default_factory=list)
+    bind_tier: BindTier = "unbound"
+    bind_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class SocialLink:
+    """A social profile the person linked from their OWN profile/site. No
+    inference: only links the person published about themselves."""
+    platform: str                         # github|x|linkedin|bluesky|mastodon|instagram|...
+    url: str
+    kind: ContributionKind = "social_link"
+    handle: str | None = None
+    sources: list[Source] = field(default_factory=list)
+    bind_tier: BindTier = "unbound"
+    bind_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RoleFact:
+    """An employer / title / tenure fact, optionally with company context."""
+    employer: str
+    kind: ContributionKind = "role"
+    title: str | None = None
+    since: str | None = None
+    until: str | None = None              # None == current
+    summary: str | None = None           # what the company does / why-now context
+    sources: list[Source] = field(default_factory=list)
+    bind_tier: BindTier = "unbound"
+    bind_reasons: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ConsistencyNote:
+    """Text-only identity-consistency observation (narrowed from "anti-catfish"
+    per outside-voice Codex #4 — NO photo/image/reverse-image matching). A
+    mismatch is neutral evidence, never a scary "FAKE?" verdict.
+    e.g. 'GitHub name "Daniel Neil" vs plan "Dan" — diminutive, consistent'."""
+    note: str
+    kind: ContributionKind = "consistency_note"
+    severity: Literal["info", "mismatch"] = "info"
+    sources: list[Source] = field(default_factory=list)
+    bind_tier: BindTier = "unbound"
+    bind_reasons: list[str] = field(default_factory=list)
+
+
+# The tagged union (outside-voice D2): a heterogeneous list of these flows from
+# resolvers; the merge step dispatches on `.kind`.
+Contribution = Union[
+    EmailCandidate, WorkItem, Channel, SocialLink, RoleFact, ConsistencyNote,
+]
+
 
 @dataclass
 class Person:
@@ -201,3 +319,53 @@ class ResolverResult:
     status: Literal["ok", "empty", "timeout", "unavailable", "error"]
     elapsed_ms: int | None = None
     error_detail: str | None = None
+    # Profile expansion: resolvers that produce non-email facts return them here
+    # as a tagged Contribution list (email resolvers keep using `candidates`
+    # during the migration; both feed the same Profile). Defaulted so existing
+    # resolvers and their tests are unaffected.
+    contributions: list[Contribution] = field(default_factory=list)
+
+
+# ---- Identity + Profile (the profile-expansion deliverable) ------------------
+
+# `Identity` is the resolved-person record. Today it is `Person` (which already
+# holds exactly the identity fields plus the gh_* dossier). The eng plan's
+# "slim Person down to identity-only" is a follow-up refactor kept separate so
+# each commit stays green; new code should reference `Identity`.
+Identity = Person
+
+
+@dataclass
+class Profile:
+    """The profile-expansion deliverable: a resolved identity plus typed,
+    provenance-bearing sections. The email candidates remain their own list
+    (the original product); the new sections carry the expansion.
+
+    `add()` is the merge primitive (D2): dispatch a Contribution into its
+    section by `.kind`. `contributions()` flattens back for uniform iteration."""
+    identity: Person
+    emails: list[EmailCandidate] = field(default_factory=list)
+    work_items: list[WorkItem] = field(default_factory=list)
+    channels: list[Channel] = field(default_factory=list)
+    social_links: list[SocialLink] = field(default_factory=list)
+    roles: list[RoleFact] = field(default_factory=list)
+    consistency_notes: list[ConsistencyNote] = field(default_factory=list)
+
+    def add(self, c: Contribution) -> None:
+        """Dispatch a contribution into the right section by kind."""
+        bucket = {
+            "email": self.emails,
+            "work_item": self.work_items,
+            "channel": self.channels,
+            "social_link": self.social_links,
+            "role": self.roles,
+            "consistency_note": self.consistency_notes,
+        }[c.kind]
+        bucket.append(c)
+
+    def contributions(self) -> list[Contribution]:
+        """All facts as a flat list, in a stable section order."""
+        return [
+            *self.emails, *self.work_items, *self.channels,
+            *self.social_links, *self.roles, *self.consistency_notes,
+        ]

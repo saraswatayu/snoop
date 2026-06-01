@@ -13,11 +13,18 @@ from datetime import datetime, timezone
 import pytest
 
 from lib.schema import (
+    Channel,
+    ConsistencyNote,
     EmailCandidate,
     Employer,
+    Identity,
     Person,
+    Profile,
     ResolverResult,
+    RoleFact,
+    SocialLink,
     Source,
+    WorkItem,
 )
 
 
@@ -119,3 +126,81 @@ def test_resolver_result_ok_with_candidates():
     r = ResolverResult(resolver="git_emails", candidates=[cand], status="ok", elapsed_ms=200)
     assert r.status == "ok"
     assert len(r.candidates) == 1
+
+
+# ---- profile expansion (2026-06-01) ----------------------------------------
+
+
+def test_email_candidate_is_a_contribution():
+    """EmailCandidate is the original Contribution; kind discriminates it."""
+    c = EmailCandidate(address="x@example.com")
+    assert c.kind == "email"
+
+
+def test_new_contribution_kinds_and_defaults():
+    """Every new fact type carries its kind and defaults to unbound — a fact
+    with no binding evidence must not render as 'theirs' until lib.binding
+    classifies it."""
+    w = WorkItem(title="My talk on X")
+    ch = Channel(channel_type="x_dm", value="@dan")
+    sl = SocialLink(platform="x", url="https://x.com/dan")
+    role = RoleFact(employer="OpenAI")
+    note = ConsistencyNote(note="github name matches plan")
+    assert (w.kind, ch.kind, sl.kind, role.kind, note.kind) == (
+        "work_item", "channel", "social_link", "role", "consistency_note",
+    )
+    for fact in (w, ch, sl, role, note):
+        assert fact.bind_tier == "unbound"
+        assert fact.sources == []
+        assert fact.bind_reasons == []
+
+
+def test_consistency_note_severity_defaults_to_info():
+    """A consistency note is neutral evidence by default, never an accusation."""
+    assert ConsistencyNote(note="ok").severity == "info"
+    assert ConsistencyNote(note="company differs", severity="mismatch").severity == "mismatch"
+
+
+def test_identity_is_person_for_now():
+    """Identity aliases Person during the migration; new code references Identity."""
+    assert Identity is Person
+
+
+def test_resolver_result_contributions_defaults_empty():
+    """Additive field: email resolvers that only set `candidates` still work."""
+    r = ResolverResult(resolver="gh_profile", candidates=[], status="empty")
+    assert r.contributions == []
+
+
+def test_profile_add_dispatches_by_kind():
+    """Profile.add is the merge primitive — it routes each contribution into
+    its section by .kind. This is the dispatch-on-kind contract (D2)."""
+    p = Profile(identity=Person(name="Dan Neil"))
+    p.add(EmailCandidate(address="dan@acme.com"))
+    p.add(WorkItem(title="Conference talk"))
+    p.add(Channel(channel_type="linkedin", value="in/danneil"))
+    p.add(SocialLink(platform="github", url="https://github.com/danneil"))
+    p.add(RoleFact(employer="Acme"))
+    p.add(ConsistencyNote(note="name consistent"))
+    assert len(p.emails) == 1
+    assert len(p.work_items) == 1
+    assert len(p.channels) == 1
+    assert len(p.social_links) == 1
+    assert len(p.roles) == 1
+    assert len(p.consistency_notes) == 1
+
+
+def test_profile_contributions_flattens_in_section_order():
+    p = Profile(identity=Person(name="Dan Neil"))
+    p.add(WorkItem(title="t"))
+    p.add(EmailCandidate(address="a@b.com"))
+    flat = p.contributions()
+    # emails come first in the stable section order regardless of insert order
+    assert flat[0].kind == "email"
+    assert {c.kind for c in flat} == {"email", "work_item"}
+
+
+def test_profile_starts_empty_except_identity():
+    p = Profile(identity=Person(name="X"))
+    assert p.emails == [] and p.work_items == [] and p.channels == []
+    assert p.social_links == [] and p.roles == [] and p.consistency_notes == []
