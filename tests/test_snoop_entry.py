@@ -251,15 +251,20 @@ def test_smtp_candidates_drops_sourceless():
     assert "empty@openai.com" not in addresses
 
 
-def test_smtp_candidates_sorts_by_belongs_desc():
-    cands = [
-        EmailCandidate(address=f"x{i}@openai.com", belongs_to_person=0.1 * i,
-                       sources=[src("pattern")])
-        for i in range(1, 6)
+def test_smtp_candidates_orders_observed_before_pattern():
+    """_probe_rank: an address actually observed (non-pattern source) probes
+    before a pure name×domain guess, and more sources rank higher."""
+    pattern_only = EmailCandidate(address="guess@openai.com",
+                                  sources=[src("pattern")])
+    observed = EmailCandidate(address="seen@openai.com",
+                              sources=[src("git_commit")])
+    corroborated = EmailCandidate(
+        address="strong@openai.com",
+        sources=[src("git_commit"), src("gh_profile")])
+    targets = snoop._smtp_candidates([pattern_only, observed, corroborated])
+    assert [c.address for c in targets] == [
+        "strong@openai.com", "seen@openai.com", "guess@openai.com",
     ]
-    targets = snoop._smtp_candidates(cands)
-    scores = [c.belongs_to_person or 0 for c in targets]
-    assert scores == sorted(scores, reverse=True)
 
 
 def test_smtp_candidates_respects_top_k():
@@ -305,11 +310,11 @@ def test_main_diagnose_exits_clean(capsys):
 
 
 def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
-    """Smoke test the full pipeline end-to-end: parse args, build plan,
-    resolve, fan out, cluster, score, render. All resolvers monkeypatched
-    to return canned results so we don't hit the network."""
+    """Smoke test the full pipeline end-to-end: parse args, build plan, resolve,
+    fan out, cluster, order, emit the observation bundle. All resolvers
+    monkeypatched to canned results so we don't hit the network."""
+    import json as _json
 
-    # Mock person_resolve to return a Person with the github handle bound
     def mock_resolve(name, plan=None, gh_caller=None):
         return Person(
             name=name,
@@ -325,7 +330,6 @@ def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
         )
     monkeypatch.setattr(snoop, "resolve_person", mock_resolve)
 
-    # Each resolver returns one canned candidate
     def mock_git(*args, **kwargs):
         return ResolverResult(
             resolver="git_emails",
@@ -337,19 +341,10 @@ def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
             status="ok",
         )
 
-    def mock_profile(*args, **kwargs):
-        return ResolverResult(
-            resolver="gh_profile",
-            candidates=[],
-            status="empty",
-        )
-
-    def mock_site(*args, **kwargs):
-        return ResolverResult(
-            resolver="personal_site",
-            candidates=[],
-            status="empty",
-        )
+    def mock_empty(resolver):
+        def _fn(*args, **kwargs):
+            return ResolverResult(resolver=resolver, candidates=[], status="empty")
+        return _fn
 
     def mock_pattern(*args, **kwargs):
         return ResolverResult(
@@ -363,13 +358,10 @@ def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
         )
 
     monkeypatch.setattr(snoop, "fetch_git_emails", mock_git)
-    monkeypatch.setattr(snoop, "fetch_gh_profile", mock_profile)
-    monkeypatch.setattr(snoop, "fetch_personal_site", mock_site)
+    monkeypatch.setattr(snoop, "fetch_gh_profile", mock_empty("gh_profile"))
+    monkeypatch.setattr(snoop, "fetch_personal_site", mock_empty("personal_site"))
     monkeypatch.setattr(snoop, "fetch_pattern_candidates", mock_pattern)
-    # Dossier enrichment must also be mocked so the test stays hermetic.
     monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
-
-    # SMTP no-op
     monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
 
     rc = snoop.main([
@@ -378,17 +370,17 @@ def test_main_pipeline_with_mocked_resolvers(monkeypatch, capsys):
         "--no-smtp",
     ])
     assert rc == 0
-    out = capsys.readouterr().out
-    # New compact header: Name → Employer
-    assert "Peter Steinberger → OpenAI" in out
-    # Pick named in the lead address line
-    assert "pete@openai.com" in out
-    # Fallback list shows the lower-confidence pattern address
-    assert "peter.steinberger@openai.com" in out
-    # Pick is the lead, fallback appears after "If it bounces"
-    if "If it bounces" in out:
-        bounce_section = out.split("If it bounces")[1]
-        assert "peter.steinberger@openai.com" in bounce_section
+    bundle = _json.loads(capsys.readouterr().out)
+    assert bundle["person"]["name"] == "Peter Steinberger"
+    assert bundle["person"]["ambiguity"] == "single_plausible_match"
+    blob = "\n".join(o["content"] for o in bundle["observations"])
+    # both the observed git-commit address and the pattern guess are in the bundle
+    assert "pete@openai.com" in blob
+    assert "peter.steinberger@openai.com" in blob
+    # the observed address is ordered ahead of the pure pattern guess
+    email_obs = [o for o in bundle["observations"] if o["type"] == "email_candidate"]
+    assert email_obs[0]["content"].index("pete@openai.com") >= 0
+    assert "pete@openai.com" in email_obs[0]["content"]
 
 
 def test_main_requires_name_or_plan():
@@ -621,93 +613,29 @@ def test_autodetect_dedupes_within_candidate_set():
     assert merged == ["same.com"]
 
 
-def test_work_search_fn_none_without_results():
-    assert snoop._work_search_fn({}) is None
-    assert snoop._work_search_fn({"work_search_results": []}) is None
-    assert snoop._work_search_fn({"work_search_results": "nope"}) is None
-
-
-def test_work_search_fn_returns_supplied_results():
-    results = [{"title": "Talk", "url": "https://x.example",
-                "crosslink_url": "https://steipete.com/talks"}]
-    fn = snoop._work_search_fn({"work_search_results": results})
-    assert fn is not None
-    assert fn("any query") == results  # host-model results passed through
-
-
-def test_main_with_json_output_emits_valid_json(monkeypatch, capsys):
-    """--json mode should produce parseable JSON."""
+def test_main_empty_pipeline_emits_identity_bundle(monkeypatch, capsys):
+    """With no candidates, the bundle still describes the resolved identity and
+    its ambiguity — the host reasons over that too."""
     import json as _json
 
     monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
         name=name,
         ambiguity="insufficient_identity_evidence",
     ))
-    # All resolvers empty
     empty_result = ResolverResult(resolver="x", candidates=[], status="empty")
     monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty_result)
     monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty_result)
     monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty_result)
     monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: empty_result)
 
-    rc = snoop.main(["X", "--json", "--no-smtp"])
+    rc = snoop.main(["X", "--no-smtp"])
     assert rc == 0
-    out = capsys.readouterr().out
-    parsed = _json.loads(out)
-    assert parsed["person"]["name"] == "X"
-    assert parsed["candidates"] == []
-    # Profile-expansion contract: additive `profile` key with stable sections,
-    # existing top-level keys unchanged.
-    assert "profile" in parsed
-    for section in ("social_links", "channels", "work_items", "roles",
-                    "consistency_notes"):
-        assert section in parsed["profile"]
-        assert isinstance(parsed["profile"][section], list)
-
-
-def test_format_json_report_includes_former_employers():
-    """Pipelining --json should surface the former_employers list — the
-    scorer uses employer_former_match to cap former-employer addresses
-    at low confidence; downstream consumers should be able to see the
-    actual list and not just the boolean."""
-    import json as _json
-    from lib.schema import Employer
-    p = Person(
-        name="Jane",
-        ambiguity="insufficient_identity_evidence",
-        former_employers=[
-            Employer(name="PSPDFKit", domains=["pspdfkit.com"], until="2023"),
-        ],
-    )
-    raw = snoop._format_json_report(p, [])
-    parsed = _json.loads(raw)
-    fe = parsed["person"]["former_employers"]
-    assert len(fe) == 1
-    assert fe[0]["name"] == "PSPDFKit"
-    assert fe[0]["domains"] == ["pspdfkit.com"]
-    assert fe[0]["until"] == "2023"
-
-
-def test_format_json_report_includes_account_and_former_employer_fields():
-    """The JSON report must surface account_exists, account_display_name,
-    and employer_former_match — pipelining `snoop --json` is the supported
-    integration boundary, and dropping fields silently breaks downstream
-    consumers."""
-    import json as _json
-    p = Person(name="Jane", ambiguity="insufficient_identity_evidence")
-    c = EmailCandidate(
-        address="jane@former.com",
-        account_exists="verified",
-        account_display_name="Jane Doe",
-        employer_former_match=True,
-        sources=[src("manual_known")],
-    )
-    raw = snoop._format_json_report(p, [c])
-    parsed = _json.loads(raw)
-    cand = parsed["candidates"][0]
-    assert cand["account_exists"] == "verified"
-    assert cand["account_display_name"] == "Jane Doe"
-    assert cand["employer_former_match"] is True
+    bundle = _json.loads(capsys.readouterr().out)
+    assert bundle["person"]["name"] == "X"
+    assert bundle["person"]["ambiguity"] == "insufficient_identity_evidence"
+    assert isinstance(bundle["observations"], list)
+    # no email candidates, but the bundle is still well-formed
+    assert not any(o["type"] == "email_candidate" for o in bundle["observations"])
 
 
 # ---- run_pipeline timeout ---------------------------------------------------
@@ -735,14 +663,14 @@ def test_google_account_candidates_skips_already_probed():
     assert [c.address for c in out] == ["b@google.com"]
 
 
-def test_google_account_candidates_sorts_by_belongs_desc():
+def test_google_account_candidates_orders_observed_first():
     """Observation-backed candidates probe BEFORE pattern guesses so a
-    verified-but-wrong-person pattern hit can't pre-empt a higher-confidence
-    candidate that hasn't been tried yet."""
-    high = EmailCandidate(address="z@google.com", belongs_to_person=0.75)
-    low = EmailCandidate(address="a@google.com", belongs_to_person=0.20)
-    unscored = EmailCandidate(address="m@google.com")  # belongs=None
-    out = snoop._google_account_candidates([low, unscored, high], [])
+    verified-but-wrong-person pattern hit can't pre-empt an observed candidate
+    that hasn't been tried yet (_probe_rank)."""
+    observed = EmailCandidate(address="z@google.com", sources=[src("git_commit")])
+    pattern = EmailCandidate(address="a@google.com", sources=[src("pattern")])
+    sourceless = EmailCandidate(address="m@google.com")  # no sources → last
+    out = snoop._google_account_candidates([pattern, sourceless, observed], [])
     assert [c.address for c in out] == ["z@google.com", "a@google.com", "m@google.com"]
 
 
@@ -799,6 +727,7 @@ def test_main_invokes_google_account_when_flag_set(monkeypatch, capsys):
         )
     monkeypatch.setattr(snoop, "fetch_google_account", fake_google)
 
+    import json as _json
     rc = snoop.main([
         "Real Person",
         "--allow-google-account",
@@ -807,13 +736,17 @@ def test_main_invokes_google_account_when_flag_set(monkeypatch, capsys):
     assert rc == 0
     # google_account was invoked
     assert len(google_calls) == 1
-    out = capsys.readouterr().out
-    # The phantom should be capped low (rendered with very low belongs)
-    # and the real one should be the recommendation
-    assert "real@google.com" in out
-    # The lead address line is one of the first ~3 lines and contains the pick.
-    lead = "\n".join(out.split("\n")[:3])
-    assert "real@google.com" in lead
+    bundle = _json.loads(capsys.readouterr().out)
+    obs = {o["content"] for o in bundle["observations"]}
+    blob = "\n".join(obs)
+    # the verified account surfaces account_exists=verified + a name_match verdict
+    assert "real@google.com" in blob
+    assert "account_exists=verified" in blob
+    assert 'google_display_name="Real Person"' in blob
+    assert "name_match=yes" in blob
+    # the phantom's not_found verdict is also surfaced for the host to drop
+    assert "phantom@google.com" in blob
+    assert "account_exists=not_found" in blob
 
 
 def test_main_skips_google_account_when_flag_not_set(monkeypatch, capsys):
@@ -930,45 +863,12 @@ def test_pipeline_marks_timed_out_resolvers(monkeypatch):
     assert timed_out, f"expected at least one timeout, got statuses: {statuses}"
 
 
-# ---- profile expansion: --json gate, --no-search escape hatch ---------------
+# ---- --no-search escape hatch -----------------------------------------------
 
 
-def test_profile_json_applies_identity_gate():
-    """C4: --json must emit the EFFECTIVE (gated) tier. For an ambiguous identity
-    an 'asserted' field is downgraded to 'possibly', matching what the human card
-    shows — or a machine consumer would trust a fact the human is told to doubt."""
-    import json as _json
-    from lib.schema import Profile, SocialLink
-    person = Person(name="Z", ambiguity="multiple_plausible_matches")
-    profile = Profile(identity=person, social_links=[
-        SocialLink(platform="github", url="https://github.com/z", bind_tier="asserted"),
-    ])
-    parsed = _json.loads(snoop._format_json_report(person, [], profile=profile))
-    assert parsed["profile"]["social_links"][0]["bind_tier"] == "possibly"
-
-
-def test_profile_json_roundtrips_bind_tier_for_single_match():
-    """When the identity IS a single confident match, an asserted field stays
-    asserted in JSON and its sources round-trip."""
-    import json as _json
-    from lib.schema import Profile, SocialLink
-    person = Person(
-        name="P", handles={"github": "p"}, ambiguity="single_plausible_match",
-        bound_anchors=[("github_name_match", "P"), ("github_employer_match", "E")],
-    )
-    profile = Profile(identity=person, social_links=[SocialLink(
-        platform="github", url="https://github.com/p", bind_tier="asserted",
-        sources=[src("gh_profile", url="https://github.com/p")],
-    )])
-    parsed = _json.loads(snoop._format_json_report(person, [], profile=profile))
-    sl = parsed["profile"]["social_links"][0]
-    assert sl["bind_tier"] == "asserted"
-    assert sl["sources"][0]["type"] == "gh_profile"
-
-
-def _no_search_setup(monkeypatch):
-    """Mock resolvers empty + capture the build_profile kwargs so a test can
-    prove whether the search path was wired on or off."""
+def _search_setup(monkeypatch):
+    """Mock all resolvers empty so only the host-supplied work_search_results can
+    produce observations."""
     monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
         name=name, ambiguity="single_plausible_match",
         bound_anchors=[("github_name_match", name)],
@@ -977,15 +877,6 @@ def _no_search_setup(monkeypatch):
     for fn in ("fetch_git_emails", "fetch_gh_profile",
                "fetch_personal_site", "fetch_pattern_candidates"):
         monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
-    captured = {}
-    real_build = snoop.build_profile
-
-    def spy_build(person, candidates, **kw):
-        captured.update(kw)
-        return real_build(person, candidates, **kw)
-
-    monkeypatch.setattr(snoop, "build_profile", spy_build)
-    return captured
 
 
 _PLAN_WITH_SEARCH = (
@@ -993,26 +884,26 @@ _PLAN_WITH_SEARCH = (
 )
 
 
-def test_no_search_flag_suppresses_search_path(monkeypatch):
-    """--no-search is the escape hatch: build_profile must be called with the
-    search path off (enable_search=False, search_fn=None) even when the plan
-    carries host-model work_search_results."""
-    captured = _no_search_setup(monkeypatch)
+def test_no_search_flag_drops_work_search_observations(monkeypatch, capsys):
+    """--no-search drops the host-supplied work_search_results from the bundle."""
+    import json as _json
+    _search_setup(monkeypatch)
     rc = snoop.main(["X", "--no-smtp", "--no-search",
                      "--person-plan", _PLAN_WITH_SEARCH])
     assert rc == 0
-    assert captured["enable_search"] is False
-    assert captured["search_fn"] is None
+    bundle = _json.loads(capsys.readouterr().out)
+    assert not any(o["type"] == "web_search" for o in bundle["observations"])
 
 
-def test_search_path_wired_without_no_search_flag(monkeypatch):
-    """Without --no-search, the host-model results ARE wired into build_profile
-    (guards against the flag silently disabling search for everyone)."""
-    captured = _no_search_setup(monkeypatch)
+def test_work_search_observations_present_without_no_search(monkeypatch, capsys):
+    """Without --no-search, host-model results ARE emitted as web_search
+    observations (guards against the flag silently dropping them for everyone)."""
+    import json as _json
+    _search_setup(monkeypatch)
     rc = snoop.main(["X", "--no-smtp", "--person-plan", _PLAN_WITH_SEARCH])
     assert rc == 0
-    assert captured["enable_search"] is True
-    assert captured["search_fn"] is not None
+    bundle = _json.loads(capsys.readouterr().out)
+    assert any(o["type"] == "web_search" for o in bundle["observations"])
 
 
 # ---- shared resolver scaffolding (observations / ground tests) -------------

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""snoop.py — entry point for the redesigned /snoop skill.
+"""snoop.py — the sensor entry point for the /snoop skill.
+
+snoop does the I/O the host model can't, and emits a typed observation bundle.
+The host model (already running in Claude Code) is the analyst: it reasons over
+the bundle, then runs `--ground` to deterministically check its citations.
 
 Pipeline:
 
@@ -7,24 +11,24 @@ Pipeline:
               ↓
     person_resolve.resolve_person  (validate identity anchors, surface deltas)
               ↓
-    fan-out (ThreadPoolExecutor, 5s per-resolver timeout):
+    fan-out (ThreadPoolExecutor, per-resolver timeout):
        git_emails | gh_profile | personal_site | pattern_gen
               ↓
     cluster  (dedupe by lowercased address; merge source lists)
               ↓
-    score_all  (3-field provenance-aware scorer)
+    order  (_probe_rank: observed addresses before pure name×domain guesses)
               ↓
-    verify_smtp top-K work candidates  (skip personal-provider)
+    google_account probe  (Google-hosted candidates, --allow-google-account)
               ↓
-    re-score  (SMTP modifies deliverable)
+    verify_smtp top-K candidates  (skip personal-provider / known-dead)
               ↓
-    build_profile  (run 5 profile producers; bind every fact + merge)
-              ↓
-    render_profile_card  (profile card: email lead + provenance-marked sections)
+    build_evidence → emit the observation bundle as JSON
 
-Legacy compatibility: the original verify_email.py script still works
-for single-address verification. snoop.py is the new rich-pipeline
-entry; use it for any name+company lookup.
+Modes:
+    (default / --observations) emit the observation bundle
+    --ground                   read {observations, facts} on stdin, drop uncited
+                               facts, render the grounded card
+    --diagnose                 capability probe and exit
 """
 
 from __future__ import annotations
@@ -41,17 +45,15 @@ from pathlib import Path
 from typing import Any, Callable
 
 from lib import __version__, diagnose, reason, render
-from lib.binding import apply_identity_gate
 from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
+from lib.normalize import is_personal_provider
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
-from lib.profile_build import build_profile
-from lib.schema import EmailCandidate, Person, Profile, ResolverResult
-from lib.score import is_personal_provider, score_all
+from lib.schema import EmailCandidate, Person, ResolverResult
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
 
 
@@ -196,12 +198,6 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "--intent",
-        choices=("work", "personal", "either"),
-        default="work",
-        help="Sort/recommendation bias (default: work)",
-    )
-    p.add_argument(
         "--known",
         action="append",
         metavar="EMAIL=Full Name",
@@ -218,15 +214,16 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--no-search",
         action="store_true",
-        help="Escape hatch: skip the free-text body-of-work search path "
-             "(anchored sources still run). Profile features are on by default.",
+        help="Escape hatch: drop the host-supplied work_search_results from the "
+             "bundle (the anchored sensor observations still emit).",
     )
     p.add_argument(
         "--observations",
         action="store_true",
-        help="Sensor mode: do the I/O the host model can't (git, GitHub, SMTP, "
-             "Google, MX) and emit the raw observation bundle as JSON. The host "
-             "model reasons over it. This is the idiomatic in-Claude-Code path.",
+        help="Emit the raw observation bundle as JSON — the I/O the host model "
+             "can't do (git, GitHub, SMTP, Google, MX), typed and cited. This is "
+             "the default and only non-ground output; the flag is accepted for "
+             "explicitness and back-compat.",
     )
     p.add_argument(
         "--ground",
@@ -234,12 +231,6 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Verifier mode: read {observations, facts, ...} JSON on stdin and "
              "drop any fact whose citations don't reference a real observation, "
              "then render the grounded card. The deterministic citation check.",
-    )
-    p.add_argument(
-        "--max-per-section",
-        type=int,
-        default=5,
-        help="Maximum rows per Work / Personal / Other section (default 5).",
     )
     p.add_argument(
         "--allow-google-account",
@@ -266,22 +257,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--diagnose",
         action="store_true",
         help="Print a capability probe report and exit (no lookup).",
-    )
-    p.add_argument(
-        "--json",
-        action="store_true",
-        help="Emit machine-readable JSON instead of the markdown card.",
-    )
-    p.add_argument(
-        "--verbose",
-        "-v",
-        action="store_true",
-        help=(
-            "Append the per-section candidate tables (with belongs/work/"
-            "deliverable scores), identity-anchor state, and resolver "
-            "notes under the compact lead. Use when the default surprises "
-            "you and you want to see what the scorer thought."
-        ),
     )
     return p
 
@@ -566,19 +541,27 @@ def _autodetect_workspace_domains(
     return list(explicit or []) + additions
 
 
+def _probe_rank(c: EmailCandidate) -> tuple:
+    """Ordering key for which candidates to probe (and emit) first. No scorer:
+    rank by whether the address was actually observed (any non-pattern source)
+    over a pure name×domain guess, then by how many sources corroborate it, then
+    address for determinism. The host model still reasons over every candidate;
+    this only decides probe order so an observed address is tried before a guess
+    that might hit a stranger's mailbox on a multi-user Workspace tenant."""
+    observed = any(s.type != "pattern" for s in c.sources)
+    return (0 if observed else 1, -len(c.sources), c.address)
+
+
 def _google_account_candidates(
     candidates: list[EmailCandidate],
     workspace_domains: list[str],
 ) -> list[EmailCandidate]:
     """Filter candidates to those on Google-hosted domains worth probing.
     Skip candidates that already have an account_exists verdict (don't
-    re-probe within one invocation).
-
-    Sorted by belongs_to_person descending so observation-backed candidates
-    probe first. On multi-user Workspace tenants this matters: a pattern
-    guess that happens to hit someone else's real account could short-
-    circuit further probing of higher-confidence candidates that haven't
-    been tried yet. None → -1 sentinel sorts unscored candidates to the end.
+    re-probe within one invocation). Ordered by _probe_rank so observation-
+    backed candidates probe first — on a multi-user Workspace tenant a pattern
+    guess that hits someone else's real account shouldn't short-circuit probing
+    of an observed address that hasn't been tried yet.
     """
     domains = _google_target_domains(workspace_domains)
     out: list[EmailCandidate] = []
@@ -590,17 +573,14 @@ def _google_account_candidates(
         domain = c.address.rsplit("@", 1)[1].lower()
         if domain in domains:
             out.append(c)
-    out.sort(key=lambda c: (
-        -(c.belongs_to_person if c.belongs_to_person is not None else -1.0),
-        c.address,
-    ))
+    out.sort(key=_probe_rank)
     return out
 
 
 def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[EmailCandidate]:
-    """Pick the top candidates that are worth SMTP-probing: non-personal-provider,
-    at least one source, not already known-dead via Google. Sorted by
-    belongs_to_person descending.
+    """Pick the top candidates worth SMTP-probing: non-personal-provider, at
+    least one source, not already known-dead via Google. Ordered by _probe_rank
+    (observed addresses before pure guesses).
 
     Google's 'not_found' verdict is authoritative — re-probing those addresses
     over SMTP burns the per-domain daily budget and risks the user's MAIL FROM
@@ -618,168 +598,17 @@ def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[E
         if c.account_exists == "not_found":
             continue
         eligible.append(c)
-    eligible.sort(key=lambda c: -(c.belongs_to_person or 0))
+    eligible.sort(key=_probe_rank)
     return eligible[:top_k]
-
-
-def _profile_json(profile: "Profile") -> dict:
-    """Serialize the profile sections (additive; consumers can ignore). Every
-    fact carries its bind_tier so a machine consumer can apply the same
-    asserted/possibly distinction the card shows.
-
-    The emitted bind_tier is the EFFECTIVE tier — the per-field tier AFTER the
-    identity gate (apply_identity_gate). When the identity is not a single
-    confident match the human card downgrades every field to "possibly"; the
-    JSON must match, or a machine consumer would trust an "asserted" fact about
-    an unconfirmed identity that the human is told to doubt (namesake risk)."""
-    identity = profile.identity
-
-    def tier(f) -> str:
-        return apply_identity_gate(f.bind_tier, identity)
-
-    def srcs(f):
-        return [{"type": s.type, "url": s.url,
-                 "observed_at": s.observed_at.isoformat(), "detail": s.detail}
-                for s in f.sources]
-    return {
-        "social_links": [
-            {"platform": s.platform, "url": s.url, "handle": s.handle,
-             "bind_tier": tier(s), "sources": srcs(s)}
-            for s in profile.social_links
-        ],
-        "channels": [
-            {"channel_type": c.channel_type, "value": c.value,
-             "evidence": c.evidence, "rank_hint": c.rank_hint,
-             "bind_tier": tier(c), "sources": srcs(c)}
-            for c in profile.channels
-        ],
-        "work_items": [
-            {"title": w.title, "url": w.url, "item_type": w.item_type,
-             "published_at": w.published_at, "summary": w.summary,
-             "bind_tier": tier(w), "sources": srcs(w)}
-            for w in profile.work_items
-        ],
-        "roles": [
-            {"employer": r.employer, "title": r.title, "since": r.since,
-             "until": r.until, "summary": r.summary, "bind_tier": tier(r),
-             "sources": srcs(r)}
-            for r in profile.roles
-        ],
-        "consistency_notes": [
-            {"note": n.note, "severity": n.severity, "bind_tier": tier(n),
-             "sources": srcs(n)}
-            for n in profile.consistency_notes
-        ],
-    }
-
-
-def _format_json_report(
-    person: Person,
-    candidates: list[EmailCandidate],
-    *,
-    profile: "Profile | None" = None,
-    warnings: list[str] | None = None,
-) -> str:
-    """Machine-readable equivalent of the markdown card. Useful for
-    pipelining `snoop --json` into another tool.
-
-    The top-level keys (warnings, person, candidates) are stable. The
-    profile-expansion sections live under an additive `profile` key (present
-    when a Profile was built) so existing consumers are unaffected."""
-    report = {
-        "warnings": warnings or [],
-        "person": {
-            "name": person.name,
-            "name_variants": person.name_variants,
-            "handles": person.handles,
-            "personal_domains": person.personal_domains,
-            "employer": (
-                {"name": person.employer.name, "domains": person.employer.domains}
-                if person.employer else None
-            ),
-            "former_employers": [
-                {"name": fe.name, "domains": fe.domains,
-                 "since": fe.since, "until": fe.until}
-                for fe in person.former_employers
-            ],
-            "ambiguity": person.ambiguity,
-            "bound_anchors": [list(a) for a in person.bound_anchors],
-            "notes": person.notes,
-            "channel_hints": person.channel_hints,
-            # Tier 1 dossier (additive; machine consumers can ignore)
-            "gh_name": person.gh_name,
-            "gh_bio": person.gh_bio,
-            "gh_blog": person.gh_blog,
-            "gh_twitter": person.gh_twitter,
-            "gh_company": person.gh_company,
-            "gh_location": person.gh_location,
-            "gh_recent_repos": [
-                {"name": r.name, "description": r.description,
-                 "html_url": r.html_url, "pushed_at": r.pushed_at}
-                for r in person.gh_recent_repos
-            ],
-        },
-        "candidates": [
-            {
-                "address": c.address,
-                "belongs_to_person": c.belongs_to_person,
-                "current_work_address": c.current_work_address,
-                "deliverable": c.deliverable,
-                "smtp_verdict": c.smtp_verdict,
-                "mx_provider": c.mx_provider,
-                "account_exists": c.account_exists,
-                "account_display_name": c.account_display_name,
-                "account_photo_url": c.account_photo_url,
-                "employer_match": c.employer_match,
-                "employer_former_match": c.employer_former_match,
-                "is_personal_provider": c.is_personal_provider,
-                "score_reasons": c.score_reasons,
-                "sources": [
-                    {
-                        "type": s.type, "url": s.url,
-                        "observed_at": s.observed_at.isoformat(),
-                        "detail": s.detail,
-                    }
-                    for s in c.sources
-                ],
-            }
-            for c in candidates
-        ],
-    }
-    if profile is not None:
-        report["profile"] = _profile_json(profile)
-    return json.dumps(report, indent=2, default=str)
 
 
 # ---- main -------------------------------------------------------------------
 
 
-def _work_search_fn(plan: dict[str, Any]) -> Callable[[str], list[dict]] | None:
-    """Build the work-items search_fn from host-model-supplied WebSearch results.
-
-    T8's "provider" is the host model's built-in WebSearch: during planning the
-    model runs the searches it would anyway and passes the results as
-    plan["work_search_results"] = [{title, url, item_type, published_at,
-    summary, crosslink_url}, ...]. snoop binds each through the anchor gate
-    (lib.binding), so a namesake result without a cross-link to a bound signal
-    is dropped, and web_search facts render "possibly" at most.
-
-    Returns None when no results were supplied (a standalone CLI run, or a host
-    that did not search) — work_items then uses anchored sources only.
-    """
-    raw = plan.get("work_search_results")
-    if not isinstance(raw, list):
-        return None
-    results = [r for r in raw if isinstance(r, dict)]
-    if not results:
-        return None
-    return lambda _query: results
-
-
 def _work_search_observations(plan: dict[str, Any]) -> list[reason.Observation]:
-    """Shape host-model WebSearch results into raw observations for the LLM
-    path. Untrusted: each is just text the model weighs; the tool-less call and
-    grounding keep it safe. Non-string fields are coerced/dropped."""
+    """Shape host-model WebSearch results into raw web_search observations for the
+    bundle. Untrusted: each is just text the host model weighs, and grounding
+    keeps it honest. Non-string fields are coerced/dropped."""
     raw = plan.get("work_search_results")
     if not isinstance(raw, list):
         return []
@@ -921,15 +750,11 @@ def main(argv: list[str] | None = None) -> int:
 
     person = resolve_person(name, plan=plan)
     manual_known = _parse_knowns(args.known)
-    # Free-text body-of-work search (T8): the host model supplies WebSearch
-    # results via plan["work_search_results"]; the anchor gate keeps namesakes
-    # out. --no-search is the escape hatch.
-    work_search_fn = None if args.no_search else _work_search_fn(plan)
 
-    # Capability probe runs once per invocation. Cheap (no network, no
-    # cookie reads unless --allow-google-account). Feeds the warning
-    # surface at the top of the card so degraded environments show up
-    # adjacent to the result instead of silently weakening it.
+    # Capability probe runs once per invocation. Cheap (no network, no cookie
+    # reads unless --allow-google-account). Feeds the warning surface at the top
+    # of the bundle so degraded environments show up adjacent to the readings
+    # instead of silently weakening them.
     capabilities = _fast_capability_probe(
         allow_google_account=args.allow_google_account,
     )
@@ -937,10 +762,10 @@ def main(argv: list[str] | None = None) -> int:
         capabilities, allow_google_account=args.allow_google_account,
     )
 
-    # Dossier enrichment (D4-C): when the github handle is bound, fetch
-    # recently-pushed repos. One extra API call, gated on the same bound-
-    # handle check as the resolver fan-out so we never query GitHub for
-    # an untrusted hint. Best-effort: empty list on any failure.
+    # Dossier enrichment: when the github handle is bound, fetch recently-pushed
+    # repos. One extra API call, gated on the same bound-handle check as the
+    # resolver fan-out so we never query GitHub for an untrusted hint.
+    # Best-effort: empty list on any failure.
     gh_handle_bound = _gh_handle(person)
     if gh_handle_bound:
         person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
@@ -948,37 +773,12 @@ def main(argv: list[str] | None = None) -> int:
     # Fan out resolvers
     results = run_pipeline(person, manual_known=manual_known)
     candidates = cluster_candidates(results)
+    candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 
-    if not candidates:
-        # Sensor mode: emit the bundle (the host reasons over it) even with no
-        # email candidates — identity state + notes are still observations.
-        if args.observations:
-            _emit_observations(person, [], plan, warnings)
-            return 0
-        # Empty pipeline — still render so the user sees identity state
-        # and resolver notes. Respect --json mode.
-        empty_profile = build_profile(
-            person, [], enable_search=not args.no_search,
-            search_fn=work_search_fn,
-        )
-        if args.json:
-            sys.stdout.write(_format_json_report(
-                person, [], profile=empty_profile, warnings=warnings,
-            ))
-        else:
-            sys.stdout.write(render.render_profile_card(
-                empty_profile, intent=args.intent, verbose=args.verbose,
-                warnings=warnings,
-            ))
-        return 0
-
-    # Initial scoring (without verification signals yet)
-    score_all(candidates, person)
-
-    # Google account verification on Google-hosted candidates. Runs BEFORE
-    # SMTP so that not_found verdicts short-circuit SMTP probes on dead
-    # candidates (Google's view is authoritative when it returns a verdict).
-    if args.allow_google_account:
+    # Google account verification on Google-hosted candidates. Runs BEFORE SMTP
+    # so that not_found verdicts short-circuit SMTP probes on dead candidates
+    # (Google's view is authoritative when it returns a verdict).
+    if candidates and args.allow_google_account:
         # Auto-detect Workspace MX so the user doesn't need to pass
         # --google-workspace-domain for every YC startup on Gmail.
         merged_workspace = _autodetect_workspace_domains(
@@ -996,7 +796,7 @@ def main(argv: list[str] | None = None) -> int:
                 ),
             )
             # Surface non-ok resolver outcomes (rate limit, cookies missing,
-            # auth failure, all-probes-errored) so the user can tell 'didn't
+            # auth failure, all-probes-errored) so the host can tell 'didn't
             # find' apart from 'didn't ask'. Silent swallowing lets a stale
             # browser session masquerade as a clean lookup.
             if (google_result.status in ("error", "unavailable", "empty")
@@ -1004,42 +804,17 @@ def main(argv: list[str] | None = None) -> int:
                 person.notes.append(
                     f"google_account {google_result.status}: {google_result.error_detail}"
                 )
-            # Re-score so account_exists feeds the next stage's top-K pick
-            score_all(candidates, person)
 
     # SMTP probe top-K work candidates
-    if not args.no_smtp:
+    if candidates and not args.no_smtp:
         smtp_targets = _smtp_candidates(candidates)
         if smtp_targets:
             verify_candidates(smtp_targets, budget=default_budget())
-            # Re-score after SMTP modifies deliverable
-            score_all(candidates, person)
 
-    # Sensor mode: emit the scored bundle for the host model to reason over.
-    if args.observations:
-        _emit_observations(person, candidates, plan, warnings)
-        return 0
-
-    # Default output is the person PROFILE (D2-B): build it from the scored
-    # candidates + the producers. --no-search is the DX-D1 escape hatch.
-    profile = build_profile(
-        person, candidates, enable_search=not args.no_search,
-        search_fn=work_search_fn,
-    )
-    if args.json:
-        sys.stdout.write(_format_json_report(
-            person, candidates, profile=profile, warnings=warnings,
-        ))
-    else:
-        # The profile card leads with the email answer, then the sections.
-        output = render.render_profile_card(
-            profile,
-            intent=args.intent,
-            max_per_section=args.max_per_section,
-            verbose=args.verbose,
-            warnings=warnings,
-        )
-        sys.stdout.write(output)
+    # The deliverable: the observation bundle the host model reasons over.
+    # (Identity state + resolver notes are observations even with no candidates.)
+    # --no-search drops the host-supplied work_search_results from the bundle.
+    _emit_observations(person, candidates, {} if args.no_search else plan, warnings)
     return 0
 
 
