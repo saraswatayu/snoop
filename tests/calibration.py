@@ -39,7 +39,6 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 import snoop  # noqa: E402
-from lib.score import score_all  # noqa: E402
 
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "calibration_targets.json"
@@ -103,7 +102,7 @@ def measure_one_target(target: dict[str, Any]) -> dict[str, Any]:
     person = resolve_person(name, plan=plan)
     results = snoop.run_pipeline(person)
     candidates = snoop.cluster_candidates(results)
-    score_all(candidates, person)
+    candidates.sort(key=snoop._probe_rank)
 
     return {
         "id": target.get("id"),
