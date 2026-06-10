@@ -27,7 +27,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Iterable
 
-from .normalize import name_match
+from .normalize import PERSONAL_PROVIDER_DOMAINS, is_personal_provider, name_match  # noqa: F401
 from .schema import EmailCandidate, Person, Source
 
 
@@ -63,20 +63,9 @@ _GENERIC_LOCALPARTS = frozenset({
     "support", "sales", "admin", "hi", "say-hi", "sayhi",
 })
 
-# Personal-provider domains — addresses on these are NEVER work addresses.
-PERSONAL_PROVIDER_DOMAINS = frozenset({
-    "gmail.com", "googlemail.com",
-    "yahoo.com", "yahoo.co.uk", "ymail.com",
-    "icloud.com", "me.com", "mac.com",
-    "outlook.com", "hotmail.com", "live.com",
-    "protonmail.com", "proton.me", "pm.me",
-    "fastmail.com", "fastmail.fm",
-    "aol.com", "duck.com", "hey.com",
-})
-
-
-def is_personal_provider(domain: str) -> bool:
-    return domain.lower() in PERSONAL_PROVIDER_DOMAINS
+# Personal-provider classification moved to lib.normalize (sensor-side domain
+# fact, not judgment); PERSONAL_PROVIDER_DOMAINS / is_personal_provider are
+# imported at the top of this module and re-exported for back-compat.
 
 
 # ---- helpers ----------------------------------------------------------------

@@ -11,8 +11,10 @@ Covers the named failure modes from Subagent F2:
 from __future__ import annotations
 
 from lib.normalize import (
+    PERSONAL_PROVIDER_DOMAINS,
     fold_ascii,
     fold_to_letters,
+    is_personal_provider,
     localpart_templates,
     name_variants,
     normalize_domain,
@@ -236,3 +238,28 @@ def test_normalize_email_idna_encodes_domain():
 def test_normalize_email_handles_malformed():
     assert normalize_email("not-an-email") == "not-an-email"
     assert normalize_email("") == ""
+
+
+# ---- is_personal_provider ----------------------------------------------------
+
+
+def test_is_personal_provider_recognizes_majors():
+    assert is_personal_provider("gmail.com")
+    assert is_personal_provider("yahoo.com")
+    assert is_personal_provider("icloud.com")
+    assert is_personal_provider("protonmail.com")
+    assert is_personal_provider("outlook.com")
+
+
+def test_is_personal_provider_case_insensitive():
+    assert is_personal_provider("Gmail.COM")
+
+
+def test_is_personal_provider_rejects_corporate():
+    assert not is_personal_provider("openai.com")
+    assert not is_personal_provider("acme.dev")
+
+
+def test_personal_provider_domains_is_frozenset():
+    assert isinstance(PERSONAL_PROVIDER_DOMAINS, frozenset)
+    assert "gmail.com" in PERSONAL_PROVIDER_DOMAINS

@@ -35,6 +35,27 @@ import unicodedata
 from dataclasses import dataclass
 
 
+# ---- provider classification -------------------------------------------------
+
+# Personal-provider domains — addresses on these are NEVER work addresses, and
+# SMTP RCPT probing them is both useless (they block/throttle RCPT) and a
+# spam-filter risk. A sensor-side fact about the domain, not a judgment about
+# the person, so it lives in the normalization funnel.
+PERSONAL_PROVIDER_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com",
+    "yahoo.com", "yahoo.co.uk", "ymail.com",
+    "icloud.com", "me.com", "mac.com",
+    "outlook.com", "hotmail.com", "live.com",
+    "protonmail.com", "proton.me", "pm.me",
+    "fastmail.com", "fastmail.fm",
+    "aol.com", "duck.com", "hey.com",
+})
+
+
+def is_personal_provider(domain: str) -> bool:
+    return domain.lower() in PERSONAL_PROVIDER_DOMAINS
+
+
 # ---- ASCII-folding -----------------------------------------------------------
 
 

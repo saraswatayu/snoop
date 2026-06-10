@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from .schema import EmailCandidate
-from .score import is_personal_provider
+from .normalize import is_personal_provider
 
 
 SYNTAX_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
