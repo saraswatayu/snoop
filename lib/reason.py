@@ -104,7 +104,6 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
 
     for cand in candidates:
         src_types = ",".join(sorted({s.type for s in cand.sources})) or "none"
-        belongs = "?" if cand.belongs_to_person is None else f"{cand.belongs_to_person:g}"
         # When Google returned a display name, surface it WITH a text name-match
         # verdict against the target. This is the load-bearing disambiguator on a
         # common-name Workspace tenant: a pattern guess that hits a real-but-
@@ -124,7 +123,7 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
                       " (human-review artifact, not an automated match)")
         add("email_candidate",
             f"candidate email: {cand.address} "
-            f"(belongs~{belongs}, smtp={cand.smtp_verdict}, "
+            f"(smtp={cand.smtp_verdict}, "
             f"account_exists={cand.account_exists}, sources={src_types}{extra})",
             next((s.url for s in cand.sources if s.url), None))
 

@@ -34,7 +34,7 @@ def _person():
 
 def _candidate():
     return EmailCandidate(
-        address="alice@corp.com", belongs_to_person=0.8, smtp_verdict="verified",
+        address="alice@corp.com", smtp_verdict="verified",
         sources=[Source(type="gh_profile", url="https://github.com/alice",
                         observed_at=NOW, detail="profile email")],
     )
@@ -62,7 +62,7 @@ def test_build_evidence_surfaces_google_display_name_with_name_match_yes():
     """The text disambiguator: a Google-confirmed account whose display name
     matches the target shows name_match=yes for the host model to bind on."""
     cand = EmailCandidate(
-        address="alicesmith@corp.com", belongs_to_person=0.85,
+        address="alicesmith@corp.com",
         smtp_verdict="catch_all", account_exists="verified",
         account_display_name="Alice Smith",
     )
@@ -75,7 +75,7 @@ def test_build_evidence_flags_name_match_no_for_namesake():
     """A real-but-different account on the same tenant (e.g. jdoe@ vs jdoeh@)
     must show name_match=no so it can be dropped — text, not faces."""
     cand = EmailCandidate(
-        address="alice@corp.com", belongs_to_person=0.4,
+        address="alice@corp.com",
         smtp_verdict="catch_all", account_exists="verified",
         account_display_name="Alice Wong",
     )

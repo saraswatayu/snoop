@@ -125,9 +125,9 @@ def measure_one_target(target: dict[str, Any]) -> dict[str, Any]:
         "final_candidates": [
             {
                 "address": c.address,
-                "belongs_to_person": c.belongs_to_person,
-                "current_work_address": c.current_work_address,
-                "deliverable": c.deliverable,
+                "smtp_verdict": c.smtp_verdict,
+                "account_exists": c.account_exists,
+                "sources": sorted({s.type for s in c.sources}),
             }
             for c in candidates
         ],
@@ -214,10 +214,10 @@ def format_report(
         if tr["final_candidates"]:
             top = tr["final_candidates"][0]
             lines.append(
-                f"- **Final top**: `{top['address']}` "
-                f"(belongs={top['belongs_to_person']}, "
-                f"work={top['current_work_address']}, "
-                f"deliv={top['deliverable']})"
+                f"- **Top candidate**: `{top['address']}` "
+                f"(smtp={top['smtp_verdict']}, "
+                f"account_exists={top['account_exists']}, "
+                f"sources={','.join(top['sources']) or 'none'})"
             )
         gt = tr.get("ground_truth", {})
         if any(gt.values()):

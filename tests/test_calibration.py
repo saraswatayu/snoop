@@ -177,9 +177,9 @@ def test_format_report_renders_metrics_table():
             ],
             "final_candidates": [{
                 "address": "x@y.com",
-                "belongs_to_person": 0.85,
-                "current_work_address": 0.90,
-                "deliverable": None,
+                "smtp_verdict": "verified",
+                "account_exists": "unprobed",
+                "sources": ["git_commit"],
             }],
             "ground_truth": {"work": "x@y.com"},
         },

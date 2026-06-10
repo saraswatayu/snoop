@@ -228,10 +228,8 @@ def test_cluster_handles_empty_resolver_results():
 
 def test_smtp_candidates_filters_personal_providers():
     cands = [
-        EmailCandidate(address="pete@gmail.com", belongs_to_person=0.9,
-                       sources=[src("git_commit")]),
-        EmailCandidate(address="pete@openai.com", belongs_to_person=0.85,
-                       sources=[src("git_commit")]),
+        EmailCandidate(address="pete@gmail.com", sources=[src("git_commit")]),
+        EmailCandidate(address="pete@openai.com", sources=[src("git_commit")]),
     ]
     targets = snoop._smtp_candidates(cands)
     addresses = [c.address for c in targets]
@@ -243,8 +241,7 @@ def test_smtp_candidates_drops_sourceless():
     """A candidate with no sources isn't worth probing."""
     cands = [
         EmailCandidate(address="empty@openai.com"),  # no sources
-        EmailCandidate(address="real@openai.com", belongs_to_person=0.5,
-                       sources=[src("pattern")]),
+        EmailCandidate(address="real@openai.com", sources=[src("pattern")]),
     ]
     targets = snoop._smtp_candidates(cands)
     addresses = [c.address for c in targets]
@@ -269,8 +266,7 @@ def test_smtp_candidates_orders_observed_before_pattern():
 
 def test_smtp_candidates_respects_top_k():
     cands = [
-        EmailCandidate(address=f"x{i}@openai.com", belongs_to_person=0.5,
-                       sources=[src("pattern")])
+        EmailCandidate(address=f"x{i}@openai.com", sources=[src("pattern")])
         for i in range(10)
     ]
     targets = snoop._smtp_candidates(cands, top_k=3)
@@ -279,10 +275,8 @@ def test_smtp_candidates_respects_top_k():
 
 def test_smtp_candidates_handles_malformed_address():
     cands = [
-        EmailCandidate(address="not-an-email", belongs_to_person=0.9,
-                       sources=[src("git_commit")]),
-        EmailCandidate(address="real@openai.com", belongs_to_person=0.5,
-                       sources=[src("git_commit")]),
+        EmailCandidate(address="not-an-email", sources=[src("git_commit")]),
+        EmailCandidate(address="real@openai.com", sources=[src("git_commit")]),
     ]
     targets = snoop._smtp_candidates(cands)
     assert [c.address for c in targets] == ["real@openai.com"]

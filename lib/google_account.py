@@ -35,9 +35,9 @@ Four account_exists outcomes per candidate:
   "unprobed"          : never asked (cookies missing, budget exhausted,
                         candidate domain not Google-hosted)
 
-For "verified" responses with name matching the target, the Source
-type="google_account" is the strongest belongs_to_person signal we have
-(0.65 base weight, comparable to manual_known).
+A "verified" response whose display name matches the target is the strongest
+ownership signal a sensor can produce — the host model weighs it accordingly
+(comparable to a user-supplied manual_known).
 """
 
 from __future__ import annotations

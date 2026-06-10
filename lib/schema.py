@@ -110,11 +110,9 @@ class GitHubRepo:
 
 @dataclass
 class EmailCandidate:
-    """One candidate email for a target person.
-
-    The three score fields are NOT a single probability. Each answers
-    a different question and can independently abstain (None).
-    """
+    """One candidate email for a target person — a raw reading plus any probe
+    verdicts. The host model judges ownership/deliverability from the sources and
+    verdicts; snoop does not score."""
     address: str                  # lowercased; IDNA-encoded for non-ASCII domains
     sources: list[Source] = field(default_factory=list)
 
@@ -143,14 +141,6 @@ class EmailCandidate:
     employer_match: bool = False           # address domain ∈ resolved current employer.domains
     employer_former_match: bool = False    # address domain ∈ a former employer.domains
     is_personal_provider: bool = False     # @gmail / @yahoo / @icloud / @outlook / @hotmail / @protonmail
-
-    # Three-field score (None = no signal; abstain)
-    belongs_to_person: float | None = None     # 0-1: how confident is this person's address
-    current_work_address: float | None = None  # 0-1: how confident this is a current WORK address
-    deliverable: float | None = None           # 0-1: a message sent here will reach a human
-
-    # Per-field reasons (renderable receipts)
-    score_reasons: list[str] = field(default_factory=list)
 
 
 @dataclass

@@ -1,22 +1,22 @@
 """lib/verify_smtp.py — SMTP RCPT probing for candidate addresses.
 
-Refactored from the legacy verify_email.py (still kept at the skill root
-as a back-compat CLI). Three structural changes vs legacy:
+The SMTP RCPT handshake is one verification signal the host model reasons over;
+it never sends mail. Two structural choices:
 
 1. **Skip personal-provider domains entirely.** Probing @gmail.com,
    @yahoo.com, @icloud.com, @outlook.com, @hotmail.com, @protonmail.com,
    @proton.me, etc. is useless — mass-market providers either block
    RCPT, return greylist 451 to non-recognized senders, or just
-   blackhole the connection — AND it tips spam filters. The score
-   layer treats a personal-provider unprobed verdict as None (abstain
-   with a deliverability-is-high-IF-mailbox-exists note).
+   blackhole the connection — AND it tips spam filters. Those candidates
+   carry smtp_verdict="unprobed" and the host model treats SMTP as
+   uninformative there.
 
-2. **Inconclusive carries zero information.** Per Codex c1, RCPT
-   inconclusive on Google/M365 (the dominant business inbox in 2026)
-   tells us NOTHING about whether the mailbox exists. The scorer's
-   `deliverable` field abstains on inconclusive — no false-confidence
-   floor. mx_provider is exposed on the candidate so the renderer can
-   explain ("SMTP inconclusive (M365 blocks RCPT)").
+2. **Inconclusive carries zero information.** RCPT inconclusive on
+   Google/M365 (the dominant business inbox in 2026) tells us NOTHING
+   about whether the mailbox exists. The observation reports it honestly
+   as `smtp=inconclusive`; mx_provider is exposed so the host model can
+   explain it ("SMTP inconclusive (M365 blocks RCPT)") and lean on the
+   Google account probe instead.
 
 3. **EmailCandidate is the unit, not raw strings.** The legacy code
    took candidate strings and produced JSON verdicts; the new function
@@ -282,9 +282,9 @@ def verify_candidates(
         timeout: Per-domain SMTP socket timeout in seconds.
         skip_personal_providers: If True (default), addresses on Gmail/
             iCloud/Yahoo/M365-consumer/etc. are left with smtp_verdict=
-            "unprobed" (the scorer treats this as None deliverable with
-            a hint string). Set False to force-probe — useful only for
-            self-hosted-provider edge cases.
+            "unprobed" (the host model treats SMTP as uninformative there).
+            Set False to force-probe — useful only for self-hosted-provider
+            edge cases.
         budget: Optional per-domain daily probe budget. If provided and
             exhausted for a domain, candidates on that domain are left
             "unprobed."

@@ -33,31 +33,27 @@ def test_source_is_frozen():
         s.url = "https://example.com"  # type: ignore[misc]
 
 
-def test_email_candidate_defaults_to_full_abstention():
-    """All three score fields default to None — abstain until evidence arrives.
-
-    This is the contract: an EmailCandidate with no sources and no SMTP probe
-    must produce None on every field, NOT 0.0. Zero would imply 'measured
-    and known to be bad' which is different from 'never evaluated.'"""
+def test_email_candidate_defaults_to_unprobed_no_sources():
+    """A bare EmailCandidate is a raw slot: unprobed verdicts, no sources. The
+    host model scores it; snoop carries only the readings."""
     c = EmailCandidate(address="x@example.com")
-    assert c.belongs_to_person is None
-    assert c.current_work_address is None
-    assert c.deliverable is None
     assert c.smtp_verdict == "unprobed"
+    assert c.account_exists == "unprobed"
     assert c.sources == []
-    assert c.score_reasons == []
 
 
-def test_email_candidate_holds_three_fields_independently():
+def test_email_candidate_carries_verdicts_and_domain_facts():
     c = EmailCandidate(
         address="pete@openai.com",
-        belongs_to_person=0.85,
-        current_work_address=0.70,
-        deliverable=None,  # SMTP inconclusive on M365 → abstain
+        smtp_verdict="verified",
+        account_exists="verified",
+        account_display_name="Pete S",
+        employer_match=True,
     )
-    assert c.belongs_to_person == 0.85
-    assert c.current_work_address == 0.70
-    assert c.deliverable is None
+    assert c.smtp_verdict == "verified"
+    assert c.account_exists == "verified"
+    assert c.account_display_name == "Pete S"
+    assert c.employer_match is True
 
 
 def test_person_default_ambiguity_is_insufficient_evidence():
