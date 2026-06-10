@@ -18,13 +18,12 @@ it never sends mail. Two structural choices:
    explain it ("SMTP inconclusive (M365 blocks RCPT)") and lean on the
    Google account probe instead.
 
-3. **EmailCandidate is the unit, not raw strings.** The legacy code
-   took candidate strings and produced JSON verdicts; the new function
+3. **EmailCandidate is the unit, not raw strings.** verify_candidates
    mutates EmailCandidate objects in place, setting smtp_verdict and
-   mx_provider. The 3-field score is computed separately by lib/score.
+   mx_provider; the host model reads those verdicts off the bundle.
 
-The catch-all sentinel + connection-reuse logic from the legacy
-`DomainProbe` class is preserved unchanged — that mechanism is correct
+The catch-all sentinel + connection-reuse logic in the `DomainProbe`
+class is the original mechanism, preserved unchanged — it is correct
 and well-tested.
 
 Per-domain daily budget (optional) caps probes to avoid spammy patterns
@@ -169,11 +168,7 @@ class ProbeBudget:
 
 class DomainProbe:
     """One MX lookup + one catch-all sentinel probe + one reused SMTP
-    connection per domain.
-
-    Preserved unchanged from the legacy verify_email.py — that mechanism
-    is correct.
-    """
+    connection per domain."""
 
     def __init__(self, domain: str, mail_from: str, timeout: int):
         self.domain = domain

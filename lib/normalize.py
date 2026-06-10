@@ -262,10 +262,8 @@ def localpart_templates(first: str, last: str) -> dict[str, str]:
     """Apply the common name-to-localpart templates to a folded (first, last) pair.
 
     Returns a dict of {template_name: localpart}. All localparts are already
-    fold_to_letters-clean (lowercase ASCII letters only).
-
-    Templates match the set from the legacy verify_email.py (lines 168-183)
-    so behavior is preserved when pattern_gen extracts.
+    fold_to_letters-clean (lowercase ASCII letters only). The template set
+    covers the common corporate formats (first.last, flast, first, etc.).
     """
     f = fold_to_letters(first)
     l = fold_to_letters(last)
