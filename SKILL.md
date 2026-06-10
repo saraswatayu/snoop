@@ -156,7 +156,7 @@ the call. For longer plans: `--person-plan @/tmp/plan.json`.
 | `--no-search` | Ignore `work_search_results` even if supplied. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--allow-google-account` | Opt-in: Google People API existence check on Google-hosted domains. Reads your logged-in Chrome cookies. See below. |
-| `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set (v1 doesn't auto-detect MX). |
+| `--google-workspace-domain DOMAIN` | Repeatable. Force DOMAIN into the Google-API probe set. Usually unnecessary — candidate domains whose MX is Google-hosted are auto-detected; use this only to probe a domain that isn't already a candidate address. |
 | `--intent work\|personal\|either` | Hints which address to prefer (default `work`). |
 | `--diagnose` | Capability probe (gh auth, dnspython, google readiness) and exit. |
 | `--llm` | **Standalone-only fallback.** When running OUTSIDE a host model, makes a tool-less Opus 4.8 API call to reason for you (needs `ANTHROPIC_API_KEY`). Inside Claude Code this is redundant — you are the reasoner; use `--observations`. |
@@ -282,9 +282,11 @@ a prior run produced ≥3 candidates with identical scores on a Google domain.
 not to auth into Google; or you're looping (it's one-target-per-invocation, and
 bulk use risks Google flagging the account).
 
-Non-`google.com` Workspace domains: declare via `--google-workspace-domain`
-(v1 doesn't auto-detect MX). A daily probe budget (default 30) caps state under
-`~/.snoop/` as defense-in-depth.
+Non-`google.com` Workspace domains are auto-detected: any candidate address
+whose domain has Google-hosted MX is added to the probe set automatically.
+`--google-workspace-domain` is only needed to force a domain that isn't already
+a candidate. A daily probe budget (default 30) caps state under `~/.snoop/` as
+defense-in-depth.
 
 ## Rules — MUST / MUST NOT
 

@@ -264,9 +264,10 @@ def _build_parser() -> argparse.ArgumentParser:
         default=[],
         metavar="DOMAIN",
         help=(
-            "Repeatable. Treat DOMAIN as Google-Workspace-hosted (its MX is "
-            "aspmx.l.google.com). Required for non-literal-google.com domains "
-            "since v1 doesn't auto-detect MX. e.g. --google-workspace-domain acme.com"
+            "Repeatable. Force DOMAIN into the Google-API probe set. Usually "
+            "unnecessary: candidate addresses whose MX is Google-hosted are "
+            "auto-detected. Use only to probe a domain that isn't already a "
+            "candidate address. e.g. --google-workspace-domain acme.com"
         ),
     )
     p.add_argument(
