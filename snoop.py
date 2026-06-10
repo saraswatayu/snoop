@@ -236,14 +236,6 @@ def _build_parser() -> argparse.ArgumentParser:
              "then render the grounded card. The deterministic citation check.",
     )
     p.add_argument(
-        "--llm",
-        action="store_true",
-        help="Standalone-only fallback: when running OUTSIDE a host model, make a "
-             "tool-less Opus 4.8 call to reason over the observations (needs "
-             "ANTHROPIC_API_KEY). Inside Claude Code, prefer --observations: the "
-             "host model is the reasoner, so a second API call is redundant.",
-    )
-    p.add_argument(
         "--max-per-section",
         type=int,
         default=5,
@@ -832,30 +824,6 @@ def _format_reasoned_json(profile: reason.ReasonedProfile, *,
     }, indent=2, default=str)
 
 
-def _try_llm_emit(person: Person, candidates: list[EmailCandidate],
-                  plan: dict[str, Any], args: argparse.Namespace,
-                  warnings: list[str]) -> bool:
-    """If --llm, run the reasoning path and emit. Returns True when it produced
-    output (caller returns), False to fall back to the deterministic path (e.g.
-    no API key). A wrong profile is acceptable here; a hard failure is not — any
-    unavailability degrades to deterministic rather than erroring out."""
-    if not args.llm:
-        return False
-    try:
-        rp = reason.reason_profile(
-            person, candidates,
-            extra_observations=_work_search_observations(plan),
-        )
-    except reason.ReasoningUnavailable as exc:
-        warnings.append(f"--llm unavailable: {exc}; using deterministic profile")
-        return False
-    if args.json:
-        sys.stdout.write(_format_reasoned_json(rp, warnings=warnings))
-    else:
-        sys.stdout.write(render.render_reasoned_card(rp, warnings=warnings))
-    return True
-
-
 def _emit_observations(person: Person, candidates: list[EmailCandidate],
                        plan: dict[str, Any], warnings: list[str]) -> None:
     """Sensor mode: emit the raw observation bundle the host model reasons over.
@@ -987,9 +955,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.observations:
             _emit_observations(person, [], plan, warnings)
             return 0
-        # Standalone-only LLM fallback (redundant under a host model).
-        if _try_llm_emit(person, [], plan, args, warnings):
-            return 0
         # Empty pipeline — still render so the user sees identity state
         # and resolver notes. Respect --json mode.
         empty_profile = build_profile(
@@ -1053,10 +1018,6 @@ def main(argv: list[str] | None = None) -> int:
     # Sensor mode: emit the scored bundle for the host model to reason over.
     if args.observations:
         _emit_observations(person, candidates, plan, warnings)
-        return 0
-
-    # Standalone-only LLM fallback (redundant under a host model).
-    if _try_llm_emit(person, candidates, plan, args, warnings):
         return 0
 
     # Default output is the person PROFILE (D2-B): build it from the scored
