@@ -862,8 +862,10 @@ def _emit_observations(person: Person, candidates: list[EmailCandidate],
 
     snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
     MX); this dumps what those sensors saw, typed and cited, plus any host-model
-    web-search observations. No scoring, no binding, no rendering — the host is
-    the analyst."""
+    web-search observations. No binding, no rendering — the host is the analyst.
+    The one exception is the lightweight `belongs~` ordering hint carried on each
+    email_candidate observation: it only ranks which candidates were probed
+    first, and the host reasons over the readings regardless."""
     observations = reason.build_evidence(person, candidates)
     base = len(observations)
     for i, o in enumerate(_work_search_observations(plan), start=base + 1):
