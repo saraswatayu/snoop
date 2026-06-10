@@ -50,7 +50,9 @@ from lib.diagnose import Capability
 from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
+from lib.hn_profile import fetch_hn_profile
 from lib.normalize import is_personal_provider
+from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
@@ -420,6 +422,7 @@ def run_pipeline(
     person: Person,
     *,
     manual_known: list[tuple[str, str | None]] | None = None,
+    packages: list[dict] | None = None,
     per_resolver_timeout_sec: float = _PER_RESOLVER_TIMEOUT_SEC,
 ) -> list[ResolverResult]:
     """Fan out all enabled resolvers in parallel.
@@ -429,17 +432,26 @@ def run_pipeline(
     pipeline keeps going.
     """
     manual_known = manual_known or []
+    packages = packages or []
     gh_handle = _gh_handle(person)
 
     tasks: list[tuple[str, Callable[[], ResolverResult]]] = []
     if gh_handle:
         tasks.append(("git_emails", lambda: fetch_git_emails(gh_handle)))
         tasks.append(("gh_profile", lambda: fetch_gh_profile(gh_handle)))
+    # HN handle is an untrusted hint (not anchor-validated like github), so an
+    # address found here is weakly bound — the host marks it [?]. One fetch.
+    hn_handle = person.handles.get("hn")
+    if hn_handle:
+        tasks.append(("hn_profile", lambda: fetch_hn_profile(hn_handle)))
     if person.personal_domains:
         tasks.append((
             "personal_site",
             lambda: fetch_personal_site(person.personal_domains),
         ))
+    # Package-registry publisher emails when the host supplied known packages.
+    if packages:
+        tasks.append(("package_registry", lambda: fetch_package_emails(packages)))
     # pattern_gen runs even with no other inputs (it's the explicit fallback)
     tasks.append((
         "pattern_gen",
@@ -933,6 +945,10 @@ def main(argv: list[str] | None = None) -> int:
 
     person = resolve_person(name, plan=plan)
     manual_known = _parse_knowns(args.known)
+    # Package-registry inputs: the host supplies known packages the person
+    # published as plan["packages"] = [{"registry": "npm"|"pypi", "name": ...}].
+    raw_packages = plan.get("packages")
+    packages = [p for p in raw_packages if isinstance(p, dict)] if isinstance(raw_packages, list) else []
 
     # Dossier enrichment: when the github handle is bound, fetch recently-pushed
     # repos. One extra API call, gated on the same bound-handle check as the
@@ -943,7 +959,7 @@ def main(argv: list[str] | None = None) -> int:
         person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
 
     # Fan out resolvers
-    results = run_pipeline(person, manual_known=manual_known)
+    results = run_pipeline(person, manual_known=manual_known, packages=packages)
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 

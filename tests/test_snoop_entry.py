@@ -635,6 +635,106 @@ def test_main_empty_pipeline_emits_identity_bundle(monkeypatch, capsys):
 # ---- run_pipeline timeout ---------------------------------------------------
 
 
+# ---- run_pipeline: hn_profile + package_registry wiring ---------------------
+
+
+def _hn_result(handle):
+    return ResolverResult(
+        resolver="hn_profile",
+        candidates=[EmailCandidate(
+            address="pg@ycombinator.com",
+            sources=[src("hn_profile",
+                         url=f"https://news.ycombinator.com/user?id={handle}")])],
+        status="ok",
+    )
+
+
+def _pkg_result(packages):
+    return ResolverResult(
+        resolver="package_registry",
+        candidates=[EmailCandidate(
+            address="dev@pkg.io",
+            sources=[src("package_registry", url="https://pypi.org/project/foo/")])],
+        status="ok",
+    )
+
+
+def test_run_pipeline_fires_hn_profile_when_hn_handle_present(monkeypatch):
+    monkeypatch.setattr(snoop, "fetch_hn_profile", _hn_result)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates",
+                        lambda p, **kw: ResolverResult(resolver="pattern_gen",
+                                                       candidates=[], status="empty"))
+    person = Person(name="PG", handles={"hn": "pg"},
+                    ambiguity="single_plausible_match")
+    results = snoop.run_pipeline(person)
+    names = {r.resolver for r in results}
+    assert "hn_profile" in names
+    assert any(c.address == "pg@ycombinator.com"
+               for r in results for c in r.candidates)
+
+
+def test_run_pipeline_skips_hn_profile_without_hn_handle(monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError("hn_profile must not run without an hn handle")
+    monkeypatch.setattr(snoop, "fetch_hn_profile", boom)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates",
+                        lambda p, **kw: ResolverResult(resolver="pattern_gen",
+                                                       candidates=[], status="empty"))
+    person = Person(name="X", ambiguity="insufficient_identity_evidence")
+    results = snoop.run_pipeline(person)
+    assert "hn_profile" not in {r.resolver for r in results}
+
+
+def test_run_pipeline_fires_package_registry_when_packages_supplied(monkeypatch):
+    captured = {}
+    def fake_pkg(packages):
+        captured["packages"] = packages
+        return _pkg_result(packages)
+    monkeypatch.setattr(snoop, "fetch_package_emails", fake_pkg)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates",
+                        lambda p, **kw: ResolverResult(resolver="pattern_gen",
+                                                       candidates=[], status="empty"))
+    person = Person(name="X", ambiguity="single_plausible_match")
+    pkgs = [{"registry": "pypi", "name": "foo"}]
+    results = snoop.run_pipeline(person, packages=pkgs)
+    assert "package_registry" in {r.resolver for r in results}
+    assert captured["packages"] == pkgs
+
+
+def test_run_pipeline_skips_package_registry_without_packages(monkeypatch):
+    def boom(*a, **kw):
+        raise AssertionError("package_registry must not run without packages")
+    monkeypatch.setattr(snoop, "fetch_package_emails", boom)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates",
+                        lambda p, **kw: ResolverResult(resolver="pattern_gen",
+                                                       candidates=[], status="empty"))
+    person = Person(name="X", ambiguity="single_plausible_match")
+    results = snoop.run_pipeline(person)
+    assert "package_registry" not in {r.resolver for r in results}
+
+
+def test_main_threads_plan_packages_into_pipeline(monkeypatch, capsys):
+    """The host supplies plan['packages']; main threads them to package_registry,
+    and the email surfaces in the bundle."""
+    import json as _json
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_package_emails", _pkg_result)
+    rc = snoop.main(["Dev Person", "--no-smtp", "--person-plan",
+                     '{"packages":[{"registry":"pypi","name":"foo"}]}'])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    blob = "\n".join(o["content"] for o in bundle["observations"])
+    assert "dev@pkg.io" in blob
+    assert "package_registry" in blob
+
+
 # ---- google_account integration ---------------------------------------------
 
 
