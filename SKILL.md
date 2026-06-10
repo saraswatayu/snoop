@@ -55,6 +55,12 @@ Pass it structured. Minimum useful plan:
 Optional fields:
 
 - `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}]`
+- `handles.hn`: a Hacker News username → snoop reads the public email off their
+  HN profile (high-yield on YC/founder targets). It's an untrusted hint, so
+  facts from it are `[?]` at most.
+- `packages`: `[{"registry": "npm"|"pypi", "name": "<package>"}]` — packages the
+  person published. snoop pulls the publisher/author email from the registry
+  (near-100% precision when present). Supply these when you know them.
 - `channel_hints`: `{"x_dms_open": true, "linkedin": "<url>", "prefers": "x"}` —
   populate whenever you learned a backup channel while resolving the person.
 - `name_variants`: explicit overrides for non-Latin spellings normalization misses.
