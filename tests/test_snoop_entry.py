@@ -922,6 +922,77 @@ def _resolver_setup(monkeypatch):
     monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
 
 
+# ---- --verify single-address path -------------------------------------------
+
+
+def _no_discovery(monkeypatch):
+    """Fail loudly if any discovery resolver is called — verify mode must skip
+    person discovery entirely."""
+    def boom(*a, **kw):
+        raise AssertionError("discovery resolver called in --verify mode")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, boom)
+
+
+def test_verify_flag_probes_single_address(monkeypatch, capsys):
+    import json as _json
+    _no_discovery(monkeypatch)
+    captured = {}
+    monkeypatch.setattr(snoop, "verify_candidates",
+                        lambda cands, **kw: captured.setdefault("probed", list(cands)))
+    rc = snoop.main(["--verify", "jane@acme.com"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    blob = "\n".join(o["content"] for o in bundle["observations"])
+    assert "jane@acme.com" in blob
+    assert "sources=manual_known" in blob  # marked user-supplied for verification
+    # the address was handed to the SMTP sensor
+    assert [c.address for c in captured["probed"]] == ["jane@acme.com"]
+
+
+def test_bare_email_positional_routes_to_verify(monkeypatch, capsys):
+    import json as _json
+    _no_discovery(monkeypatch)
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+    rc = snoop.main(["bob@example.com", "--no-smtp"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert any("bob@example.com" in o["content"] for o in bundle["observations"])
+
+
+def test_verify_deduplicates_and_lowercases(monkeypatch, capsys):
+    import json as _json
+    _no_discovery(monkeypatch)
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+    rc = snoop.main(["--verify", "Jane@Acme.com", "--verify", "jane@acme.com", "--no-smtp"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    email_obs = [o for o in bundle["observations"] if o["type"] == "email_candidate"]
+    assert len(email_obs) == 1
+    assert "jane@acme.com" in email_obs[0]["content"]
+
+
+def test_allow_google_skipped_when_no_cookies(monkeypatch, capsys):
+    """Passing --allow-google-account is always safe: when the capability probe
+    finds no Google session, the probe is skipped (not attempted-and-failed)."""
+    from lib.diagnose import Capability
+    _no_discovery(monkeypatch)
+    monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
+    # capability probe reports google missing
+    monkeypatch.setattr(snoop.diagnose, "_probe_google_account",
+                        lambda: Capability(name="google_account", status="missing",
+                                           detail="no cookies", impact="P3"))
+    called = {"google": False}
+    def fake_google(*a, **kw):
+        called["google"] = True
+        raise AssertionError("fetch_google_account must not run without a session")
+    monkeypatch.setattr(snoop, "fetch_google_account", fake_google)
+    rc = snoop.main(["--verify", "jane@acme.com", "--no-smtp", "--allow-google-account"])
+    assert rc == 0
+    assert called["google"] is False
+
+
 # ---- sensor mode (--observations) + verifier mode (--ground) -----------------
 
 

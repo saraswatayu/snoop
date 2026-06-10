@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from concurrent.futures import (
     Future,
     ThreadPoolExecutor,
@@ -53,7 +54,7 @@ from lib.normalize import is_personal_provider
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
-from lib.schema import EmailCandidate, Person, ResolverResult
+from lib.schema import EmailCandidate, Person, ResolverResult, Source
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
 
 
@@ -204,6 +205,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "Repeatable. Same-company known address with name, used by "
             "pattern_gen to infer the company's email template."
+        ),
+    )
+    p.add_argument(
+        "--verify",
+        action="append",
+        default=[],
+        metavar="EMAIL",
+        help=(
+            "Repeatable. Verify a specific address: skip person discovery and "
+            "run the sensors (MX, SMTP, Google account) on EMAIL only, emitting "
+            "the observation bundle for it. `snoop --verify jane@acme.com`. A "
+            "bare positional that contains '@' is treated the same way."
         ),
     )
     p.add_argument(
@@ -781,63 +794,18 @@ def _run_ground(observations_file: str | None = None) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = _build_parser()
-    args = parser.parse_args(argv)
-
-    if args.diagnose:
-        print(diagnose.format_report(diagnose.diagnose()))
-        return 0
-
-    # Verifier mode reads its bundle from stdin; no name/fetch needed.
-    if args.ground:
-        return _run_ground(observations_file=args.observations_file)
-
-    if not args.name and not args.person_plan:
-        parser.error("must provide a name or --person-plan")
-
-    # --person-plan wins over positional/flag-derived plan for any field
-    # it specifies. The flag-derived plan fills gaps for everything else
-    # so `snoop "Dan Neil" "Formation Bio" --domain formation.bio` works
-    # without anyone constructing JSON.
-    flag_plan = _plan_from_flags(args)
-    file_plan = _load_plan(args.person_plan)
-    plan = {**flag_plan, **file_plan}
-    name = args.name or plan.get("name")
-    if not name:
-        parser.error("name required (positional or in --person-plan)")
-
-    person = resolve_person(name, plan=plan)
-    manual_known = _parse_knowns(args.known)
-
-    # Capability probe runs once per invocation. Cheap (no network, no cookie
-    # reads unless --allow-google-account). Feeds the warning surface at the top
-    # of the bundle so degraded environments show up adjacent to the readings
-    # instead of silently weakening them.
-    capabilities = _fast_capability_probe(
-        allow_google_account=args.allow_google_account,
-    )
-    warnings = _capability_warnings(
-        capabilities, allow_google_account=args.allow_google_account,
-    )
-
-    # Dossier enrichment: when the github handle is bound, fetch recently-pushed
-    # repos. One extra API call, gated on the same bound-handle check as the
-    # resolver fan-out so we never query GitHub for an untrusted hint.
-    # Best-effort: empty list on any failure.
-    gh_handle_bound = _gh_handle(person)
-    if gh_handle_bound:
-        person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
-
-    # Fan out resolvers
-    results = run_pipeline(person, manual_known=manual_known)
-    candidates = cluster_candidates(results)
-    candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
-
+def _probe_candidates(
+    person: Person, candidates: list[EmailCandidate], args: argparse.Namespace,
+    *, google_ready: bool,
+) -> None:
+    """Run the verification sensors (Google account, then SMTP) over candidates,
+    mutating them in place. Shared by the discovery path and the --verify path."""
     # Google account verification on Google-hosted candidates. Runs BEFORE SMTP
     # so that not_found verdicts short-circuit SMTP probes on dead candidates
-    # (Google's view is authoritative when it returns a verdict).
-    if candidates and args.allow_google_account:
+    # (Google's view is authoritative when it returns a verdict). Skipped when
+    # the capability probe already told us no usable Google session exists, so
+    # "always pass --allow-google-account" stays free.
+    if candidates and args.allow_google_account and google_ready:
         # Auto-detect Workspace MX so the user doesn't need to pass
         # --google-workspace-domain for every YC startup on Gmail.
         merged_workspace = _autodetect_workspace_domains(
@@ -864,11 +832,119 @@ def main(argv: list[str] | None = None) -> int:
                     f"google_account {google_result.status}: {google_result.error_detail}"
                 )
 
-    # SMTP probe top-K work candidates
+    # SMTP probe top-K candidates
     if candidates and not args.no_smtp:
         smtp_targets = _smtp_candidates(candidates)
         if smtp_targets:
             verify_candidates(smtp_targets, budget=default_budget())
+
+
+def _google_ready(capabilities: list[Capability]) -> bool:
+    """True when the capability probe found a usable Google session. Lets the
+    caller skip the probe (and its failed-cookie-read attempt) when none exists,
+    so passing --allow-google-account is always safe — present cookies arm it,
+    absent cookies just warn."""
+    return any(c.name == "google_account" and c.status == "ok" for c in capabilities)
+
+
+def _verify_addresses(args: argparse.Namespace) -> list[str]:
+    """Collect addresses to verify: every --verify EMAIL, plus a bare positional
+    that is itself an email (`snoop jane@acme.com`)."""
+    addrs = [a for a in (args.verify or []) if isinstance(a, str) and "@" in a]
+    if args.name and "@" in args.name and "." in args.name.rsplit("@", 1)[-1]:
+        addrs.append(args.name)
+    return addrs
+
+
+def _verify_setup(
+    addresses: list[str], args: argparse.Namespace,
+) -> tuple[Person, list[EmailCandidate]]:
+    """Build a minimal person + the user-supplied candidates for --verify. No
+    discovery fan-out: the address IS the subject. A name (via --person-plan)
+    only feeds the Google name_match cross-check."""
+    plan = _load_plan(args.person_plan) if args.person_plan else {}
+    name = plan.get("name") or ""
+    person = resolve_person(name, plan=plan) if name else Person(name="")
+    now = datetime.now(timezone.utc)
+    seen: dict[str, EmailCandidate] = {}
+    for raw in addresses:
+        addr = raw.strip().lower()
+        if "@" not in addr or addr in seen:
+            continue
+        seen[addr] = EmailCandidate(
+            address=addr,
+            sources=[Source(type="manual_known", url=None, observed_at=now,
+                            detail="address supplied for verification")],
+        )
+    return person, list(seen.values())
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = _build_parser()
+    args = parser.parse_args(argv)
+
+    if args.diagnose:
+        print(diagnose.format_report(diagnose.diagnose()))
+        return 0
+
+    # Verifier mode reads its bundle from stdin; no name/fetch needed.
+    if args.ground:
+        return _run_ground(observations_file=args.observations_file)
+
+    # Capability probe runs once per invocation. Cheap (no network, no cookie
+    # reads unless --allow-google-account). Feeds the warning surface at the top
+    # of the bundle so degraded environments show up adjacent to the readings
+    # instead of silently weakening them.
+    capabilities = _fast_capability_probe(
+        allow_google_account=args.allow_google_account,
+    )
+    warnings = _capability_warnings(
+        capabilities, allow_google_account=args.allow_google_account,
+    )
+
+    # --verify (or a bare email positional): probe one or more specific addresses,
+    # skipping person discovery entirely.
+    verify_addresses = _verify_addresses(args)
+    if verify_addresses:
+        person, candidates = _verify_setup(verify_addresses, args)
+        candidates.sort(key=_probe_rank)
+        _probe_candidates(person, candidates, args,
+                          google_ready=_google_ready(capabilities))
+        _emit_observations(person, candidates, {}, warnings, out_path=args.out)
+        return 0
+
+    if not args.name and not args.person_plan:
+        parser.error("must provide a name, an email to --verify, or --person-plan")
+
+    # --person-plan wins over positional/flag-derived plan for any field
+    # it specifies. The flag-derived plan fills gaps for everything else
+    # so `snoop "Dan Neil" "Formation Bio" --domain formation.bio` works
+    # without anyone constructing JSON.
+    flag_plan = _plan_from_flags(args)
+    file_plan = _load_plan(args.person_plan)
+    plan = {**flag_plan, **file_plan}
+    name = args.name or plan.get("name")
+    if not name:
+        parser.error("name required (positional or in --person-plan)")
+
+    person = resolve_person(name, plan=plan)
+    manual_known = _parse_knowns(args.known)
+
+    # Dossier enrichment: when the github handle is bound, fetch recently-pushed
+    # repos. One extra API call, gated on the same bound-handle check as the
+    # resolver fan-out so we never query GitHub for an untrusted hint.
+    # Best-effort: empty list on any failure.
+    gh_handle_bound = _gh_handle(person)
+    if gh_handle_bound:
+        person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
+
+    # Fan out resolvers
+    results = run_pipeline(person, manual_known=manual_known)
+    candidates = cluster_candidates(results)
+    candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
+
+    _probe_candidates(person, candidates, args,
+                      google_ready=_google_ready(capabilities))
 
     # The deliverable: the observation bundle the host model reasons over.
     # (Identity state + resolver notes are observations even with no candidates.)
