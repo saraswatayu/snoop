@@ -226,11 +226,26 @@ def _build_parser() -> argparse.ArgumentParser:
              "explicitness and back-compat.",
     )
     p.add_argument(
+        "--out",
+        metavar="PATH",
+        help="Write the observation bundle to PATH (JSON) instead of stdout, and "
+             "print the ready-to-run --ground command. Lets the host model read "
+             "the bundle from a file and pass only {person, summary, facts} to "
+             "--ground, instead of re-typing the whole bundle through stdin.",
+    )
+    p.add_argument(
         "--ground",
         action="store_true",
         help="Verifier mode: read {observations, facts, ...} JSON on stdin and "
              "drop any fact whose citations don't reference a real observation, "
              "then render the grounded card. The deterministic citation check.",
+    )
+    p.add_argument(
+        "--observations-file",
+        metavar="PATH",
+        help="For --ground: load the observation bundle from PATH (as written by "
+             "--out) so stdin only needs {person, summary, facts}. Observations "
+             "from the file are merged with whatever stdin also carries.",
     )
     p.add_argument(
         "--allow-google-account",
@@ -653,23 +668,20 @@ def _format_reasoned_json(profile: reason.ReasonedProfile, *,
     }, indent=2, default=str)
 
 
-def _emit_observations(person: Person, candidates: list[EmailCandidate],
-                       plan: dict[str, Any], warnings: list[str]) -> None:
-    """Sensor mode: emit the raw observation bundle the host model reasons over.
+def _build_bundle(person: Person, candidates: list[EmailCandidate],
+                  plan: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+    """Build the raw observation bundle the host model reasons over.
 
     snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
     MX); this dumps what those sensors saw, typed and cited, plus any host-model
-    web-search observations. No binding, no rendering — the host is the analyst.
-    The one exception is the lightweight `belongs~` ordering hint carried on each
-    email_candidate observation: it only ranks which candidates were probed
-    first, and the host reasons over the readings regardless."""
+    web-search observations. No binding, no rendering — the host is the analyst."""
     observations = reason.build_evidence(person, candidates)
     base = len(observations)
     for i, o in enumerate(_work_search_observations(plan), start=base + 1):
         observations.append(reason.Observation(
             id=f"o{i}", type=o.type, content=o.content, source_url=o.source_url,
         ))
-    bundle = {
+    return {
         "warnings": warnings or [],
         "person": {"name": person.name, "ambiguity": person.ambiguity},
         "observations": [
@@ -678,13 +690,42 @@ def _emit_observations(person: Person, candidates: list[EmailCandidate],
             for o in observations
         ],
     }
-    sys.stdout.write(json.dumps(bundle, indent=2, default=str))
 
 
-def _run_ground() -> int:
+def _emit_observations(person: Person, candidates: list[EmailCandidate],
+                       plan: dict[str, Any], warnings: list[str],
+                       *, out_path: str | None = None) -> None:
+    """Write the observation bundle to stdout, or to `out_path` (with a printed
+    pointer + the ready-to-run --ground command) when --out is given."""
+    bundle = _build_bundle(person, candidates, plan, warnings)
+    text = json.dumps(bundle, indent=2, default=str)
+    if not out_path:
+        sys.stdout.write(text)
+        return
+    path = Path(out_path).expanduser()
+    try:
+        path.write_text(text)
+    except OSError as exc:
+        # Don't lose the bundle on a bad path — fall back to stdout with a note.
+        sys.stderr.write(f"--out: cannot write {path}: {exc}; emitting to stdout\n")
+        sys.stdout.write(text)
+        return
+    n = len(bundle["observations"])
+    sys.stdout.write(
+        f"Wrote {n} observation(s) to {path}.\n"
+        f"Reason over them, then ground your facts with:\n"
+        f'  echo \'{{"person": …, "summary": …, "facts": […]}}\' | '
+        f'python3 "{Path(__file__).resolve()}" --ground --observations-file "{path}"\n'
+    )
+
+
+def _run_ground(observations_file: str | None = None) -> int:
     """Verifier mode: read {observations, facts, summary, ...} on stdin, drop
     facts whose citations don't reference a real observation, render the card.
-    Pure + offline — the deterministic check the host model can't self-certify."""
+    Pure + offline — the deterministic check the host model can't self-certify.
+
+    When `observations_file` is given (the --out bundle), observations load from
+    it and stdin only needs {person, summary, facts}."""
     from lib.ground import ground
 
     try:
@@ -693,12 +734,30 @@ def _run_ground() -> int:
         sys.stderr.write(f"--ground: invalid JSON on stdin: {exc}\n")
         return 2
 
+    # Observations come from --observations-file (as written by --out) when
+    # given, so stdin only needs {person, summary, facts}. Anything stdin also
+    # carries under "observations" is merged in (file first, then stdin extras).
+    obs_dicts: list[dict] = []
+    if observations_file:
+        try:
+            file_bundle = json.loads(Path(observations_file).expanduser().read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            sys.stderr.write(f"--observations-file: cannot read {observations_file}: {exc}\n")
+            return 2
+        obs_dicts.extend(o for o in file_bundle.get("observations", []) if isinstance(o, dict))
+        # Let the file supply person/warnings if stdin didn't.
+        if not isinstance(payload.get("person"), dict) and isinstance(file_bundle.get("person"), dict):
+            payload["person"] = file_bundle["person"]
+        if "warnings" not in payload and "warnings" in file_bundle:
+            payload["warnings"] = file_bundle["warnings"]
+    obs_dicts.extend(o for o in payload.get("observations", []) if isinstance(o, dict))
+
     observations = [
         reason.Observation(
             id=str(o.get("id", "")), type=str(o.get("type", "")),
             content=str(o.get("content", "")), source_url=o.get("source_url"),
         )
-        for o in payload.get("observations", []) if isinstance(o, dict)
+        for o in obs_dicts
     ]
     facts = [f for f in payload.get("facts", []) if isinstance(f, dict)]
     grounded = ground(facts, observations)
@@ -732,7 +791,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Verifier mode reads its bundle from stdin; no name/fetch needed.
     if args.ground:
-        return _run_ground()
+        return _run_ground(observations_file=args.observations_file)
 
     if not args.name and not args.person_plan:
         parser.error("must provide a name or --person-plan")
@@ -814,7 +873,8 @@ def main(argv: list[str] | None = None) -> int:
     # The deliverable: the observation bundle the host model reasons over.
     # (Identity state + resolver notes are observations even with no candidates.)
     # --no-search drops the host-supplied work_search_results from the bundle.
-    _emit_observations(person, candidates, {} if args.no_search else plan, warnings)
+    _emit_observations(person, candidates, {} if args.no_search else plan, warnings,
+                       out_path=args.out)
     return 0
 
 

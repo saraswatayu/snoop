@@ -1020,3 +1020,76 @@ def test_observations_to_ground_roundtrip(monkeypatch, capsys):
     assert "Alice Smith — best reached" in out
     assert "alice@corp.com" in out
     assert "(unverified)" not in out.split("alice@corp.com")[0].splitlines()[-1]
+
+
+def test_out_writes_bundle_to_file_and_prints_pointer(monkeypatch, capsys, tmp_path):
+    """--out writes the bundle to a file (not stdout) and prints the ready-to-run
+    --ground command, so the host model reads the bundle from disk."""
+    import json as _json
+    _resolver_setup(monkeypatch)
+    out = tmp_path / "obs.json"
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--out", str(out)])
+    assert rc == 0
+    printed = capsys.readouterr().out
+    assert "--ground --observations-file" in printed
+    assert str(out) in printed
+    # the file is a valid bundle; stdout printed a pointer, not the bundle itself
+    bundle = _json.loads(out.read_text())
+    assert bundle["person"]["name"] == "Alice Smith"
+    assert '"observations"' not in printed  # the observation array stayed in the file
+
+
+def test_observations_file_supplies_bundle_to_ground(monkeypatch, capsys, tmp_path):
+    """--ground --observations-file loads observations from the file, so stdin
+    only needs {person, summary, facts} — no re-typing the bundle."""
+    import io
+    import json as _json
+    _resolver_setup(monkeypatch)
+
+    out = tmp_path / "obs.json"
+    snoop.main(["Alice Smith", "--no-smtp", "--out", str(out)])
+    capsys.readouterr()
+    bundle = _json.loads(out.read_text())
+    email_id = next(o["id"] for o in bundle["observations"]
+                    if o["type"] == "email_candidate")
+
+    # stdin carries ONLY person + summary + facts (no observations array)
+    stdin_payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith.",
+        "facts": [{
+            "kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+            "confidence": 0.9, "evidence_ids": [email_id], "reasoning": "from file",
+        }],
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(stdin_payload)))
+    rc = snoop.main(["--ground", "--observations-file", str(out)])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "alice@corp.com" in out_text  # fact survived because its citation resolved
+
+
+def test_observations_file_drops_fact_when_citation_absent(monkeypatch, capsys, tmp_path):
+    """A fact citing an id NOT in the file's bundle is dropped — the file is the
+    authoritative observation set."""
+    import io
+    import json as _json
+    _resolver_setup(monkeypatch)
+    out = tmp_path / "obs.json"
+    snoop.main(["Alice Smith", "--no-smtp", "--out", str(out)])
+    capsys.readouterr()
+
+    stdin_payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith.",
+        "facts": [{
+            "kind": "email", "label": "", "value": "ghost@corp.com", "detail": "",
+            "confidence": 0.9, "evidence_ids": ["o9999"], "reasoning": "hallucinated",
+        }],
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(stdin_payload)))
+    rc = snoop.main(["--ground", "--observations-file", str(out)])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "ghost@corp.com" not in out_text
+    assert "No attributable facts" in out_text

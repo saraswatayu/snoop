@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Iterable, Protocol
+from typing import Iterable, Protocol, Sequence
 
 
 class _Observation(Protocol):
@@ -81,7 +81,7 @@ def _value_appears(value: str, haystacks: Iterable[str]) -> bool:
     return any(t in blob for t in toks[:1])  # the single longest token
 
 
-def ground(facts: list[dict], observations: list[_Observation]) -> list[GroundedFact]:
+def ground(facts: list[dict], observations: Sequence[_Observation]) -> list[GroundedFact]:
     """Filter and stamp model facts against the evidence bundle.
 
     For each fact:
