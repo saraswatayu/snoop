@@ -110,3 +110,44 @@ def test_build_evidence_empty_candidates_still_describes_identity():
     obs = reason.build_evidence(_person(), [])
     assert any(o.type == "gh_profile" for o in obs)
     assert not any(o.type == "email_candidate" for o in obs)
+
+
+# --- structured data mirror ---------------------------------------------------
+
+
+def test_email_candidate_carries_structured_data():
+    """The host model reads fields off `data` instead of re-parsing the sentence;
+    every source URL survives (the content line keeps only one for readability)."""
+    cand = EmailCandidate(
+        address="alice@corp.com", smtp_verdict="verified",
+        sources=[
+            Source(type="git_commit", url="https://github.com/x/y/commit/abc",
+                   observed_at=NOW, detail="commit"),
+            Source(type="gh_profile", url="https://github.com/alice",
+                   observed_at=NOW, detail="profile email"),
+        ],
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert o.data is not None
+    assert o.data["address"] == "alice@corp.com"
+    assert o.data["smtp"] == "verified"
+    assert {s["type"] for s in o.data["sources"]} == {"git_commit", "gh_profile"}
+    # both source URLs survive in data (content keeps just one)
+    urls = {s["url"] for s in o.data["sources"]}
+    assert "https://github.com/x/y/commit/abc" in urls
+    assert "https://github.com/alice" in urls
+
+
+def test_structured_data_mirrors_google_name_match():
+    cand = EmailCandidate(
+        address="alicesmith@corp.com", account_exists="verified",
+        account_display_name="Alice Smith",
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert o.data["google_display_name"] == "Alice Smith"
+    assert o.data["name_match"] is True
+
+
+def test_non_email_observations_have_no_data():
+    obs = reason.build_evidence(_person(), [])
+    assert all(o.data is None for o in obs)

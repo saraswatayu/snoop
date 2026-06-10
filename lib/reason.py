@@ -27,12 +27,20 @@ from .schema import EmailCandidate, Person
 @dataclass
 class Observation:
     """One raw evidence unit handed to the host model. `id` is stable within a
-    run (o1, o2, ...) and is what facts cite; lib.ground checks those
-    citations."""
+    run (o1, o2, ...) and is what facts cite; lib.ground checks those citations.
+
+    `content` is the one-line human/grounding-readable form (the substring
+    surface lib.ground verifies against). `data` is an optional structured
+    mirror — for an email_candidate it carries {address, smtp, account_exists,
+    sources:[{type,url,detail}], google_display_name, name_match, google_photo}
+    so the host model reads fields instead of re-parsing the sentence, and the
+    full per-source list (with every URL) survives rather than collapsing to one
+    link."""
     id: str
     type: str
     content: str
     source_url: str | None = None
+    data: dict[str, Any] | None = None
 
     def render(self) -> str:
         loc = f" <{self.source_url}>" if self.source_url else ""
@@ -59,13 +67,15 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
     obs: list[Observation] = []
     n = 0
 
-    def add(type_: str, content: str, url: str | None = None) -> None:
+    def add(type_: str, content: str, url: str | None = None,
+            data: dict[str, Any] | None = None) -> None:
         nonlocal n
         content = " ".join(str(content).split())  # one-line; keep ids scannable
         if not content:
             return
         n += 1
-        obs.append(Observation(id=f"o{n}", type=type_, content=content, source_url=url))
+        obs.append(Observation(id=f"o{n}", type=type_, content=content,
+                               source_url=url, data=data))
 
     gh = person.handles.get("github")
     if gh:
@@ -104,6 +114,18 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
 
     for cand in candidates:
         src_types = ",".join(sorted({s.type for s in cand.sources})) or "none"
+        # Structured mirror of the candidate so the host model reads fields
+        # instead of re-parsing the sentence, and EVERY source URL survives
+        # (the content line keeps just one for readability).
+        data: dict[str, Any] = {
+            "address": cand.address,
+            "smtp": cand.smtp_verdict,
+            "account_exists": cand.account_exists,
+            "sources": [
+                {"type": s.type, "url": s.url, "detail": s.detail}
+                for s in cand.sources
+            ],
+        }
         # When Google returned a display name, surface it WITH a text name-match
         # verdict against the target. This is the load-bearing disambiguator on a
         # common-name Workspace tenant: a pattern guess that hits a real-but-
@@ -112,20 +134,25 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
         extra = ""
         if cand.account_display_name:
             extra += f', google_display_name="{cand.account_display_name}"'
+            data["google_display_name"] = cand.account_display_name
             if person.name:
                 nm = name_match(cand.account_display_name, person.name)
                 extra += f", name_match={'yes' if nm else 'no'}"
+                data["name_match"] = bool(nm)
         # The photo is a HUMAN-REVIEW artifact only — never an automated match
         # signal (see SKILL.md scope). Labelled inline so the reader treats it
         # as something to eyeball, not a verdict to trust.
         if cand.account_photo_url:
             extra += (f", google_photo={cand.account_photo_url}"
                       " (human-review artifact, not an automated match)")
+            data["google_photo"] = cand.account_photo_url
+            data["google_photo_note"] = "human-review artifact, not an automated match"
         add("email_candidate",
             f"candidate email: {cand.address} "
             f"(smtp={cand.smtp_verdict}, "
             f"account_exists={cand.account_exists}, sources={src_types}{extra})",
-            next((s.url for s in cand.sources if s.url), None))
+            next((s.url for s in cand.sources if s.url), None),
+            data=data)
 
     for note in person.notes:
         add("resolver_note", f"resolver note: {note}")

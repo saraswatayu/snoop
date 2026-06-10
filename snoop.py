@@ -694,14 +694,17 @@ def _build_bundle(person: Person, candidates: list[EmailCandidate],
         observations.append(reason.Observation(
             id=f"o{i}", type=o.type, content=o.content, source_url=o.source_url,
         ))
+    def _obs_dict(o: reason.Observation) -> dict[str, Any]:
+        d: dict[str, Any] = {"id": o.id, "type": o.type, "content": o.content,
+                             "source_url": o.source_url}
+        if o.data is not None:
+            d["data"] = o.data  # structured mirror (email_candidate fields, etc.)
+        return d
+
     return {
         "warnings": warnings or [],
         "person": {"name": person.name, "ambiguity": person.ambiguity},
-        "observations": [
-            {"id": o.id, "type": o.type, "content": o.content,
-             "source_url": o.source_url}
-            for o in observations
-        ],
+        "observations": [_obs_dict(o) for o in observations],
     }
 
 
@@ -769,6 +772,7 @@ def _run_ground(observations_file: str | None = None) -> int:
         reason.Observation(
             id=str(o.get("id", "")), type=str(o.get("type", "")),
             content=str(o.get("content", "")), source_url=o.get("source_url"),
+            data=o.get("data") if isinstance(o.get("data"), dict) else None,
         )
         for o in obs_dicts
     ]
