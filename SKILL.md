@@ -84,14 +84,11 @@ Optional fields:
   person published. snoop pulls the publisher/author email from the registry
   (near-100% precision when present). Supply these when you know them.
 - `channel_hints`: `{"x_dms_open": true, "linkedin": "<url>", "prefers": "x"}` —
-  populate whenever you learned a backup channel while resolving the person. A
-  bare URL value is a declaration. snoop has no LinkedIn/X sensor (deep profiles
-  are auth-walled and scraping them is ToS-laden), but **you can WebFetch a
-  public profile preview during resolution** and match it to the target (name +
-  current employer). When you do, pass the confirmation so the channel fact can
-  cite it instead of grounding as a bare declaration:
-  `{"linkedin": {"url": "<url>", "confirmed_via": "public profile: name + employer match"}}`.
-  A confirmed self-published profile is a strong cross-link — mark it `[+]`.
+  backup channels you learned while resolving. snoop has no LinkedIn/X sensor
+  (auth-walled, ToS-laden), but you can WebFetch a public profile preview and
+  match it to the target; pass the confirmation so the fact cites it, not a bare
+  declaration: `{"linkedin": {"url": "<url>", "confirmed_via": "public profile: name + employer match"}}`
+  (a confirmed self-published profile is a strong cross-link → `[+]`).
 - `name_variants`: explicit overrides for non-Latin spellings normalization misses.
 - `work_search_results`: the body-of-work feed. snoop has no bundled search
   provider — **you are the provider.** Run your built-in WebSearch (a query or
@@ -358,6 +355,124 @@ earns. `[+]`/`✓` is bound-by-construction; `[?]`/`~` is weaker or cited-not-se
 
 These tiers are what `--ground` and the refutation pass enforce from two sides —
 keep them consistent with the marker you write.
+
+## Worked examples
+
+### Founder behind a Hacker News profile + Workspace employer
+
+YC founder. You resolved her current company (`linear.app`, on Google Workspace)
+and her HN handle. The plan keeps those angles distinct:
+
+```json
+{
+  "name": "Nadia Eghbal",
+  "handles": {"hn": "nayafia"},
+  "employer": {"name": "Linear", "domains": ["linear.app"],
+    "source_url": "https://www.ycombinator.com/companies/linear"}
+}
+```
+
+`hn_profile` reads `nadia@linear.app` off her HN page — an **untrusted hint**, so
+on its own that fact is `[?]`. But the address also lands on the resolved employer
+domain, so `employer_match` is a second signal: it **binds**, and Phase 2 fires a
+Google probe. `account_exists=verified` + `name_match=yes` → `google-confirmed`,
+`[+]`. An HN-only address with no employer hit never binds, never gets probed —
+two signals, not one.
+
+```
+✓ nadia@linear.app — google-confirmed · Google account + name match [+]
+· news.ycombinator.com/user?id=nayafia — HN profile (untrusted hint) [?]
+```
+
+### dev-with-GitHub (the clean happy path)
+
+Peter Steinberger — bound `steipete` GitHub, personal domain `steipete.com` with
+bidirectional `rel=me`, custom-domain mailbox.
+
+```json
+{"name":"Peter Steinberger","handles":{"github":"steipete"},
+ "personal_domains":["steipete.com"],"employer":{"name":"OpenAI","domains":["openai.com"]}}
+```
+
+`pete@steipete.com` shows up in a `git_commit` **and** as a `mailto:` on the
+rel=me-verified `steipete.com` — anchored observation **+** bidirectional domain
+ownership = two independent signals, so it **binds**. Phase 2 fires: SMTP returns
+250 → `smtp=verified`. Verdict word `verified` (deliverability), provenance `[+]`
+(belongs-to-person):
+
+```
+✓ pete@steipete.com — verified · git commit + rel=me site [+]
+```
+
+### Exec on M365 — nothing binds on pattern alone
+
+A COO, not a dev: no public GitHub, no personal site. Resolution adds a confirmed
+LinkedIn channel and one PGP hit.
+
+```json
+{"name":"Marta Quintero",
+ "employer":{"name":"Helio Logistics","domains":["heliologistics.com"],"source_url":"https://heliologistics.com/team"},
+ "channel_hints":{"linkedin":{"url":"https://linkedin.com/in/martaquintero","confirmed_via":"public profile: name + employer match"}}}
+```
+
+`pattern_gen` emits `marta@heliologistics.com` with `employer_match` — but that's
+**one** signal, so it never binds and is never probed. A PGP owner-UID on that
+same address is a second signal: now it's bound (deliverability-only — PGP proves
+email-control, not identity). `data.mx_provider=microsoft`,
+`data.smtp=inconclusive` — M365 has no existence oracle, so you do NOT infer
+existence. Without the PGP hit it stays a bare `pattern-guess [?]`; lead with the
+channel, never a fake `verified`.
+
+```
+~ marta@heliologistics.com — pattern-guess [?]; PGP owner-UID corroborates control
+~ linkedin.com/in/martaquintero — confirmed channel (name + employer match)
+```
+
+### Gap-driven re-run (the bounded loop)
+
+Round 1 — thin plan, name + employer only:
+
+```json
+{"name":"Dana Whitley","employer":{"name":"Replicate","domains":["replicate.com"],"source_url":"https://..."}}
+```
+
+The bundle returns no mailbox and a gap: `resolution_gaps: ["no personal_domains
+— the highest-yield discovery step …"]`. You WebSearch Dana, find
+`danawhitley.dev`, fold it into `personal_domains`, and re-run. Round 2 surfaces a
+direct hit plus a rel=me anchor that binds the domain both ways:
+
+```
+o9  email_candidate  dana@danawhitley.dev  (smtp=verified, sources=personal_site)
+o4  rel_me           danawhitley.dev ↔ github.com/dwhitley  (bidirectional)
+```
+
+Now `dana@danawhitley.dev` is `verified [+]` — two signals agree (a personal_site
+mailbox on a rel=me-bound domain). Stop here: gaps quiet. (The loop also bounds at
+2 re-resolve rounds, or a round that adds no new observations.)
+
+### Tier-2: namesake split (common name, no anchor)
+
+`snoop "Matt Smith" --person-plan '{…,"employer":{"name":"Cloudflare"}}'` comes
+back `ambiguity == "multiple_plausible_matches"` — the mechanical Tier-2 trigger.
+You drive snoop from a workflow: **one target, four blind angles** (NOT bulk):
+
+```
+seeds  = [name+employer, personal-domain, handle:mattsmith, published-work]
+angles = parallel(blind_resolve(ask, s) for s in seeds)  # each gets ONLY the ask + its own seed
+merged = renamespace_ids(angles)                          # w1.. collide across bundles → re-prefix
+skeptics = parallel(blind_refute(b) for b in merged)      # "suppose a different Matt Smith…"
+```
+
+One skeptic surfaces a **grounded** refutation — a second `gh_profile` for "Matt
+Smith" at a different employer. That splits the binding, so you abstain on the
+address and raise the banner:
+
+```
+⚠ NAMESAKE — ≥2 people named "Matt Smith" fit; confirm WHO before relying [?]
+  github.com/mattsmith (Cloudflare) vs github.com/matt-smith (Stripe) — same name, different anchors [o4, w7]
+```
+
+`log()` the dropped angles so the hard target never reads as a clean one.
 
 ## When to pass `--allow-google-account`
 
