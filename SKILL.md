@@ -94,8 +94,8 @@ Optional fields:
   A confirmed self-published profile is a strong cross-link — mark it `[+]`.
 - `name_variants`: explicit overrides for non-Latin spellings normalization misses.
 - `work_search_results`: the body-of-work feed. snoop has no bundled search
-  provider — **you are the provider.** Run your built-in WebSearch (≤2 queries)
-  and pass the hits:
+  provider — **you are the provider.** Run your built-in WebSearch (a query or
+  two — published work is one of the blind resolution angles) and pass the hits:
   ```json
   "work_search_results": [
     {"title": "...", "url": "https://...", "item_type": "talk|article|podcast|paper|other",
@@ -115,6 +115,24 @@ handle in the plan is an **untrusted hint** until ≥2 of {name match, employer
 match, personal_domain cross-link} agree. If you're unsure the handle is right,
 leave it out — the other sensors still run without it.
 
+**Resolve from independent angles — keep them blind.** A stranger with a common
+name is snoop's worst failure, and it's an *identity*-axis failure that `--ground`
+(a provenance check) can't catch. So resolve the person from **independent
+angles** — name+employer, personal domain, handle, published work — and don't let
+one angle's guess seed another's search. Angles that never saw each other can't
+cross-contaminate, so when they **agree** on the same domain/handle/address that
+agreement is real corroboration, not an echo; when they disagree you have a
+namesake to split, not a fact. On an easy target you do this in your head; on a
+hard one it becomes the mechanical Tier-2 workflow (see **Tiered resolution**).
+
+**Resolution is a bounded loop, not a single capped pass.** Resolve → sense → if
+the bundle carries `resolution_gaps`, resolve the named gap and re-run. You're
+done when the gaps go quiet, OR after **2 re-resolve rounds**, OR a round adds no
+new observations — whichever comes first. Zero-friction means zero *human*
+friction and maximal *host* resolution (finding a real personal domain routinely
+turns ~22 observations into ~32). Don't ration yourself to one search — spend
+what the gaps ask for, stop at the loop bound.
+
 ## Step 2 — Sense: get the observation bundle
 
 ```bash
@@ -128,12 +146,14 @@ This runs the full sensor pipeline (resolve → git/GitHub/personal-site/pattern
 fan-out → Google/SMTP probes) and writes the bundle to the file. `--out` prints
 the ready-to-run `--ground` command. (Omit `--out` to get the bundle on stdout.)
 
-**Check `resolution_gaps` first.** If the bundle carries a `resolution_gaps`
-array, your Step-1 resolution was thin — snoop is telling you what a richer pass
-would add (a personal domain you didn't find, missing handles, an uncited
-employer). Do another resolution pass, fold the findings into the plan, and
-re-run `--observations` before you reason. A second pass with a real personal
-domain routinely beats a first pass without one.
+**Check `resolution_gaps` first — it drives the loop.** If the bundle carries a
+`resolution_gaps` array, your Step-1 resolution was thin — snoop is telling you
+what a richer pass would add (a personal domain you didn't find, missing handles,
+an uncited employer). Resolve the named gap, fold it into the plan, and re-run
+`--observations`. Repeat until the gaps go quiet, OR you've done 2 re-resolve
+rounds, OR a round adds no new observations — whichever comes first (pathological
+targets terminate in ≤3 passes). A second pass with a real personal domain
+routinely beats a first pass without one.
 
 Each observation has a stable `id` you cite, a `content` line, and — for
 `email_candidate` — a structured `data` field:
@@ -216,7 +236,25 @@ observation `id`s that support it, and a one-line reason.
    more than one person, say so, downgrade every marker to `[?]`, and emit
    fewer facts. A missed fact is cheap; attributing a stranger's email is the
    failure to avoid.
-5. **Keep facts scannable.** The card renders `✓ / ~ / ·` + the fact, one line
+5. **Refute before you bind (the identity-axis verifier).** Before a binding
+   holds, argue the counter-case out loud: *"suppose this is a different person
+   with the same name — what would I expect to see if so, and is it present?"*
+   Then weigh what you turn up by whether it is **grounded**:
+   - a **grounded** refutation — one that cites real counter-evidence in the
+     bundle (a second GitHub account under the same name, a Google display-name
+     delta, a WHOIS registrant that isn't the target) — splits the binding to
+     ambiguity: downgrade to `~`/`[?]` or raise the namesake banner.
+   - an **ungrounded** refutation — "what if it's just coincidence?" with nothing
+     in the bundle behind it — is the skeptic's prior, not evidence. Discard it;
+     it must not water down a well-cited fact.
+
+   Weak/no grounded refutation → the binding holds; one grounded refutation →
+   downgrade or split. This is the **identity** axis. `--ground` is the
+   **provenance** axis (do the citations exist?). **Two verifiers, two axes, both
+   kept** — refutation never replaces `--ground`; their failure modes stay
+   independent (one is your reasoning, one is a deterministic byte check), which
+   is exactly why running both catches what either alone would miss.
+6. **Keep facts scannable.** The card renders `✓ / ~ / ·` + the fact, one line
    each — don't write a sentence per line. Put the **grounded anchor** in
    `value` (the thing that appears in the cited observation — an address, a URL,
    a company name) and your one short phrase of color in `detail`. For a role,
@@ -224,7 +262,7 @@ observation `id`s that support it, and a one-line reason.
    (`{"kind":"role","value":"Simile","detail":"founding team · current"}` →
    `✓ Simile — founding team · current`). If you paraphrase in `value`, the
    grounding check can't match it and the line is tagged `(unverified)`.
-6. **Scope.** Only self-published, real-identity facts (see below). No de-anon,
+7. **Scope.** Only self-published, real-identity facts (see below). No de-anon,
    no location/family targeting, no sensitive-attribute inference, no automated
    face/biometric matching.
 
@@ -317,7 +355,7 @@ identity (or directly user-supplied).
 |---|---|
 | Sensor fan-out | one batched call — never loop per resolver |
 | Resolution pass (you, before sensing) | a focused **~2–5 searches + WebFetches** — rich resolution is the highest-leverage step (a personal domain → a direct mailbox). Don't skimp to hit a number; don't spelunk past diminishing returns. |
-| Sensor re-runs | re-run `--observations` once if resolution turned up a personal domain / handle worth feeding — a second pass with a real domain beats a first pass without one |
+| Sensor re-runs | re-run `--observations` while `resolution_gaps` keep naming something you can resolve — bounded at 2 re-resolve rounds (or a round that adds nothing new). A second pass with a real domain beats a first pass without one; don't stop short of a gap you can fill, don't loop past the bound |
 | Pre-validate a handle yourself | only when the user EXPLICITLY asks; otherwise trust the anchor binding to flag bad handles |
 
 ## Notes
