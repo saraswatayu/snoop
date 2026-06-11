@@ -48,6 +48,7 @@ from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
 from lib.hn_profile import fetch_hn_profile
+from lib.ledger import append_run, build_record, ledger_health
 from lib.normalize import is_personal_provider, name_match
 from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
@@ -242,6 +243,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-pgp",
         action="store_true",
         help="Skip the keys.openpgp.org corroboration of discovered addresses.",
+    )
+    p.add_argument(
+        "--no-ledger",
+        action="store_true",
+        help=(
+            "Don't append this run's yield metadata to the local ledger "
+            "(~/.snoop/ledger.jsonl). The ledger stores sensor timing + plan "
+            "shape only — never names, addresses, handles, or domains."
+        ),
     )
     p.add_argument(
         "--deadline",
@@ -629,6 +639,39 @@ def _rel_me_observations(links: list) -> list[reason.Observation]:
         obs.append(reason.Observation(id="", type="rel_me", content=content,
                                       source_url=link.url))
     return obs
+
+
+def _mx_class(candidates: list[EmailCandidate]) -> str:
+    """Coarse MX class for the ledger — no domains, just the bucket."""
+    provs = {c.mx_provider for c in candidates if c.mx_provider}
+    if "google" in provs:
+        return "google"
+    if "microsoft" in provs:
+        return "microsoft"
+    if provs:
+        return "other"
+    return "none"
+
+
+def _write_ledger(person: Person, candidates: list[EmailCandidate],
+                  packages: list[dict], run_records: list[RunRecord]) -> None:
+    """Append this run's yield metadata to the local ledger (E1), best-effort.
+    Plan SHAPE (booleans) + MX class + per-sensor RunRecords only — never target
+    data. A write failure is a one-line stderr warning, nothing else."""
+    rec = build_record(
+        plan_shape={
+            "github": bool(person.handles.get("github")),
+            "hn": bool(person.handles.get("hn")),
+            "personal_domains": bool(person.personal_domains),
+            "packages": bool(packages),
+            "employer": bool(person.employer and person.employer.name),
+        },
+        mx_class=_mx_class(candidates),
+        candidates=len(candidates),
+        sensors=[r.to_dict() for r in run_records],
+    )
+    if not append_run(rec):
+        sys.stderr.write("note: could not write the local ledger (~/.snoop/ledger.jsonl)\n")
 
 
 def _run_summary(run_records: list[RunRecord]) -> str:
@@ -1159,6 +1202,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.diagnose:
         print(diagnose.format_report(diagnose.diagnose()))
+        h = ledger_health()
+        ok = "OK" if h["writable"] else "!! "
+        print(f"\n[{ok}] ledger: {h['path']} — {h['records']} record(s), "
+              f"{h['malformed']} malformed, writable={h['writable']}")
         return 0
 
     # Verifier mode reads its bundle from stdin; no name/fetch needed.
@@ -1251,6 +1298,10 @@ def main(argv: list[str] | None = None) -> int:
     _emit_observations(person, candidates, {} if args.no_search else plan, warnings,
                        out_path=args.out, resolution_gaps=_resolution_gaps(person),
                        run_records=run_records, rel_me_links=rel_me_links)
+
+    # Append yield metadata to the local ledger (E1, on by default, best-effort).
+    if not args.no_ledger:
+        _write_ledger(person, candidates, packages, run_records)
     return 0
 
 

@@ -1155,6 +1155,43 @@ def test_rel_me_skipped_without_personal_domains(monkeypatch, capsys):
     assert sensors["rel_me"]["status"] == "skipped"
 
 
+def test_run_appends_valid_target_free_ledger_record(monkeypatch, capsys):
+    """E1: a real run appends a schema-clean ledger record carrying NO target
+    data — only plan shape, mx class, and sensor timing."""
+    from lib.ledger import validate_record
+    captured = {}
+    monkeypatch.setattr(snoop, "append_run",
+                        lambda rec, **kw: captured.setdefault("rec", rec) or True)
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, handles={"github": "secrethandle"},
+        personal_domains=["secret.dev"],
+        ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
+    snoop.main(["Sekret Person", "--no-smtp", "--no-pgp", "--observations"])
+    rec = captured["rec"]
+    assert validate_record(rec) == []                       # schema-clean
+    assert rec["plan_shape"]["github"] is True              # shape, not value
+    blob = __import__("json").dumps(rec)
+    assert "secrethandle" not in blob and "secret.dev" not in blob
+    assert "Sekret Person" not in blob                      # no name
+
+
+def test_no_ledger_flag_skips_write(monkeypatch, capsys):
+    def boom(rec, **kw):
+        raise AssertionError("ledger must not be written with --no-ledger")
+    monkeypatch.setattr(snoop, "append_run", boom)
+    _resolver_setup(monkeypatch)
+    rc = snoop.main(["Alice Smith", "--no-smtp", "--no-pgp", "--no-ledger",
+                     "--observations"])
+    assert rc == 0  # no AssertionError → ledger was not written
+
+
 # ---- --no-search escape hatch -----------------------------------------------
 
 

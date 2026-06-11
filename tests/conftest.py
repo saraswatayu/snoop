@@ -37,3 +37,6 @@ def _stub_unconditional_network(monkeypatch):
         raising=False,
     )
     monkeypatch.setattr(snoop, "verify_rel_me", lambda domain, **kw: [], raising=False)
+    # Don't write the real ~/.snoop/ledger.jsonl from the suite (E1). The ledger's
+    # own behavior is tested directly in test_ledger.py against a tmp path.
+    monkeypatch.setattr(snoop, "append_run", lambda rec, **kw: True, raising=False)
