@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from lib.normalize import (
     PERSONAL_PROVIDER_DOMAINS,
+    employer_match,
     fold_ascii,
     fold_to_letters,
     is_personal_provider,
@@ -263,3 +264,24 @@ def test_is_personal_provider_rejects_corporate():
 def test_personal_provider_domains_is_frozenset():
     assert isinstance(PERSONAL_PROVIDER_DOMAINS, frozenset)
     assert "gmail.com" in PERSONAL_PROVIDER_DOMAINS
+
+
+# ---- employer_match (extracted from gh_search / person_resolve) --------------
+
+
+def test_employer_match_tolerates_suffix_and_handle():
+    assert employer_match("OpenAI, Inc.", "OpenAI")
+    assert employer_match("@openai", "OpenAI")
+    assert employer_match("OpenAI", "OpenAI, LLC")
+
+
+def test_employer_match_rejects_substring_false_positives():
+    # the exact false positives the token-set design defends against
+    assert not employer_match("Applesauce", "Apple")
+    assert not employer_match("OpenAI", "A")
+
+
+def test_employer_match_handles_empty():
+    assert not employer_match(None, "OpenAI")
+    assert not employer_match("", "OpenAI")
+    assert not employer_match("OpenAI", "")

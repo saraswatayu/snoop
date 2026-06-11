@@ -199,6 +199,19 @@ Expansions accepted this session:
   ergonomics), "SKILL.md platform risk" (the skill file IS the product per
   premise 1).
 
+## Eng-review amendments (2026-06-11, both user-approved)
+- **ENG-1 (T6 respec):** the self-plan contract is a **resolution loop**, not a
+  capped pass — resolve → sense → if the bundle carries `resolution_gaps`
+  (snoop.py:696), resolve more and re-run; done when gaps are quiet. The
+  "≤2 WebSearch queries" cap in SKILL.md is deleted. Zero-friction means zero
+  *human* friction and maximal *host* resolution (dogfood lesson:
+  resolution-is-the-engine, 22→32 observations). SKILL.md's loop diagram
+  updates to show the loop; T16's examples include a gap-driven re-run trace.
+- **ENG-2 (3B scope):** the forgery defense covers **both** marker
+  vocabularies — `[+]`/`[?]` fact-level provenance marks AND the `✓`/`~`/`·`
+  identity band (render.py:57) — one collapse rule for every untrusted string
+  entering a card line; T9/T10 forgery suites attempt both glyph sets.
+
 ## The Assignment (carried from the design doc, amended per T5)
 Fill the calibration fixture to N≥25 real public-trail targets under the
 provisional ground-truth protocol — real-person entries in the gitignored

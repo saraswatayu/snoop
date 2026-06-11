@@ -358,3 +358,38 @@ def name_match(observed_name: str | None, target_name: str) -> bool:
     return bool(obs_tokens) and bool(tgt_tokens) and (
         obs_tokens.issubset(tgt_tokens) or tgt_tokens.issubset(obs_tokens)
     )
+
+
+# Common org-name suffix tokens, stripped before company matching so
+# "OpenAI" matches "OpenAI, Inc.".
+ORG_SUFFIX_TOKENS = frozenset({
+    "inc", "llc", "ltd", "corp", "co", "company",
+    "gmbh", "ag", "sa", "bv", "kg", "ltda", "srl", "spa",
+    "lp", "llp", "plc",
+})
+
+
+def employer_match(observed_company: str | None, target_employer_name: str) -> bool:
+    """Tolerant company-name match. Companies have variants ('OpenAI' vs
+    '@openai' vs 'OpenAI, Inc.'). Compare as token sets after stripping common
+    org suffixes — one must be a subset of the other.
+
+    Token-set was chosen over substring containment because `tgt in obs or obs
+    in tgt` false-positives in two real ways:
+      - plan='Apple' vs observed='Applesauce' → 'apple' in 'applesauce' = True
+      - plan='A' vs observed='OpenAI'         → 'a' in 'openai' = True
+    Both would falsely bind the github_employer_match anchor (which, with one
+    other correct anchor, flips ambiguity to single_plausible_match)."""
+    if not observed_company or not target_employer_name:
+        return False
+
+    def _tokens(s: str) -> set[str]:
+        folded = fold_ascii(s).lstrip("@")
+        raw = [t.strip(",.()[]{}\"'") for t in folded.split()]
+        return {t for t in raw if t and t not in ORG_SUFFIX_TOKENS}
+
+    obs = _tokens(observed_company)
+    tgt = _tokens(target_employer_name)
+    if not obs or not tgt:
+        return False
+    return obs.issubset(tgt) or tgt.issubset(obs)
