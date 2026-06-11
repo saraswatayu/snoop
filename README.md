@@ -34,8 +34,8 @@ among many; **it never sends mail.**
 | `lib/reason.py` | `build_evidence()` — flattens the resolved person + probed candidates into the observation bundle. |
 | `lib/ground.py` | The deterministic verifier — drops facts whose citations don't reference a real observation. |
 | `lib/render.py` | Renders the grounded card for `--ground`. |
-| `lib/` | Sensors: `git_emails`, `gh_profile`, `gh_search`, `personal_site`, `pattern_gen`, `google_account` (+ `chrome_cookies`), `verify_smtp`, `person_resolve`, plus `normalize`, `diagnose`, `schema`. |
-| `tests/` | pytest suite (`python3 -m pytest tests/`, no network). |
+| `lib/` | Sensors: `git_emails`, `gh_profile`, `gh_search`, `personal_site`, `pattern_gen`, `package_registry`, `hn_profile`, `rel_me`, `pgp_keyserver`, `google_account` (+ `chrome_cookies`), `verify_smtp`, `person_resolve`; plus `fetch` (SSRF-guarded HTTP), `ledger` (local yield metadata), `normalize`, `diagnose`, `schema`. |
+| `tests/` | pytest suite (`python3 -m pytest tests/`, no network); `_http_harness.py` is the shared fetch fake; `calibration.py` is the manual measurement harness. |
 | `requirements.txt` | One dependency: `dnspython`. |
 
 ## Install (as a Claude Code skill)
@@ -44,6 +44,19 @@ among many; **it never sends mail.**
 git clone https://github.com/saraswatayu/snoop.git ~/.claude/skills/snoop
 pip install -r ~/.claude/skills/snoop/requirements.txt
 ```
+
+The one dependency is `dnspython` (for MX lookups). If that `pip install` fails or
+is skipped, snoop still runs — it **degrades honestly**: the SMTP sensor reports
+`skipped: dependency dnspython missing` instead of silently returning nothing, and
+`--diagnose` tells you how to fix it (`pip install --user dnspython`). Everything
+that doesn't need MX (GitHub, personal-site, pattern, PGP, rel=me) works as usual.
+
+snoop keeps a small local **ledger** at `~/.snoop/ledger.jsonl` (on by default):
+one line per run recording yield metadata only — which sensors ran, how long they
+took, the plan *shape* (booleans), and the MX class — **never** names, addresses,
+handles, or domains (a CI test enforces that schema). It's how probe ordering gets
+tuned from real use over time. Opt out per run with `--no-ledger`; `--diagnose`
+reports its health.
 
 Then in Claude Code just say things like:
 
@@ -76,9 +89,12 @@ Useful flags (full list in `--help` or `SKILL.md`):
 | `--ground` / `--observations-file PATH` | Read `{person, summary, facts}` on stdin, load observations from PATH, drop uncited facts, render the card. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--no-smtp` | Skip SMTP verification. |
+| `--no-pgp` | Skip the keys.openpgp.org owner-UID corroboration of discovered addresses. |
+| `--no-ledger` | Don't append this run's yield metadata to `~/.snoop/ledger.jsonl`. |
+| `--deadline SEC` | Shared wall-clock budget for the whole run (default 60s); a sensor still running at the deadline is abandoned and reports `deadline-exceeded`. |
 | `--allow-google-account` | Opt-in: Google People API existence check on Google-hosted domains, via logged-in Chrome cookies. Always safe to pass — a no-op when there are no Google candidates or no cookies. |
 | `--google-workspace-domain DOMAIN` | Rarely needed — Google MX is auto-detected. Force a domain that isn't already a candidate. |
-| `--diagnose` | Capability probe (gh auth, dnspython, Google readiness) and exit. |
+| `--diagnose` | Capability probe (gh auth, dnspython, Google readiness, ledger health) and exit. |
 
 ## The observation bundle
 
@@ -124,6 +140,40 @@ A per-domain daily probe budget (default 5/day, JSON state under
 `~/.snoop/probe-budget.json`, 0600 perms) caps SMTP probes. This uses SMTP
 `RCPT` + catch-all detection, deliberately *not* the unreliable and widely
 disabled SMTP `VRFY` command.
+
+## Identity binding (why it won't email a namesake)
+
+Before any deliverability probe, snoop decides whether an address actually
+*belongs* to the target. A candidate **binds** only when ≥2 independent signals
+agree — observed on a bound surface (a validated GitHub account, or a personal
+site on a rel=me-verified domain), the resolved employer domain, rel=me domain
+ownership, or a PGP owner-UID. SMTP and the Google People API fire **only on bound
+candidates**; when nothing binds, snoop opens no socket and renders an honest
+blank (what it checked, what it didn't, and why) rather than probing a same-named
+stranger's mailbox. A pure name×domain guess never binds. `--ground` then checks
+the citations from the other side, so two independent verifiers police two axes —
+identity (does this address belong to the person?) and provenance (does each claim
+cite a real observation?).
+
+## Calibration (how the numbers are measured)
+
+snoop's hit rates are **measurements, not accuracy claims** — reported as "measured
+on N targets of these classes, on DATE," never as a guarantee for the next lookup.
+The harness (`python3 -m tests.calibration`) computes per-sensor hit rate and
+precision-on-known over a labeled target set.
+
+Privacy is built into the protocol: the committed fixture
+(`tests/fixtures/calibration_targets.json`) holds only EXAMPLE/synthetic archetype
+shapes with **null** ground truth — a CI test enforces that no real address ever
+lands in the public file. The real N≥25 public-trail targets and their known
+addresses live ONLY in the gitignored `tests/fixtures/calibration_targets.local.json`,
+so the exact published numbers reproduce only against that local set. **Retention:**
+a local ground-truth entry is deleted on the subject's request (remove their row).
+
+> **Status:** the measured per-sensor table is produced by a human-supervised live
+> run against the local N≥25 set (the run touches real people and the network, so
+> it isn't part of the automated suite). Until that run is recorded here, treat the
+> sensors as un-benchmarked rather than assuming a number.
 
 ## License
 
