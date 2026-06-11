@@ -158,6 +158,24 @@ def test_runrecord_from_resolver_degraded_carries_reason():
     assert rec.reason == "exceeded 5s budget"
 
 
+def test_deadline_exceeded_reason_distinct_from_internal_timeout():
+    """2B: a sensor abandoned at the SHARED wall-clock deadline and a sensor that
+    hit its OWN internal timeout both degrade with outcome='timeout', but their
+    `reason` text must stay distinguishable — the host should be able to tell
+    'snoop ran out of budget' from 'this sensor's socket timed out'."""
+    from lib.schema import RunRecord
+    internal = RunRecord.from_resolver(ResolverResult(
+        resolver="personal_site", candidates=[], status="timeout",
+        error_detail="socket read timed out after 5s"))
+    deadline = RunRecord.from_resolver(ResolverResult(
+        resolver="git_emails", candidates=[], status="timeout",
+        error_detail="deadline-exceeded: abandoned after 60s shared budget"))
+    assert internal.outcome == deadline.outcome == "timeout"
+    assert internal.reason != deadline.reason
+    assert "deadline-exceeded" in (deadline.reason or "")
+    assert "deadline-exceeded" not in (internal.reason or "")
+
+
 def test_runrecord_to_dict_omits_none():
     from lib.schema import RunRecord
     rec = RunRecord(sensor="x", status="skipped")

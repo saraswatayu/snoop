@@ -547,7 +547,7 @@ def run_pipeline(
 
 def _sensor_skips(
     person: Person, *, packages: list[dict], no_smtp: bool, no_pgp: bool,
-    allow_google_account: bool,
+    allow_google_account: bool, dns_available: bool = True,
 ) -> list[RunRecord]:
     """Synthesize 'skipped' RunRecords for sensors that COULD run but didn't, with
     a reason — the typed-degradation half of the contract. Pairs with the
@@ -572,6 +572,11 @@ def _sensor_skips(
         skip("google_account", "--allow-google-account not set")
     if no_smtp:
         skip("smtp", "--no-smtp")
+    elif not dns_available:
+        # SMTP wasn't disabled by the user — it can't run because MX lookups need
+        # dnspython, which isn't installed. Surface that as a typed sensor skip
+        # (the first-run degradation case), not just a top-of-bundle warning.
+        skip("smtp", "dependency dnspython missing")
     if no_pgp:
         skip("pgp", "--no-pgp")
     return skips
@@ -1439,9 +1444,12 @@ def main(argv: list[str] | None = None) -> int:
     # Per-sensor records: ran/degraded from the fan-out + skipped (gated-off)
     # sensors with reasons — the typed degradation contract.
     run_records = [RunRecord.from_resolver(r) for r in results]
+    dns_available = any(c.name == "dnspython" and c.status == "ok"
+                        for c in capabilities)
     run_records += _sensor_skips(
         person, packages=packages, no_smtp=args.no_smtp, no_pgp=args.no_pgp,
         allow_google_account=args.allow_google_account,
+        dns_available=dns_available,
     )
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle

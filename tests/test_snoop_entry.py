@@ -756,6 +756,47 @@ def test_capability_warnings_skips_google_when_flag_off():
     assert not any("google" in w.lower() for w in warnings)
 
 
+def test_capability_warnings_name_the_anon_github_60_req_hr_ceiling():
+    """The anonymous-GitHub fallback is a named degradation case: both the
+    gh-missing and gh-unauthed warnings must name the 60 req/hr ceiling so the
+    user knows exactly what degraded."""
+    from lib.diagnose import Capability
+    for status in ("missing", "degraded"):
+        caps = [Capability(name="gh_cli", status=status, detail="x", impact="y")]
+        warnings = snoop._capability_warnings(caps, allow_google_account=False)
+        assert any("60 req/hr" in w for w in warnings), status
+
+
+def test_dnspython_missing_emits_typed_smtp_skip(monkeypatch, capsys):
+    """First-run degradation: with dnspython missing and SMTP not disabled by the
+    user, the bundle's sensors array carries an smtp skip whose reason names the
+    missing dependency — not a silent unprobed."""
+    import json as _json
+    from lib.diagnose import Capability
+    monkeypatch.setattr(snoop, "_fast_capability_probe", lambda **kw: [
+        Capability(name="dnspython", status="missing",
+                   detail="not installed", impact="no SMTP"),
+    ])
+    _resolver_setup(monkeypatch)  # resolves Alice Smith, no personal domains
+    rc = snoop.main(["Alice Smith", "--no-pgp", "--observations"])  # NOT --no-smtp
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    smtp = next(s for s in bundle["sensors"] if s["sensor"] == "smtp")
+    assert smtp["status"] == "skipped"
+    assert smtp["reason"] == "dependency dnspython missing"
+
+
+def test_diagnose_reports_ledger_health_line(monkeypatch, capsys, tmp_path):
+    """1A integration: --diagnose prints the ledger health line so a user can see
+    where the local ledger lives and whether it's writable."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    rc = snoop.main(["--diagnose"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "ledger:" in out
+    assert "writable=" in out
+
+
 def test_capability_warnings_surfaces_google_when_flag_on():
     from lib.diagnose import Capability
     caps = [
