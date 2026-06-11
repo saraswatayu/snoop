@@ -241,6 +241,24 @@ def test_press_confirmed_role_renders_tilde_not_check():
     assert "✓" not in line
 
 
+def test_m365_provider_context_renders_separate_from_address():
+    """T-minor B: M365 provider context lands in its OWN section (Identity check),
+    visually separate from the Email line — it must never read as validating the
+    address. The address line carries only its own verdict."""
+    email = _fact(kind="email", value="marta@helio.com", detail="pattern-guess",
+                  confidence=0.4)
+    note = _fact(kind="consistency_note", value="helio.com is on Microsoft 365",
+                 detail="M365 blocks RCPT and has no existence oracle — lean on channels",
+                 confidence=0.5)
+    out = render_reasoned_card(_profile([email, note]))
+    lines = out.splitlines()
+    email_line = next(ln for ln in lines if "marta@helio.com" in ln)
+    # the provider context is NOT on the address line
+    assert "Microsoft 365" not in email_line and "existence oracle" not in email_line
+    # and it appears under its own section header
+    assert "Identity check:" in out
+
+
 def test_self_published_role_can_render_check():
     """The cap is by confidence/doctrine, not a blanket role downgrade: a
     self-published or probe-verified role the host scores in the ✓ band renders

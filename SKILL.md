@@ -494,7 +494,10 @@ target per invocation; bulk use risks Google flagging the account).
 `microsoft` and `data.smtp == "inconclusive"`, there is no existence oracle —
 every unauthenticated M365 probe either lies (returns "exists" for everyone) or
 only confirms, never denies. The bundle says so inline. Don't infer existence;
-lean on the channel hints and the name×pattern + observed-source signals.
+lean on the channel hints and the name×pattern + observed-source signals. Surface
+the M365 provider context as its **own** line (a `consistency_note` →
+"Identity check"), never appended to the address — provider context must not read
+as address validation.
 
 ## Scope — MUST / MUST NOT
 
