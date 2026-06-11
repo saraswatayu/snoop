@@ -126,6 +126,19 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
                 for s in cand.sources
             ],
         }
+        # Surface the MX provider so an inconclusive SMTP verdict is actionable:
+        # on microsoft (M365) there is NO existence oracle — unlike google, where
+        # --allow-google-account discriminates — so the host model must lean on
+        # channel hints rather than trust the inconclusive RCPT. (See the M365
+        # spike: every unauthenticated existence probe there fails snoop's
+        # honest-over-confident bar.)
+        provider_note = ""
+        if cand.mx_provider:
+            data["mx_provider"] = cand.mx_provider
+            provider_note = f", mx={cand.mx_provider}"
+            if cand.mx_provider == "microsoft" and cand.smtp_verdict == "inconclusive":
+                provider_note += " (M365 blocks RCPT and has no existence oracle — lean on channel hints)"
+                data["smtp_note"] = "M365 blocks RCPT and has no existence oracle — lean on channel hints"
         # When Google returned a display name, surface it WITH a text name-match
         # verdict against the target. This is the load-bearing disambiguator on a
         # common-name Workspace tenant: a pattern guess that hits a real-but-
@@ -149,7 +162,7 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
             data["google_photo_note"] = "human-review artifact, not an automated match"
         add("email_candidate",
             f"candidate email: {cand.address} "
-            f"(smtp={cand.smtp_verdict}, "
+            f"(smtp={cand.smtp_verdict}{provider_note}, "
             f"account_exists={cand.account_exists}, sources={src_types}{extra})",
             next((s.url for s in cand.sources if s.url), None),
             data=data)

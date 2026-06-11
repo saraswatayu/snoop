@@ -151,3 +151,32 @@ def test_structured_data_mirrors_google_name_match():
 def test_non_email_observations_have_no_data():
     obs = reason.build_evidence(_person(), [])
     assert all(o.data is None for o in obs)
+
+
+# --- mx provider / M365 honesty -----------------------------------------------
+
+
+def test_m365_inconclusive_surfaces_lean_on_channel_hints():
+    """On M365 there's no existence oracle, so an inconclusive RCPT is surfaced
+    with the provider + explicit 'lean on channel hints' guidance."""
+    cand = EmailCandidate(
+        address="exec@corp.com", smtp_verdict="inconclusive", mx_provider="microsoft",
+        sources=[Source(type="pattern", url=None, observed_at=NOW, detail="guess")],
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert "mx=microsoft" in o.content
+    assert "no existence oracle" in o.content
+    assert o.data["mx_provider"] == "microsoft"
+    assert "channel hints" in o.data["smtp_note"]
+
+
+def test_mx_provider_surfaced_without_m365_note_for_other_providers():
+    cand = EmailCandidate(
+        address="a@corp.com", smtp_verdict="verified", mx_provider="other",
+        sources=[Source(type="gh_profile", url="https://github.com/a",
+                        observed_at=NOW, detail="profile")],
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert "mx=other" in o.content
+    assert "existence oracle" not in o.content  # the M365-specific note only on microsoft
+    assert "smtp_note" not in o.data

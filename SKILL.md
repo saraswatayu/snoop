@@ -220,6 +220,12 @@ whenever account-existence disambiguation might help, especially when the
 employer is Google or a YC startup on Workspace. Don't loop it over a list (one
 target per invocation; bulk use risks Google flagging the account).
 
+**Microsoft 365 has no equivalent.** When a candidate's `data.mx_provider` is
+`microsoft` and `data.smtp == "inconclusive"`, there is no existence oracle —
+every unauthenticated M365 probe either lies (returns "exists" for everyone) or
+only confirms, never denies. The bundle says so inline. Don't infer existence;
+lean on the channel hints and the name×pattern + observed-source signals.
+
 ## Scope — MUST / MUST NOT
 
 Every fact you surface must be self-published under the person's own real
