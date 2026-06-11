@@ -128,6 +128,13 @@ This runs the full sensor pipeline (resolve → git/GitHub/personal-site/pattern
 fan-out → Google/SMTP probes) and writes the bundle to the file. `--out` prints
 the ready-to-run `--ground` command. (Omit `--out` to get the bundle on stdout.)
 
+**Check `resolution_gaps` first.** If the bundle carries a `resolution_gaps`
+array, your Step-1 resolution was thin — snoop is telling you what a richer pass
+would add (a personal domain you didn't find, missing handles, an uncited
+employer). Do another resolution pass, fold the findings into the plan, and
+re-run `--observations` before you reason. A second pass with a real personal
+domain routinely beats a first pass without one.
+
 Each observation has a stable `id` you cite, a `content` line, and — for
 `email_candidate` — a structured `data` field:
 

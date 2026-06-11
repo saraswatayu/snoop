@@ -1081,6 +1081,67 @@ def _resolver_setup(monkeypatch):
     monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
 
 
+# ---- resolution_gaps: coach a thin plan -------------------------------------
+
+
+def test_resolution_gaps_flags_thin_plan():
+    """A name-only plan leaves the discovery sensors with nothing — coach all
+    three high-value inputs."""
+    person = Person(
+        name="X", ambiguity="insufficient_identity_evidence",
+        employer=Employer(name="Acme", domains=["acme.com"]),  # declared, no source_url
+    )
+    gaps = snoop._resolution_gaps(person)
+    blob = " ".join(gaps)
+    assert "personal_domains" in blob
+    assert "handles" in blob
+    assert "source_url" in blob
+
+
+def test_resolution_gaps_empty_for_rich_plan():
+    person = Person(
+        name="X", ambiguity="single_plausible_match",
+        personal_domains=["x.com"], handles={"github": "x"},
+        employer=Employer(name="Acme", domains=["acme.com"], source_url="https://n/acme"),
+    )
+    assert snoop._resolution_gaps(person) == []
+
+
+def test_main_thin_plan_emits_resolution_gaps(monkeypatch, capsys):
+    import json as _json
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="insufficient_identity_evidence",
+        employer=Employer(name="Acme", domains=["acme.com"]),
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    rc = snoop.main(["X", "--no-smtp"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert "resolution_gaps" in bundle and bundle["resolution_gaps"]
+
+
+def test_main_rich_plan_has_no_resolution_gaps_key(monkeypatch, capsys):
+    import json as _json
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        personal_domains=["x.com"], handles={"github": "x"},
+        bound_anchors=[("github_name_match", name), ("github_employer_match", "Acme")],
+        employer=Employer(name="Acme", domains=["acme.com"], source_url="https://n/acme"),
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile", "fetch_personal_site",
+               "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
+    rc = snoop.main(["X", "--no-smtp"])
+    assert rc == 0
+    bundle = _json.loads(capsys.readouterr().out)
+    assert "resolution_gaps" not in bundle
+
+
 # ---- --verify single-address path -------------------------------------------
 
 

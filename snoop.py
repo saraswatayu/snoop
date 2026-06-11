@@ -693,13 +693,44 @@ def _format_reasoned_json(profile: reason.ReasonedProfile, *,
     }, indent=2, default=str)
 
 
+def _resolution_gaps(person: Person) -> list[str]:
+    """Coaching tips for high-value resolution inputs the host didn't supply.
+
+    snoop finds only what the host feeds it, so a thin plan leaves the sensors
+    pattern-guessing — and nearly every weak result traces to an under-resolved
+    Step 1. Rather than rely on the host remembering to resolve richly, surface
+    the gaps in the bundle so it can do another resolution pass and re-run.
+    Empty when the plan is already rich."""
+    gaps: list[str] = []
+    if not person.personal_domains:
+        gaps.append(
+            "no personal_domains — the personal_site mailto sensor did not run. "
+            "Finding their site is the highest-yield discovery step (often a "
+            "direct mailbox + a strong identity anchor); resolve it and re-run."
+        )
+    if not person.handles:
+        gaps.append(
+            "no handles (github/hn) — the git/profile/HN sensors did not run, so "
+            "discovery is name×domain pattern-guessing only. Resolve their "
+            "GitHub/HN/socials and re-run."
+        )
+    if person.employer and person.employer.name and not person.employer.source_url:
+        gaps.append(
+            "employer is plan-declared only (no source_url) — role/employer facts "
+            "will be uncited. Set employer.source_url to where you confirmed it."
+        )
+    return gaps
+
+
 def _build_bundle(person: Person, candidates: list[EmailCandidate],
-                  plan: dict[str, Any], warnings: list[str]) -> dict[str, Any]:
+                  plan: dict[str, Any], warnings: list[str],
+                  *, resolution_gaps: list[str] | None = None) -> dict[str, Any]:
     """Build the raw observation bundle the host model reasons over.
 
     snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
     MX); this dumps what those sensors saw, typed and cited, plus any host-model
-    web-search observations. No binding, no rendering — the host is the analyst."""
+    web-search observations. No binding, no rendering — the host is the analyst.
+    `resolution_gaps` (when present) coaches a richer Step-1 resolution + re-run."""
     observations = reason.build_evidence(person, candidates)
     base = len(observations)
     for i, o in enumerate(_work_search_observations(plan), start=base + 1):
@@ -713,19 +744,26 @@ def _build_bundle(person: Person, candidates: list[EmailCandidate],
             d["data"] = o.data  # structured mirror (email_candidate fields, etc.)
         return d
 
-    return {
+    bundle: dict[str, Any] = {
         "warnings": warnings or [],
         "person": {"name": person.name, "ambiguity": person.ambiguity},
         "observations": [_obs_dict(o) for o in observations],
     }
+    if resolution_gaps:
+        # A thin plan: surface what a richer resolution pass would add. Placed
+        # near the top so the host sees it before reasoning over a weak bundle.
+        bundle["resolution_gaps"] = resolution_gaps
+    return bundle
 
 
 def _emit_observations(person: Person, candidates: list[EmailCandidate],
                        plan: dict[str, Any], warnings: list[str],
-                       *, out_path: str | None = None) -> None:
+                       *, out_path: str | None = None,
+                       resolution_gaps: list[str] | None = None) -> None:
     """Write the observation bundle to stdout, or to `out_path` (with a printed
     pointer + the ready-to-run --ground command) when --out is given."""
-    bundle = _build_bundle(person, candidates, plan, warnings)
+    bundle = _build_bundle(person, candidates, plan, warnings,
+                           resolution_gaps=resolution_gaps)
     text = json.dumps(bundle, indent=2, default=str)
     if not out_path:
         sys.stdout.write(text)
@@ -1001,8 +1039,9 @@ def main(argv: list[str] | None = None) -> int:
     # The deliverable: the observation bundle the host model reasons over.
     # (Identity state + resolver notes are observations even with no candidates.)
     # --no-search drops the host-supplied work_search_results from the bundle.
+    # resolution_gaps coaches a richer Step-1 pass when the plan was thin.
     _emit_observations(person, candidates, {} if args.no_search else plan, warnings,
-                       out_path=args.out)
+                       out_path=args.out, resolution_gaps=_resolution_gaps(person))
     return 0
 
 
