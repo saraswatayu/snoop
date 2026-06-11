@@ -62,6 +62,35 @@
         "personal": null
       },
       "note": "Validates Eastern-order reversal: both wang.xiaoming@ and xiaoming.wang@ should appear as candidates."
+    },
+    {
+      "id": "google-workspace-startup-1",
+      "name": "EXAMPLE Founder",
+      "company": "EXAMPLE YC Startup",
+      "person_plan": {
+        "handles": {"github": null, "hn": null},
+        "employer": {"name": "EXAMPLE YC Startup", "domains": ["example.dev"]}
+      },
+      "audience": "google-workspace-tenant",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Replace with a real founder on a Google-Workspace tenant. The hard case SMTP can't crack: run with --allow-google-account and measure whether the Google People API + name_match disambiguates where SMTP returns inconclusive. Set handles.hn to test the HN sensor on this population."
+    },
+    {
+      "id": "m365-corporate-1",
+      "name": "EXAMPLE Enterprise Contact",
+      "company": "EXAMPLE Enterprise",
+      "person_plan": {
+        "employer": {"name": "EXAMPLE Enterprise", "domains": ["example-corp.com"]}
+      },
+      "audience": "microsoft-365-tenant",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Replace with a real contact on a Microsoft 365 tenant (MX = mail.protection.outlook.com). The current gap: SMTP returns inconclusive and there's no M365 existence probe wired, so this measures the floor — does the pipeline degrade honestly to pattern-guess + channel hints? See docs/plans/2026-06-11-m365-spike.md."
     }
   ]
 }
