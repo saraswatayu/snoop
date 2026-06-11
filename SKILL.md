@@ -191,7 +191,15 @@ observation `id`s that support it, and a one-line reason.
    more than one person, say so, downgrade every marker to `[?]`, and emit
    fewer facts. A missed fact is cheap; attributing a stranger's email is the
    failure to avoid.
-5. **Scope.** Only self-published, real-identity facts (see below). No de-anon,
+5. **Keep facts scannable.** The card renders `✓ / ~ / ·` + the fact, one line
+   each — don't write a sentence per line. Put the **grounded anchor** in
+   `value` (the thing that appears in the cited observation — an address, a URL,
+   a company name) and your one short phrase of color in `detail`. For a role,
+   `value` is the company and `detail` is the title/tenure
+   (`{"kind":"role","value":"Simile","detail":"founding team · current"}` →
+   `✓ Simile — founding team · current`). If you paraphrase in `value`, the
+   grounding check can't match it and the line is tagged `(unverified)`.
+6. **Scope.** Only self-published, real-identity facts (see below). No de-anon,
    no location/family targeting, no sensitive-attribute inference, no automated
    face/biometric matching.
 

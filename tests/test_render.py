@@ -47,7 +47,7 @@ def test_summary_leads_the_card():
 def test_email_fact_renders_with_section_and_marker():
     out = render_reasoned_card(_profile([_fact(confidence=0.9)]))
     assert "Email:" in out
-    assert "[+]" in out
+    assert "✓" in out
     assert "alice@corp.com" in out
 
 
@@ -60,11 +60,20 @@ def test_sections_render_in_kind_order():
     assert out.index("Email:") < out.index("Roles:")
 
 
-def test_label_and_detail_render():
-    f = _fact(kind="social_link", value="https://github.com/alice",
-              label="github", detail="2k followers")
+def test_label_kept_when_not_redundant():
+    """A label that adds info (not already in the value) is shown."""
+    f = _fact(kind="role", value="Founding team", label="Simile", detail="current")
     out = render_reasoned_card(_profile([f]))
-    assert "github: https://github.com/alice — 2k followers" in out
+    assert "Simile: Founding team — current" in out
+
+
+def test_redundant_label_is_dropped():
+    """A label that just repeats the value (e.g. 'linkedin' when the value is the
+    linkedin URL) is dropped to keep the line scannable."""
+    f = _fact(kind="social_link", value="linkedin.com/in/alice", label="linkedin")
+    out = render_reasoned_card(_profile([f]))
+    assert "✓ linkedin.com/in/alice" in out
+    assert "linkedin: linkedin.com" not in out
 
 
 # ---- confidence markers ------------------------------------------------------
@@ -72,17 +81,17 @@ def test_label_and_detail_render():
 
 def test_high_confidence_is_asserted_marker():
     out = render_reasoned_card(_profile([_fact(confidence=0.8)]))
-    assert "[+]" in out
+    assert "✓" in out
 
 
 def test_mid_confidence_is_possibly_marker():
     out = render_reasoned_card(_profile([_fact(confidence=0.5)]))
-    assert "[?]" in out and "[+]" not in out.split("Email:")[1]
+    assert "~" in out and "✓" not in out.split("Email:")[1]
 
 
 def test_low_confidence_is_weak_marker():
     out = render_reasoned_card(_profile([_fact(confidence=0.1)]))
-    assert "[·]" in out
+    assert "·" in out
 
 
 def test_multiple_matches_caps_marker_and_warns_loudly():
@@ -91,7 +100,7 @@ def test_multiple_matches_caps_marker_and_warns_loudly():
     out = render_reasoned_card(
         _profile([_fact(confidence=0.95)], ambiguity="multiple_plausible_matches")
     )
-    assert "[+]" not in out
+    assert "✓" not in out
     assert "NOT a single confident match" in out
 
 
@@ -103,7 +112,7 @@ def test_insufficient_evidence_does_not_cap_verified_fact():
         _profile([_fact(confidence=0.9)], ambiguity="insufficient_identity_evidence",
                  identity_confidence=None)
     )
-    assert "[+]" in out                               # NOT capped to [?]
+    assert "✓" in out                               # NOT capped to [?]
     assert "not independently anchored" in out         # the soft caveat
     assert "more than one person may fit" not in out   # not the loud namesake banner
 
@@ -117,7 +126,7 @@ def test_high_host_confidence_suppresses_soft_banner():
                  ambiguity="insufficient_identity_evidence", identity_confidence=0.85)
     )
     assert "not independently anchored" not in out
-    assert "[+]" in out
+    assert "✓" in out
 
 
 def test_soft_banner_shows_when_host_confidence_absent_or_modest():

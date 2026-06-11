@@ -45,18 +45,18 @@ _KIND_ORDER = list(_KIND_SECTION)
 
 
 def _conf_marker(confidence: float, person: Person) -> str:
-    """Confidence band -> provenance marker.
+    """Confidence band -> compact glyph: ✓ asserted, ~ possibly, · weak.
 
-    The hard cap (no `[+]`) applies ONLY to `multiple_plausible_matches` — the
+    The hard cap (✓ -> ~) applies ONLY to `multiple_plausible_matches` — the
     genuine namesake case, where attributing a fact to the wrong person is the
     risk. `insufficient_identity_evidence` (we simply have no anchor yet) is NOT
     capped: the model's per-fact confidence speaks, so a Google/SMTP-verified
-    address can read as strong while the card carries a scoped 'not anchored'
-    caveat. Conflating the two was the bug that buried verified results under a
-    wall of `[?]`."""
-    band = "[+]" if confidence >= 0.66 else "[?]" if confidence >= 0.33 else "[·]"
-    if person.ambiguity == "multiple_plausible_matches" and band == "[+]":
-        return "[?]"
+    address can read as ✓ while the card carries a scoped 'not anchored' caveat.
+    Conflating the two was the bug that buried verified results under a wall of
+    `~`."""
+    band = "✓" if confidence >= 0.66 else "~" if confidence >= 0.33 else "·"
+    if person.ambiguity == "multiple_plausible_matches" and band == "✓":
+        return "~"
     return band
 
 
@@ -88,13 +88,13 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None) -> str:
     host_confident = ic is not None and ic >= 0.75
     if person.ambiguity == "multiple_plausible_matches" or (ic is not None and ic < 0.5):
         lines.append("")
-        lines.append("[?] identity is NOT a single confident match — more than one "
+        lines.append("⚠ identity is NOT a single confident match — more than one "
                      "person may fit; confirm WHO before relying.")
     elif person.ambiguity == "insufficient_identity_evidence" and not host_confident:
         lines.append("")
-        lines.append("[·] identity not independently anchored by snoop's own probes "
-                     "— verified facts are still verified-deliverable; confirm the "
-                     "person if you haven't already.")
+        lines.append("· identity not independently anchored by snoop's own probes "
+                     "— verified facts still stand; confirm the person if you "
+                     "haven't already.")
 
     by_kind: dict[str, list] = {}
     for f in profile.facts:
@@ -108,13 +108,14 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None) -> str:
         lines.append("")
         lines.append(f"{_KIND_SECTION[kind]}:")
         for f in facts:
-            label = f"{_oneline(f.label)}: " if f.label else ""
+            value = _oneline(f.value)
+            label = _oneline(f.label)
+            # Drop a label that just repeats the value (e.g. the "linkedin" label
+            # when the value is the linkedin URL) — keep the line scannable.
+            head = value if not label or label.lower() in value.lower() else f"{label}: {value}"
             detail = f" — {_oneline(f.detail)}" if f.detail else ""
             tag = "" if f.verified else " (unverified)"
-            lines.append(
-                f"  {_conf_marker(f.confidence, person)} {label}{_oneline(f.value)}"
-                f"{detail}{tag}"
-            )
+            lines.append(f"  {_conf_marker(f.confidence, person)} {head}{detail}{tag}")
 
     if not profile.facts:
         lines.append("")
