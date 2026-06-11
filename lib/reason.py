@@ -79,7 +79,11 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
 
     gh = person.handles.get("github")
     if gh:
-        add("github_handle", f"github handle: {gh}", f"https://github.com/{gh}")
+        # Include the canonical URL in the content (not just source_url) so a
+        # social_link fact whose value is `github.com/<handle>` grounds verified —
+        # the grounding check reads the value off the observation content.
+        add("github_handle", f"github handle: {gh} (github.com/{gh})",
+            f"https://github.com/{gh}")
     if person.gh_name:
         add("gh_profile", f'profile name: "{person.gh_name}"')
     if person.gh_bio:
