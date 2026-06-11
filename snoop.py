@@ -34,6 +34,7 @@ Modes:
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 import threading
@@ -1169,27 +1170,15 @@ def _run_ground(observations_file: str | None = None) -> int:
     return 0
 
 
-def _probe_candidates(
-    person: Person, candidates: list[EmailCandidate], args: argparse.Namespace,
-    *, google_ready: bool,
+def _run_phase2_probes(
+    person: Person, bound: list[EmailCandidate], args: argparse.Namespace,
+    *, google_ready: bool, notes: list[str],
 ) -> None:
-    """Run the verification sensors (Google account, then SMTP) over candidates,
-    mutating them in place. Shared by the discovery path and the --verify path.
-
-    ENG-8 Phase-2: deliverability probes fire ONLY on candidates that bound to the
-    target in Phase 1 (_candidate_is_bound). When NOTHING binds, this is a no-op —
-    we never fall back to probing the unbound top-K, so snoop opens no socket to a
-    namesake's (or a pure pattern guess's) mailbox. The card then renders the 4A
-    honest blank instead of an unearned 'deliverable'."""
-    bound = [c for c in candidates if _candidate_is_bound(c, person)]
-    if not bound:
-        return
-
-    # Google account verification on Google-hosted candidates. Runs BEFORE SMTP
-    # so that not_found verdicts short-circuit SMTP probes on dead candidates
-    # (Google's view is authoritative when it returns a verdict). Skipped when
-    # the capability probe already told us no usable Google session exists, so
-    # "always pass --allow-google-account" stays free.
+    """The actual Phase-2 work: Google-account verification, then SMTP, over the
+    BOUND set — mutating those candidates in place. Google runs first so a
+    not_found verdict short-circuits the SMTP probe on a dead candidate. Non-ok
+    google outcomes go to the passed `notes` sink (NOT person.notes directly), so
+    a straggler abandoned at the deadline can't leak its notes into the bundle."""
     if bound and args.allow_google_account and google_ready:
         # Auto-detect Workspace MX so the user doesn't need to pass
         # --google-workspace-domain for every YC startup on Gmail.
@@ -1213,7 +1202,7 @@ def _probe_candidates(
             # browser session masquerade as a clean lookup.
             if (google_result.status in ("error", "unavailable", "empty")
                     and google_result.error_detail):
-                person.notes.append(
+                notes.append(
                     f"google_account {google_result.status}: {google_result.error_detail}"
                 )
 
@@ -1223,6 +1212,77 @@ def _probe_candidates(
         smtp_targets = _smtp_candidates(bound)
         if smtp_targets:
             verify_candidates(smtp_targets, budget=default_budget())
+
+
+def _merge_probe_verdicts(real: EmailCandidate, staged: EmailCandidate) -> None:
+    """Copy the Phase-2 probe outputs from a staged copy back onto the real
+    candidate: SMTP + Google verdict fields, plus any new google_account Source
+    (deduped by (type, url))."""
+    real.smtp_verdict = staged.smtp_verdict
+    real.account_exists = staged.account_exists
+    real.account_display_name = staged.account_display_name
+    real.account_photo_url = staged.account_photo_url
+    if staged.mx_provider:
+        real.mx_provider = staged.mx_provider
+    existing = {(s.type, s.url) for s in real.sources}
+    for s in staged.sources:
+        if (s.type, s.url) not in existing:
+            real.sources.append(s)
+
+
+def _probe_candidates(
+    person: Person, candidates: list[EmailCandidate], args: argparse.Namespace,
+    *, google_ready: bool, deadline_sec: float = _DEFAULT_DEADLINE_SEC,
+) -> RunRecord | None:
+    """Phase-2 deliverability probing, wrapped in the shared wall-clock deadline.
+
+    ENG-8: probes fire ONLY on candidates that bound to the target in Phase 1
+    (_candidate_is_bound). When NOTHING binds, this is a no-op — we never fall
+    back to probing the unbound top-K, so snoop opens no socket to a namesake's
+    (or a pure pattern guess's) mailbox; the card renders the 4A honest blank.
+
+    ENG-5/E6: the probes run in a daemon thread over deep COPIES of the bound
+    candidates; their verdicts are merged onto the real candidates ONLY if the
+    thread finishes before the deadline. A straggler abandoned at the deadline
+    keeps running against its own copies, which we discard — its verdicts are
+    never merged (the generation guarantee), and the probe phase reports a
+    `deadline-exceeded` degradation. Returns that degraded RunRecord on
+    abandonment, else None."""
+    bound = [c for c in candidates if _candidate_is_bound(c, person)]
+    if not bound:
+        return None
+
+    staged = [copy.deepcopy(c) for c in bound]
+    staged_notes: list[str] = []
+    done = threading.Event()
+
+    def worker() -> None:
+        try:
+            _run_phase2_probes(person, staged, args,
+                               google_ready=google_ready, notes=staged_notes)
+        finally:
+            done.set()
+
+    t0 = time.monotonic()
+    th = threading.Thread(target=worker, name="snoop:phase2", daemon=True)
+    th.start()
+    budget = max(deadline_sec, _PER_SENSOR_FLOOR_SEC)
+    th.join(timeout=budget)
+    if not done.is_set():
+        # Deadline exceeded — abandon the straggler, merge nothing.
+        return RunRecord(
+            sensor="probe", status="degraded",
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+            outcome="timeout",
+            reason=f"deadline-exceeded: probe phase abandoned after {budget:g}s shared budget",
+        )
+    by_addr = {c.address: c for c in bound}
+    for s in staged:
+        c = by_addr.get(s.address)
+        if c is not None:
+            _merge_probe_verdicts(c, s)
+    person.notes.extend(staged_notes)
+    return None
 
 
 def _reassess_identity(person: Person, candidates: list[EmailCandidate]) -> None:
@@ -1329,7 +1389,8 @@ def main(argv: list[str] | None = None) -> int:
         person, candidates = _verify_setup(verify_addresses, args)
         candidates.sort(key=_probe_rank)
         _probe_candidates(person, candidates, args,
-                          google_ready=_google_ready(capabilities))
+                          google_ready=_google_ready(capabilities),
+                          deadline_sec=args.deadline)
         _reassess_identity(person, candidates)
         _emit_observations(person, candidates, {}, warnings, out_path=args.out)
         return 0
@@ -1363,7 +1424,10 @@ def main(argv: list[str] | None = None) -> int:
     if gh_handle_bound:
         person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
 
-    # Fan out resolvers under the shared wall-clock deadline (E6)
+    # Fan out resolvers under the shared wall-clock deadline (E6). The SAME budget
+    # wraps Phase 2 below, so the ≤60s promise covers the slow probes too: Phase 2
+    # gets whatever is left after Phase 1 (ENG-8).
+    run_start = time.monotonic()
     results = run_pipeline(person, manual_known=manual_known, packages=packages,
                            deadline_sec=args.deadline)
     # Per-sensor records: ran/degraded from the fan-out + skipped (gated-off)
@@ -1385,8 +1449,12 @@ def main(argv: list[str] | None = None) -> int:
     # PGP corroboration (E3) of discovered addresses, then existence probes.
     if candidates and not args.no_pgp:
         run_records.append(_pgp_corroborate(candidates))
-    _probe_candidates(person, candidates, args,
-                      google_ready=_google_ready(capabilities))
+    phase2_budget = args.deadline - (time.monotonic() - run_start)
+    probe_rec = _probe_candidates(person, candidates, args,
+                                  google_ready=_google_ready(capabilities),
+                                  deadline_sec=phase2_budget)
+    if probe_rec is not None:
+        run_records.append(probe_rec)
     _reassess_identity(person, candidates)
     sys.stderr.write(_run_summary(run_records) + "\n")
 

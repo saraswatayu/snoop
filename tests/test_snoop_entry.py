@@ -421,6 +421,54 @@ def test_probe_candidates_probes_only_the_bound_subset(monkeypatch):
     assert probed == ["jane@jane.dev"]
 
 
+def _verified_domain_person():
+    return Person(name="Jane", ambiguity="single_plausible_match",
+                  personal_domains=["jane.dev"],
+                  bound_anchors=[("personal_domain_verified", "jane.dev")])
+
+
+def test_phase2_abandons_hung_probe_at_deadline(monkeypatch):
+    """ENG-8/ENG-5: the shared wall-clock wraps Phase 2. A hung SMTP probe is
+    abandoned at the deadline; _probe_candidates reports a deadline-exceeded
+    degradation, and the straggler's verdict is NEVER merged (it mutated only the
+    staged copies) — the real candidate stays unprobed."""
+    import time as _time
+    monkeypatch.setattr(snoop, "_PER_SENSOR_FLOOR_SEC", 0.1)
+    cand = EmailCandidate(address="jane@jane.dev", sources=[src("personal_site")])
+
+    def hang(cands, **kw):
+        _time.sleep(2)
+        for c in cands:
+            c.smtp_verdict = "verified"   # a late straggler mutating its COPY
+
+    monkeypatch.setattr(snoop, "verify_candidates", hang)
+    rec = snoop._probe_candidates(
+        _verified_domain_person(), [cand],
+        _probe_args(allow_google_account=False), google_ready=False, deadline_sec=0.1)
+    assert rec is not None and rec.status == "degraded"
+    assert "deadline-exceeded" in (rec.reason or "")
+    assert cand.smtp_verdict == "unprobed"   # straggler's verdict not merged
+
+
+def test_phase2_merges_verdicts_when_completed_in_time(monkeypatch):
+    """When Phase 2 finishes before the deadline, the staged probe verdicts are
+    merged back onto the real candidates."""
+    cand = EmailCandidate(address="jane@jane.dev", sources=[src("personal_site")])
+
+    def quick(cands, **kw):
+        for c in cands:
+            c.smtp_verdict = "verified"
+            c.mx_provider = "google"
+
+    monkeypatch.setattr(snoop, "verify_candidates", quick)
+    rec = snoop._probe_candidates(
+        _verified_domain_person(), [cand],
+        _probe_args(allow_google_account=False), google_ready=False, deadline_sec=5)
+    assert rec is None
+    assert cand.smtp_verdict == "verified"
+    assert cand.mx_provider == "google"
+
+
 # ---- end-to-end via main() --------------------------------------------------
 
 
