@@ -527,6 +527,51 @@ def run_pipeline(
     return results
 
 
+def _sensor_skips(
+    person: Person, *, packages: list[dict], no_smtp: bool,
+    allow_google_account: bool,
+) -> list[RunRecord]:
+    """Synthesize 'skipped' RunRecords for sensors that COULD run but didn't, with
+    a reason — the typed-degradation half of the contract. Pairs with the
+    ran/degraded records from the resolver fan-out so the bundle reads 'checked X,
+    didn't check Y because Z' instead of silently omitting a sensor."""
+    skips: list[RunRecord] = []
+
+    def skip(name: str, reason: str) -> None:
+        skips.append(RunRecord(sensor=name, status="skipped", reason=reason))
+
+    if not _gh_handle(person):
+        skip("git_emails", "no bound github handle")
+        skip("gh_profile", "no bound github handle")
+    if not person.handles.get("hn"):
+        skip("hn_profile", "no hn handle in plan")
+    if not person.personal_domains:
+        skip("personal_site", "no personal_domains in plan")
+    if not packages:
+        skip("package_registry", "no packages in plan")
+    if not allow_google_account:
+        skip("google_account", "--allow-google-account not set")
+    if no_smtp:
+        skip("smtp", "--no-smtp")
+    return skips
+
+
+def _run_summary(run_records: list[RunRecord]) -> str:
+    """One-line human run summary (8A) — rendered to stderr so the bundle on
+    stdout stays clean. e.g. 'sensors: git_emails ran 120ms · personal_site
+    skipped (no personal_domains) · pattern_gen ran 5ms'."""
+    parts: list[str] = []
+    for r in run_records:
+        if r.status == "ran":
+            ms = f" {r.elapsed_ms}ms" if r.elapsed_ms is not None else ""
+            parts.append(f"{r.sensor} ran{ms}")
+        elif r.status == "degraded":
+            parts.append(f"{r.sensor} degraded ({r.reason or r.outcome})")
+        else:
+            parts.append(f"{r.sensor} skipped ({r.reason})")
+    return "sensors: " + " · ".join(parts)
+
+
 def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
     """Merge candidates across resolvers by lowercased address.
 
@@ -1096,13 +1141,20 @@ def main(argv: list[str] | None = None) -> int:
     # Fan out resolvers under the shared wall-clock deadline (E6)
     results = run_pipeline(person, manual_known=manual_known, packages=packages,
                            deadline_sec=args.deadline)
+    # Per-sensor records: ran/degraded from the fan-out + skipped (gated-off)
+    # sensors with reasons — the typed degradation contract.
     run_records = [RunRecord.from_resolver(r) for r in results]
+    run_records += _sensor_skips(
+        person, packages=packages, no_smtp=args.no_smtp,
+        allow_google_account=args.allow_google_account,
+    )
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 
     _probe_candidates(person, candidates, args,
                       google_ready=_google_ready(capabilities))
     _reassess_identity(person, candidates)
+    sys.stderr.write(_run_summary(run_records) + "\n")
 
     # The deliverable: the observation bundle the host model reasons over.
     # (Identity state + resolver notes are observations even with no candidates.)

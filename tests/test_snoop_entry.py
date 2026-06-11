@@ -1058,6 +1058,29 @@ def test_bundle_carries_per_sensor_timing(monkeypatch, capsys):
     assert all(s["status"] in ("ran", "skipped", "degraded") for s in bundle["sensors"])
 
 
+def test_bundle_reports_skipped_sensors_with_reasons(monkeypatch, capsys):
+    """The typed degradation contract: gated-off sensors appear as skipped with a
+    reason, so the bundle says 'didn't check Y because Z' rather than omitting."""
+    import json as _json
+    _resolver_setup(monkeypatch)  # no hn handle, no personal_domains, no packages
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    by = {s["sensor"]: s for s in bundle["sensors"]}
+    assert by["personal_site"]["status"] == "skipped"
+    assert "personal_domains" in by["personal_site"]["reason"]
+    assert by["hn_profile"]["status"] == "skipped"
+    assert by["smtp"]["status"] == "skipped" and by["smtp"]["reason"] == "--no-smtp"
+    assert by["google_account"]["status"] == "skipped"
+
+
+def test_run_summary_to_stderr(monkeypatch, capsys):
+    _resolver_setup(monkeypatch)
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    err = capsys.readouterr().err
+    assert err.startswith("sensors:")
+    assert "skipped" in err
+
+
 # ---- --no-search escape hatch -----------------------------------------------
 
 
