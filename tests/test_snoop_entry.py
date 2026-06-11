@@ -1114,6 +1114,47 @@ def test_no_pgp_flag_skips_corroboration(monkeypatch, capsys):
     assert sensors["pgp"]["status"] == "skipped"
 
 
+def test_rel_me_emits_observation_and_anchor(monkeypatch, capsys):
+    """E2: a bidirectional rel=me link emits a rel_me observation and records a
+    rel_me_verified anchor the host can weigh."""
+    import json as _json
+    from lib.rel_me import RelMeLink
+    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
+        name=name, ambiguity="single_plausible_match",
+        personal_domains=["alice.dev"],
+        bound_anchors=[("github_name_match", name)],
+    ))
+    empty = ResolverResult(resolver="x", candidates=[], status="empty")
+    for fn in ("fetch_git_emails", "fetch_gh_profile",
+               "fetch_personal_site", "fetch_pattern_candidates"):
+        monkeypatch.setattr(snoop, fn, lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
+    monkeypatch.setattr(snoop, "verify_rel_me", lambda domain, **kw: [
+        RelMeLink(platform="github", url="https://github.com/alice",
+                  bidirectional=True, tier="asserted"),
+    ])
+    snoop.main(["Alice", "--no-smtp", "--no-pgp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    rel = [o for o in bundle["observations"] if o["type"] == "rel_me"]
+    assert rel and "github.com/alice" in rel[0]["content"]
+    assert "bidirectional" in rel[0]["content"]
+    # the verified link is recorded as an anchor (emitted as an anchor obs)
+    anchors = "\n".join(o["content"] for o in bundle["observations"]
+                        if o["type"] == "anchor")
+    assert "rel_me_verified" in anchors
+    sensors = {s["sensor"]: s for s in bundle["sensors"]}
+    assert sensors["rel_me"]["status"] == "ran"
+
+
+def test_rel_me_skipped_without_personal_domains(monkeypatch, capsys):
+    import json as _json
+    _resolver_setup(monkeypatch)  # no personal_domains
+    snoop.main(["Alice Smith", "--no-smtp", "--no-pgp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    sensors = {s["sensor"]: s for s in bundle["sensors"]}
+    assert sensors["rel_me"]["status"] == "skipped"
+
+
 # ---- --no-search escape hatch -----------------------------------------------
 
 

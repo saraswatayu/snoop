@@ -36,3 +36,4 @@ def _stub_unconditional_network(monkeypatch):
         lambda emails, **kw: ResolverResult(resolver="pgp", candidates=[], status="empty"),
         raising=False,
     )
+    monkeypatch.setattr(snoop, "verify_rel_me", lambda domain, **kw: [], raising=False)

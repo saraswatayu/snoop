@@ -53,6 +53,7 @@ from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.pgp_keyserver import fetch_pgp_emails
+from lib.rel_me import verify_rel_me
 from lib.personal_site import fetch_personal_site
 from lib.schema import (
     BUNDLE_SCHEMA_VERSION,
@@ -553,6 +554,7 @@ def _sensor_skips(
         skip("hn_profile", "no hn handle in plan")
     if not person.personal_domains:
         skip("personal_site", "no personal_domains in plan")
+        skip("rel_me", "no personal_domains in plan")
     if not packages:
         skip("package_registry", "no packages in plan")
     if not allow_google_account:
@@ -587,6 +589,46 @@ def _pgp_corroborate(candidates: list[EmailCandidate]) -> RunRecord:
             if (s.type, s.url) not in existing:
                 c.sources.append(s)
     return RunRecord.from_resolver(result)
+
+
+def _rel_me_collect(person: Person) -> tuple[list, RunRecord]:
+    """Run the rel=me / Bluesky identity sensor (E2) over the personal domains.
+    A bidirectional rel="me" is self-attested identity binding (the IndieAuth
+    model) — record asserted ones as bound_anchors the host can weigh (it binds
+    domain↔profile; the host still judges it's the target). Returns the links +
+    a RunRecord. Best-effort; never raises."""
+    links: list = []
+    t0 = time.monotonic()
+    for dom in person.personal_domains[:3]:
+        try:
+            links.extend(verify_rel_me(dom))
+        except Exception:  # noqa: BLE001 — sensor must never sink the run
+            pass
+    for link in links:
+        if getattr(link, "bidirectional", False):
+            anchor = ("rel_me_verified", link.url)
+            if anchor not in person.bound_anchors:
+                person.bound_anchors.append(anchor)
+    rec = RunRecord(sensor="rel_me", status="ran",
+                    elapsed_ms=int((time.monotonic() - t0) * 1000),
+                    outcome=f"{len(links)} link(s)")
+    return links, rec
+
+
+def _rel_me_observations(links: list) -> list[reason.Observation]:
+    """Shape rel=me links into observations the host reasons over (ids assigned
+    by the bundle builder)."""
+    obs: list[reason.Observation] = []
+    for link in links:
+        verdict = ("bidirectional (self-attested both ways)"
+                   if getattr(link, "bidirectional", False)
+                   else "one-way (site→profile only)")
+        content = f"rel=me {link.platform}: {link.url} — {verdict}"
+        if getattr(link, "detail", ""):
+            content += f"; {link.detail}"
+        obs.append(reason.Observation(id="", type="rel_me", content=content,
+                                      source_url=link.url))
+    return obs
 
 
 def _run_summary(run_records: list[RunRecord]) -> str:
@@ -852,17 +894,19 @@ def _resolution_gaps(person: Person) -> list[str]:
 def _build_bundle(person: Person, candidates: list[EmailCandidate],
                   plan: dict[str, Any], warnings: list[str],
                   *, resolution_gaps: list[str] | None = None,
-                  run_records: list[RunRecord] | None = None) -> dict[str, Any]:
+                  run_records: list[RunRecord] | None = None,
+                  rel_me_links: list | None = None) -> dict[str, Any]:
     """Build the raw observation bundle the host model reasons over.
 
     snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
     MX); this dumps what those sensors saw, typed and cited, plus any host-model
-    web-search observations. No binding, no rendering — the host is the analyst.
-    `resolution_gaps` (when present) coaches a richer Step-1 resolution + re-run;
-    `run_records` stamp per-sensor status + elapsed_ms into the bundle (E6)."""
+    web-search observations and rel=me identity cross-links. No binding, no
+    rendering — the host is the analyst. `resolution_gaps` (when present) coaches
+    a richer Step-1 resolution + re-run; `run_records` stamp per-sensor status +
+    elapsed_ms into the bundle (E6)."""
     observations = reason.build_evidence(person, candidates)
-    base = len(observations)
-    for i, o in enumerate(_work_search_observations(plan), start=base + 1):
+    extra = _work_search_observations(plan) + _rel_me_observations(rel_me_links or [])
+    for i, o in enumerate(extra, start=len(observations) + 1):
         observations.append(reason.Observation(
             id=f"o{i}", type=o.type, content=o.content, source_url=o.source_url,
         ))
@@ -894,12 +938,14 @@ def _emit_observations(person: Person, candidates: list[EmailCandidate],
                        plan: dict[str, Any], warnings: list[str],
                        *, out_path: str | None = None,
                        resolution_gaps: list[str] | None = None,
-                       run_records: list[RunRecord] | None = None) -> None:
+                       run_records: list[RunRecord] | None = None,
+                       rel_me_links: list | None = None) -> None:
     """Write the observation bundle to stdout, or to `out_path` (with a printed
     pointer + the ready-to-run --ground command) when --out is given."""
     bundle = _build_bundle(person, candidates, plan, warnings,
                            resolution_gaps=resolution_gaps,
-                           run_records=run_records)
+                           run_records=run_records,
+                           rel_me_links=rel_me_links)
     text = json.dumps(bundle, indent=2, default=str)
     if not out_path:
         sys.stdout.write(text)
@@ -1184,6 +1230,12 @@ def main(argv: list[str] | None = None) -> int:
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 
+    # rel=me identity cross-links (E2) over the personal domains.
+    rel_me_links: list = []
+    if person.personal_domains:
+        rel_me_links, rel_me_rec = _rel_me_collect(person)
+        run_records.append(rel_me_rec)
+
     # PGP corroboration (E3) of discovered addresses, then existence probes.
     if candidates and not args.no_pgp:
         run_records.append(_pgp_corroborate(candidates))
@@ -1198,7 +1250,7 @@ def main(argv: list[str] | None = None) -> int:
     # resolution_gaps coaches a richer Step-1 pass when the plan was thin.
     _emit_observations(person, candidates, {} if args.no_search else plan, warnings,
                        out_path=args.out, resolution_gaps=_resolution_gaps(person),
-                       run_records=run_records)
+                       run_records=run_records, rel_me_links=rel_me_links)
     return 0
 
 
