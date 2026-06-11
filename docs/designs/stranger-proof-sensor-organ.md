@@ -129,18 +129,25 @@ Expansions accepted this session:
 - **rel=me scope v1 (E2):** personal-site ↔ Mastodon / Bluesky / GitHub
   bidirectional links only.
 - **Probe-ordering heuristic** (replacing the deleted scorer's `belongs~`
-  ghost): non-pattern source > pattern-only, then source count — until the E1
-  ledger supersedes it with measured ordering.
+  ghost): non-pattern source > pattern-only, then source count.
+  **Superseded by ENG-8** — this heuristic stops being a *ranking* over all
+  candidates and becomes the *tiebreak ordering within the bound set* (the
+  budget order among candidates that already passed the identity gate). The E1
+  ledger still supersedes the tiebreak with measured ordering later.
 - **Design-doc Open Questions 2–4** (consent-UX wording, getuserrealm opt-out
   flag, stranger-machine detection): deliberately left open; resolved during
   implementation at their milestones (M1, M3, M2 respectively).
 - **In-branch merge order & honest total:** baseline B (~1 CC-week) + E1
-  (4–5 CC-days) + E2/E3/E4/E6 (~2 CC-days) ≈ 2.5–3 CC-weeks on one branch.
-  Sequencing inside the branch: M1 loop contract → calibration sprint →
-  M2 degradation/consent → M3 enrichment/provenance → E2/E3/E6 sensors &
-  deadline → E1 ledger last (it consumes E6's timing data and the calibration
-  baseline). Each stage lands green before the next starts (WIP commits per
-  continuous checkpoint mode).
+  (4–5 CC-days) + E2/E3/E4/E6 (~2 CC-days) + ENG-8/9/10 identity engine
+  (~2 CC-days: ENG-8 probe phasing ~0.5d, ENG-9/10 SKILL.md doctrine + worked
+  example ~1–1.5d) ≈ 3–3.5 CC-weeks on one branch. Sequencing inside the
+  branch: M1 loop contract → **ENG-8 probe-gate** (lands with the pipeline
+  work, before sensors so the two-phase shape is fixed once) → calibration
+  sprint → M2 degradation/consent → M3 enrichment/provenance → E2/E3/E6
+  sensors & deadline → **ENG-9/10 resolution + tiered doctrine** (SKILL.md, after
+  the sensors exist to fan out over) → E1 ledger last (consumes E6 timing + the
+  calibration baseline). Each stage lands green before the next starts (WIP
+  commits per continuous checkpoint mode).
 
 ## Review findings incorporated (Sections 1–10, all user-approved)
 - **1A** Ledger writes are best-effort/never-fatal: stderr warning only; card
@@ -242,6 +249,119 @@ Expansions accepted this session:
   network; calibration is **two runs** — baseline now (the Assignment,
   validates harness + current sensors), final run at branch end producing the
   README numbers.
+
+## The identity engine (ENG-8..10, 2026-06-11, all user-approved)
+
+The three axes finally drive the *pipeline*, not just the render. snoop's worst
+failure is binding a namesake; `--ground` polices the **provenance axis**
+(citations exist) but gives no *independent* check on the **identity axis**.
+These three amendments build that independent check and stop snoop from
+spending deliverability probes before identity is settled. They are
+orchestration + contract changes; the only snoop.py change is the probe phasing
+in ENG-8.
+
+- **ENG-8 (probe-gate: identity binds before deliverability spends).** Today
+  `run_pipeline` fans the cheap resolvers out under the E6 deadline, then
+  `_probe_candidates` (snoop.py:995+) *orders* the deliverability probes (SMTP
+  RCPT, Google People API) by `_probe_rank` (the deleted scorer's `belongs~`
+  ghost) and probes top-K. The Phase-1/Phase-2 boundary already exists
+  structurally; this amendment upgrades the second phase from **ordering** to
+  **gating**:
+  - **Phase 1 (bind):** the cheap resolvers (git_emails, gh_profile,
+    personal_site, pattern_gen, hn, package, rel_me, pgp) produce candidates;
+    the host decides *which candidates belong to the target*. The
+    candidate-binding predicate is a **host-side judgment over the bundle**
+    (not a new snoop.py field): a candidate binds when ≥2 of
+    {observed-source sits on a bound-anchor surface, `employer_match`,
+    rel=me-bidirectional, PGP owner-UID} agree on it. This is distinct from the
+    Person-level `bound_anchors` (schema.py) that says "we found the right
+    person at all"; Phase 1 asks the narrower "does *this address* belong to
+    that person."
+  - **Phase 2 (probe):** SMTP/Google probes fire ONLY on bound candidates,
+    ordered among them by the demoted `_probe_rank` tiebreak. The Google
+    probe's returned `google_display_name`/`name_match` is itself identity
+    evidence, so it feeds back **single-shot** to confirm or split a binding
+    (the Matt-Smith case) — it updates the binding once and does not re-trigger
+    a fresh Phase 2, matching the existing one-invocation
+    `account_exists != "unprobed"` guard (snoop.py:738). No probe→bind→probe
+    loop.
+  - **Zero bound candidates ⇒ Phase 2 is a no-op.** `_probe_candidates`
+    returns without probing; the bundle carries the 4A honest-blank state. It
+    NEVER falls back to probing unbound top-K (the old behavior), so snoop
+    stops opening sockets to *namesakes'* mailboxes — an honesty win, not just
+    a budget one. (`pattern_gen` always emits candidates, snoop.py:491; those
+    are pure-pattern/unbound and are exactly what must not be probed when
+    nothing binds.)
+  Effect: fewer probes; the card never renders "deliverable" for an address not
+  tied to the person. Supersedes the 0E probe-ordering note (now a
+  within-bound-set tiebreak — a pure doctrine change, `_probe_rank` stays an
+  ordering key). **Budget:** landing the gate extends the ENG-5
+  generation-token deadline to wrap Phase 2 as well (today `_probe_candidates`
+  runs outside the E6 wall-clock on per-probe socket timeouts only), so the
+  ≤60s promise finally covers the slow part. Runs *after* the ENG-3 resolution
+  loop.
+
+- **ENG-9 (multi-angle blind resolution + refutation — the namesake killer).**
+  Two host-side reasoning disciplines (SKILL.md, no snoop.py code), feeding the
+  ENG-8 Phase-1 binding:
+  - **Multi-angle resolution:** resolve the person from independent angles —
+    name+employer, personal domain, handle, published work — each *blind* to
+    the others, driving the bounded resolution loop (ENG-1/3). Blind angles
+    can't cross-contaminate, so agreement across them is real corroboration.
+  - **Refutation pass:** before a binding holds, the host argues the
+    counter-case ("this is a *different* person with the same name — what
+    evidence would I expect if so, and is it present?"). The aggregation rule:
+    any refutation that is itself **grounded** (cites real counter-evidence in
+    the bundle) splits the binding to ambiguity; *ungrounded* disagreement is
+    discarded — it's the skeptic's prior, not evidence. Weak/no grounded
+    refutation → binding holds; one grounded refutation → downgrade to `~` or
+    split. This strengthens the **identity axis**; it does NOT replace
+    `--ground`, which stays deterministic on the **provenance axis** (its
+    failure modes must stay independent of the reasoner). Two verifiers, two
+    axes, both kept.
+
+- **ENG-10 (tiered orchestration — dynamic workflows where the target earns
+  it).** ENG-9's disciplines are cheap to *say* and easy to skimp under time
+  pressure; make them mechanical via a tiered doctrine in SKILL.md:
+  - **Tier 1 (default, most targets):** single resolution pass → sense
+    (two-phase per ENG-8) → reason → ground. No workflow. Cheap and fast.
+  - **Tier 2 (hard target):** the host drives snoop from inside a **dynamic
+    workflow** — `parallel()` blind resolution angles → merge → `parallel()`
+    blind refutation skeptics → bind survivors → `--ground` → card. Each
+    blind subagent runs `snoop.py` + WebSearch and **receives ONLY the original
+    target ask + its own angle's seed** (name+employer / domain / handle /
+    work) — never another angle's intermediate candidates; the merge happens
+    only after all angles return. That enforcement is what makes the blindness
+    a contract, not a hope — and the blindness is load-bearing: it is the
+    identity-axis analog of why ground is deterministic (independent failure
+    modes). When the merge concatenates N blind bundles, the orchestration
+    step **re-namespaces observation IDs across bundles** before the single
+    deterministic `--ground` (each bundle numbers from `w1` independently;
+    naive concat collides IDs and mis-attributes citations). "Bind survivors"
+    uses the ENG-9 grounded-refutation rule. This is the deep-research harness
+    made concrete with snoop as the tool it calls; the platform seam
+    (meeting-prep / due-diligence in TODOS) is the same workflow with a
+    different synthesis step.
+  - **Difficulty trigger (mechanical, not vibe):** Tier 2 fires when the Tier-1
+    bundle reports `ambiguity == "multiple_plausible_matches"` (schema.py) OR
+    still carries unresolved `resolution_gaps` after the ENG-3 loop bound.
+    High-stakes (e.g. pre-date safety) is the only host-discretion trigger.
+    Binding the trigger to bundle signals keeps the YAGNI split auditable
+    rather than a rationalization for always/never escalating.
+  Constraints the doctrine states so it stays honest: the workflow is
+  **host-side orchestration calling `snoop.py` as a tool** — never code inside
+  snoop (sensor, not orchestrator; do not rebuild the deleted brain); workflows
+  are **non-interactive**, so Tier 2 runs in the consent-pre-armed or no-probe
+  lane (the Google-probe consent decision cannot happen mid-run — it is a
+  pre-run `--allow-google-account` flag, snoop.py:558); Tier 2 `log()`s what it
+  dropped so a hard target never silently reads as a clean one; and Tier 2 is
+  **opt-in by the difficulty trigger above, never every run** (cost + the
+  one-target-manual-research spirit — and multi-angle is still ONE target from
+  many angles, not bulk). Acceptance: extend ENG-7's end-to-end acceptance test
+  to assert the **Tier-1 worked example** runs green against the real CLI
+  (it is CLI-drivable); Tier 2 stays doc-only (a SKILL.md namesake worked
+  example + the trigger above), since its orchestration genuinely lives
+  host-side and cannot be unit-tested from snoop's suite.
 
 ## The Assignment (carried from the design doc, amended per T5)
 Fill the calibration fixture to N≥25 real public-trail targets under the
