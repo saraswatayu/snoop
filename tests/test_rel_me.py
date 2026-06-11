@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from lib.fetch import FetchBlocked, FetchResult
+from lib.fetch import FetchBlocked
 from lib.rel_me import (
     RelMeLink,
     _absolute_https,
@@ -18,29 +18,7 @@ from lib.rel_me import (
     _links_back_to_domain,
     verify_rel_me,
 )
-
-
-def make_fetch(routes: dict):
-    """A fake fetch_fn routed by exact URL.
-
-    A mapped value is either:
-      - an html string        -> 200 text/html FetchResult
-      - a (status, ctype, body) tuple -> a tailored FetchResult
-      - an Exception instance -> raised (FetchBlocked / OSError)
-    Unmapped URLs raise FetchBlocked (simulating a host-not-public / 404-ish
-    refusal), so a test only wires the endpoints it cares about.
-    """
-    def fetch_fn(url, **kw):
-        if url not in routes:
-            raise FetchBlocked(f"unmapped url: {url}")
-        resp = routes[url]
-        if isinstance(resp, Exception):
-            raise resp
-        if isinstance(resp, tuple):
-            status, ctype, body = resp
-            return FetchResult(url=url, status=status, content_type=ctype, text=body)
-        return FetchResult(url=url, status=200, content_type="text/html", text=resp)
-    return fetch_fn
+from tests._http_harness import make_fetch  # shared fake-HTTP harness (ENG-7)
 
 
 # ---- _extract_rel_me_hrefs --------------------------------------------------

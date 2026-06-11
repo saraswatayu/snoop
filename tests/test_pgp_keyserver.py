@@ -9,6 +9,7 @@ as a FetchResult since 404 isn't a redirect or guard refusal).
 
 from __future__ import annotations
 
+import functools
 import urllib.parse
 
 import pytest
@@ -19,8 +20,13 @@ from lib.pgp_keyserver import (
     by_email_url,
     fetch_pgp_emails,
 )
+from tests._http_harness import make_fetch as _make_fetch  # shared harness (ENG-7)
 
 _BASE = "https://keys.openpgp.org/vks/v1/by-email/"
+
+# The keyserver answers a non-UID with a 404 (not a guard refusal), so unmapped
+# URLs return a 404 FetchResult rather than raising FetchBlocked.
+make_fetch = functools.partial(_make_fetch, unmapped="notfound")
 
 
 def _key_result(url: str) -> FetchResult:
@@ -31,31 +37,6 @@ def _key_result(url: str) -> FetchResult:
         content_type="application/pgp-keys",
         text="-----BEGIN PGP PUBLIC KEY BLOCK-----\n...\n-----END PGP PUBLIC KEY BLOCK-----\n",
     )
-
-
-def _notfound_result(url: str) -> FetchResult:
-    """A 404 response — address is not a verified UID on the keyserver."""
-    return FetchResult(url=url, status=404, content_type="text/plain", text="not found")
-
-
-def make_fetch(routes, *, record=None):
-    """A fake fetch_fn(url, *, allowed_content_types=...) -> FetchResult.
-
-    `routes` maps a verified email's url-encoded URL to a FetchResult (or an
-    Exception to raise). Any URL not present in `routes` returns a 404
-    FetchResult (the default "not on the keyserver" answer). If `record` is a
-    list, every (url, allowed_content_types) call is appended to it.
-    """
-    def fetch_fn(url, *, allowed_content_types=None):
-        if record is not None:
-            record.append((url, allowed_content_types))
-        if url in routes:
-            resp = routes[url]
-            if isinstance(resp, Exception):
-                raise resp
-            return resp
-        return _notfound_result(url)
-    return fetch_fn
 
 
 # ---- by_email_url -----------------------------------------------------------

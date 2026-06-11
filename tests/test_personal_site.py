@@ -14,24 +14,10 @@ from lib.personal_site import (
     _is_extractable,
     fetch_personal_site,
 )
+from tests._http_harness import make_http  # shared fake-HTTP harness (ENG-7)
 
 
 NOW = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
-
-
-def make_http(routes: dict):
-    """A fake http_get returning the mapped body for exact URL matches,
-    None for 404, or raising for explicit exceptions. Exact-match so a
-    test that maps both "/" and "/about" doesn't have the first one
-    swallow requests to the second."""
-    def get(url):
-        if url in routes:
-            resp = routes[url]
-            if isinstance(resp, Exception):
-                raise resp
-            return resp
-        return None  # treat unmapped URLs as 404
-    return get
 
 
 # ---- _is_extractable --------------------------------------------------------
