@@ -211,6 +211,37 @@ Expansions accepted this session:
   vocabularies — `[+]`/`[?]` fact-level provenance marks AND the `✓`/`~`/`·`
   identity band (render.py:57) — one collapse rule for every untrusted string
   entering a card line; T9/T10 forgery suites attempt both glyph sets.
+- **ENG-3 (T-A, loop bound):** the resolution loop exits on gaps-quiet OR 2
+  re-resolve rounds OR a round adding no new observations — whichever first.
+  The engine stays maximal; pathological targets terminate in ≤3 passes.
+- **ENG-4 (T-B, projections):** RunRecord stays one type with three explicit
+  projection serializers (`to_bundle_timing`, `to_ledger_line`,
+  `to_calibration_row`), each with a CI leak test asserting its exact field
+  set. The 3C allowlist test becomes the ledger projection's test.
+- **ENG-5 (T-C group 1, ledger & concurrency contracts):** ledger appends are
+  one `os.write()` of pre-encoded bytes with an `<4KB` assert; the file opens
+  `O_NOFOLLOW`, mode 0600 in a 0700 `~/.snoop/`; all three artifacts (bundle,
+  ledger line, calibration row) carry their own version field and every
+  consumer asserts its input's version; the deadline uses a generation token —
+  results from abandoned stragglers are never merged after the deadline; the
+  per-call timeout inventory is an E6 **precondition** (audit every resolver's
+  socket/subprocess calls before the rewrite starts).
+- **ENG-6 (T-C group 2, fetch & sensor semantics):** the pinned-IP fetch
+  verifies TLS against the ORIGINAL hostname via SNI (`server_hostname=`) —
+  certificate verification is never disabled; first-hop http→https upgrade is
+  allowed for the personal site itself, off-site profile fetches are
+  HTTPS-only; on multi-profile pages only bidirectional pairs bind and
+  conflicting bidirectional identities are an ambiguity signal, not a binding;
+  Bluesky domain handles require runtime DID resolution tied to the claimed
+  profile; the PGP tier is **email-control evidence (deliverability axis)** —
+  never identity-binding by itself (three-axes lesson).
+- **ENG-7 (T-C group 3, test infrastructure):** lib/_fetch.py ships with a
+  shared fake-HTTP test harness all fetch sensors use (SSRF / timeout /
+  redirect / cap / parse cases in one place); one end-to-end acceptance test
+  runs the documented SKILL.md flow against the real CLI with monkeypatched
+  network; calibration is **two runs** — baseline now (the Assignment,
+  validates harness + current sensors), final run at branch end producing the
+  README numbers.
 
 ## The Assignment (carried from the design doc, amended per T5)
 Fill the calibration fixture to N≥25 real public-trail targets under the

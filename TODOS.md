@@ -1,5 +1,19 @@
 # TODOS
 
+## Render & Trust
+
+### Decide + document the press-confirmed-role tier (✓ vs ~)
+
+**What:** Write the rule for whether a press-confirmed (not self-published) role renders ✓ or ~, as part of the per-sensor evidence-tier table; pin with 2 tests.
+
+**Why:** The one taste call left open after the prime-time dogfood ("I leaned ✓ with a cited basis; reasonable people could differ"). Unwritten taste calls get re-litigated on every render change.
+
+**Context:** Three-axes framing: press confirmation is provenance strength, not identity-binding. Natural home = the evidence-tier table being written for the rel=me/PGP sensors (eng review T-minor C / ENG-6, docs/designs/stranger-proof-sensor-organ.md).
+
+**Effort:** S (human) / S (CC)
+**Priority:** P2
+**Depends on:** the per-sensor evidence-tier table (same branch)
+
 ## Sensors & Learning
 
 ### Ledger phase 2 — auto-applied probe ordering + retire interim heuristic
