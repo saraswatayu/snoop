@@ -282,6 +282,98 @@ def test_smtp_candidates_handles_malformed_address():
     assert [c.address for c in targets] == ["real@openai.com"]
 
 
+# ---- ENG-8 Phase-1: _candidate_is_bound (identity binds before probing) -----
+
+
+def _gh_bound_person(name="Peter Steinberger", handle="steipete", **kw):
+    return Person(name=name, handles={"github": handle},
+                  ambiguity="single_plausible_match",
+                  bound_anchors=[("github_name_match", name),
+                                 ("github_handle_exists", handle)], **kw)
+
+
+def test_pattern_only_on_employer_domain_does_not_bind():
+    """A pure name×domain guess on the employer domain scores ONE signal
+    (employer_match) and must NOT bind — this is the namesake-mailbox we refuse
+    to probe."""
+    person = _gh_bound_person(employer=Employer(name="OpenAI", domains=["openai.com"]))
+    c = EmailCandidate(address="guess@openai.com", sources=[src("pattern")],
+                       employer_match=True)
+    assert snoop._candidate_is_bound(c, person) is False
+
+
+def test_pattern_only_on_rel_me_domain_does_not_bind():
+    """A guess on a rel=me-verified personal domain has only the ownership signal
+    (the domain is the target's) — not that THIS localpart is real. One signal."""
+    person = Person(name="Jane", ambiguity="single_plausible_match",
+                    personal_domains=["jane.dev"],
+                    bound_anchors=[("personal_domain_verified", "jane.dev")])
+    c = EmailCandidate(address="guess@jane.dev", sources=[src("pattern")])
+    assert snoop._candidate_is_bound(c, person) is False
+
+
+def test_git_commit_on_bound_handle_plus_employer_binds():
+    """Observed in the bound GitHub account's commits (anchored observation) AND
+    on the employer domain — two independent signals → bound."""
+    person = _gh_bound_person(employer=Employer(name="OpenAI", domains=["openai.com"]))
+    c = EmailCandidate(address="pete@openai.com", sources=[src("git_commit")],
+                       employer_match=True)
+    assert snoop._candidate_is_bound(c, person) is True
+
+
+def test_github_surface_does_not_anchor_when_handle_unbound():
+    """A gh_profile reading is an anchored observation only when the handle bound.
+    With a bare handle_exists hint, the surface does NOT count — so employer_match
+    alone is one signal and the candidate stays unbound."""
+    person = Person(name="X", handles={"github": "untrusted"},
+                    ambiguity="single_plausible_match",
+                    employer=Employer(name="OpenAI", domains=["openai.com"]),
+                    bound_anchors=[("github_handle_exists", "untrusted")])
+    c = EmailCandidate(address="x@openai.com", sources=[src("gh_profile")],
+                       employer_match=True)
+    assert snoop._candidate_is_bound(c, person) is False
+
+
+def test_personal_site_on_verified_domain_binds():
+    """An address published on a personal_site whose domain is rel=me-verified:
+    anchored observation (real reading on a bound surface) + rel=me ownership =
+    two signals → bound."""
+    person = Person(name="Jane", ambiguity="single_plausible_match",
+                    personal_domains=["jane.dev"],
+                    bound_anchors=[("personal_domain_verified", "jane.dev")])
+    c = EmailCandidate(address="jane@jane.dev", sources=[src("personal_site")])
+    assert snoop._candidate_is_bound(c, person) is True
+
+
+def test_pgp_alone_does_not_bind_but_pgp_plus_employer_does():
+    """ENG-6: PGP is email-control evidence (deliverability axis), never
+    identity-binding by itself — one signal. PGP + employer_match → two → bound."""
+    person = _gh_bound_person(employer=Employer(name="OpenAI", domains=["openai.com"]))
+    pgp_only = EmailCandidate(address="pete@proton.me", sources=[src("pgp")])
+    assert snoop._candidate_is_bound(pgp_only, person) is False
+    pgp_employer = EmailCandidate(address="pete@openai.com",
+                                  sources=[src("pgp")], employer_match=True)
+    assert snoop._candidate_is_bound(pgp_employer, person) is True
+
+
+def test_manual_known_short_circuits_to_bound():
+    """The --verify / --known subject is supplied by the user; it is always
+    probeable regardless of discovered signals."""
+    person = Person(name="", ambiguity="insufficient_identity_evidence")
+    c = EmailCandidate(address="typed@acme.com", sources=[src("manual_known")])
+    assert snoop._candidate_is_bound(c, person) is True
+
+
+def test_git_commit_gmail_on_bound_handle_is_one_signal():
+    """A personal gmail in the bound account's commits is an anchored observation
+    (one signal) but nothing else corroborates it — not bound, so no Google
+    existence probe fires on it. Surfaced as a candidate, just not probed."""
+    person = _gh_bound_person()
+    c = EmailCandidate(address="pete@gmail.com", sources=[src("git_commit")],
+                       is_personal_provider=True)
+    assert snoop._candidate_is_bound(c, person) is False
+
+
 # ---- end-to-end via main() --------------------------------------------------
 
 

@@ -611,9 +611,18 @@ def _rel_me_collect(person: Person) -> tuple[list, RunRecord]:
     t0 = time.monotonic()
     for dom in person.personal_domains[:3]:
         try:
-            links.extend(verify_rel_me(dom))
+            dom_links = verify_rel_me(dom)
         except Exception:  # noqa: BLE001 — sensor must never sink the run
-            pass
+            continue
+        links.extend(dom_links)
+        # A bidirectional link proves THIS domain belongs to the target — record a
+        # domain-bearing anchor (distinct from the profile-side rel_me_verified
+        # anchor below) so the ENG-8 binding gate knows which personal domain is
+        # owned, not just that some profile cross-linked.
+        if any(getattr(link, "bidirectional", False) for link in dom_links):
+            anchor = ("personal_domain_verified", dom.lower())
+            if anchor not in person.bound_anchors:
+                person.bound_anchors.append(anchor)
     for link in links:
         if getattr(link, "bidirectional", False):
             anchor = ("rel_me_verified", link.url)
@@ -794,14 +803,93 @@ def _autodetect_workspace_domains(
 
 
 def _probe_rank(c: EmailCandidate) -> tuple:
-    """Ordering key for which candidates to probe (and emit) first. No scorer:
-    rank by whether the address was actually observed (any non-pattern source)
-    over a pure name×domain guess, then by how many sources corroborate it, then
-    address for determinism. The host model still reasons over every candidate;
-    this only decides probe order so an observed address is tried before a guess
-    that might hit a stranger's mailbox on a multi-user Workspace tenant."""
+    """Tiebreak ORDERING within the bound set (ENG-8): rank by whether the address
+    was actually observed (any non-pattern source) over a pure name×domain guess,
+    then by how many sources corroborate it, then address for determinism. Since
+    the ENG-8 gate now decides WHICH candidates are eligible to probe at all, this
+    only sequences the survivors so an observed address is tried first; it is no
+    longer a ranking that could let an unbound guess be probed."""
     observed = any(s.type != "pattern" for s in c.sources)
     return (0 if observed else 1, -len(c.sources), c.address)
+
+
+# ENG-8 Phase-1 — candidate binding (identity binds before deliverability spends).
+# Surfaces whose identity is the target's GitHub account: an address observed on
+# one of these is an anchored observation ONLY when the handle itself bound.
+_GITHUB_SURFACES = frozenset({"git_commit", "gh_profile", "gh_readme", "github_repo"})
+# Surfaces tied to a personal domain the target owns.
+_DOMAIN_SURFACES = frozenset({"personal_site", "whois"})
+
+
+def _github_identity_bound(person: Person) -> bool:
+    """True when a VALIDATING github anchor bound the handle (name/employer/
+    personal-domain match) — not merely that the handle exists. A bare
+    `github_handle_exists` is an untrusted hint and does not anchor an address."""
+    return any(t.startswith("github") and t != "github_handle_exists"
+               for t, _ in person.bound_anchors)
+
+
+def _verified_personal_domains(person: Person) -> set[str]:
+    """Personal domains proven to belong to the target by a bidirectional rel=me
+    (the IndieAuth self-attestation). This is the rel=me identity signal."""
+    return {str(v).lower() for t, v in person.bound_anchors
+            if t == "personal_domain_verified"}
+
+
+def _anchored_surface_domains(person: Person) -> set[str]:
+    """Personal domains trusted enough that a reading observed ON them is an
+    anchored observation — rel=me-verified domains plus a github blog/domain
+    that matched a declared personal domain."""
+    doms = _verified_personal_domains(person)
+    doms |= {str(v).lower() for t, v in person.bound_anchors
+             if t == "github_personal_domain_match"}
+    return doms
+
+
+def _candidate_is_bound(c: EmailCandidate, person: Person) -> bool:
+    """ENG-8 Phase-1: does THIS ADDRESS belong to the target? (Distinct from
+    Person.bound_anchors, which only says 'we found the right person at all.')
+
+    A candidate binds when ≥2 INDEPENDENT evidence classes agree on it:
+      1. anchored observation — a real (non-pattern) source on a surface whose
+         identity is bound: a GitHub surface when the handle bound, or a
+         personal_site/whois reading on a bound personal domain;
+      2. employer_match — the address domain is the resolved current employer's;
+      3. rel=me ownership — the address domain is a bidirectionally-verified
+         personal domain;
+      4. PGP owner-UID — keys.openpgp.org returned a key whose UID is this address.
+
+    A `manual_known` source (the --verify / --known lane: the user supplied the
+    address AS the subject) short-circuits to bound. A pure pattern_gen guess
+    reaches at most one signal — employer_match XOR rel=me ownership, never both —
+    so it never binds: snoop will not open a socket to a namesake's mailbox on the
+    strength of a name×domain template. PGP alone is one signal (email-control
+    evidence, deliverability axis), never identity-binding by itself (ENG-6).
+    """
+    if "@" not in c.address:
+        return False
+    source_types = {s.type for s in c.sources}
+    if "manual_known" in source_types:
+        return True
+    domain = c.address.rsplit("@", 1)[1].lower()
+    rel_me_domains = _verified_personal_domains(person)
+    surface_domains = _anchored_surface_domains(person)
+    github_bound = _github_identity_bound(person)
+
+    signals = 0
+    on_github_surface = github_bound and bool(source_types & _GITHUB_SURFACES)
+    on_owned_domain_surface = (
+        bool(source_types & _DOMAIN_SURFACES) and domain in surface_domains
+    )
+    if on_github_surface or on_owned_domain_surface:
+        signals += 1                                  # 1. anchored observation
+    if c.employer_match:
+        signals += 1                                  # 2. employer
+    if domain in rel_me_domains:
+        signals += 1                                  # 3. rel=me ownership
+    if "pgp" in source_types:
+        signals += 1                                  # 4. PGP owner-UID
+    return signals >= 2
 
 
 def _google_account_candidates(
