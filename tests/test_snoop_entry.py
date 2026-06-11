@@ -374,6 +374,53 @@ def test_git_commit_gmail_on_bound_handle_is_one_signal():
     assert snoop._candidate_is_bound(c, person) is False
 
 
+# ---- ENG-8 Phase-2: the probe gate (no socket to a namesake's mailbox) ------
+
+
+def _probe_args(**kw):
+    import argparse
+    base = dict(allow_google_account=True, no_smtp=False,
+                google_workspace_domain=None)
+    base.update(kw)
+    return argparse.Namespace(**base)
+
+
+def test_probe_candidates_no_op_when_zero_bound(monkeypatch):
+    """Zero bound candidates → Phase 2 opens NO socket: neither the Google
+    existence probe nor the SMTP probe is invoked. This is the honesty win — a
+    pure pattern guess on a Workspace tenant is never probed against a namesake."""
+    person = Person(name="X", ambiguity="single_plausible_match",
+                    employer=Employer(name="Acme", domains=["acme.com"]))
+    candidates = [
+        EmailCandidate(address="guess@acme.com", sources=[src("pattern")],
+                       employer_match=True),               # 1 signal → unbound
+        EmailCandidate(address="other@gmail.com", sources=[src("pattern")]),
+    ]
+    smtp_calls, google_calls = [], []
+    monkeypatch.setattr(snoop, "verify_candidates",
+                        lambda cands, **kw: smtp_calls.append(list(cands)))
+    monkeypatch.setattr(snoop, "fetch_google_account",
+                        lambda cands, **kw: google_calls.append(list(cands)))
+    snoop._probe_candidates(person, candidates, _probe_args(), google_ready=True)
+    assert smtp_calls == [] and google_calls == []
+
+
+def test_probe_candidates_probes_only_the_bound_subset(monkeypatch):
+    """A mix of bound and unbound candidates: only the bound one reaches the SMTP
+    probe; the unbound guess is never handed to a socket."""
+    person = Person(name="Jane", ambiguity="single_plausible_match",
+                    personal_domains=["jane.dev"],
+                    bound_anchors=[("personal_domain_verified", "jane.dev")])
+    bound = EmailCandidate(address="jane@jane.dev", sources=[src("personal_site")])
+    unbound = EmailCandidate(address="guess@other.com", sources=[src("pattern")])
+    probed = []
+    monkeypatch.setattr(snoop, "verify_candidates",
+                        lambda cands, **kw: probed.extend(c.address for c in cands))
+    snoop._probe_candidates(person, [bound, unbound],
+                            _probe_args(allow_google_account=False), google_ready=False)
+    assert probed == ["jane@jane.dev"]
+
+
 # ---- end-to-end via main() --------------------------------------------------
 
 
@@ -935,26 +982,30 @@ def test_main_invokes_google_account_when_flag_set(monkeypatch, capsys):
     google_account resolver is invoked and feeds account_exists into the
     final score."""
     monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
-        name=name,
+        name=name, handles={"github": "real"},
         employer=Employer(name="Google", domains=["google.com"]),
         ambiguity="single_plausible_match",
         bound_anchors=[("github_name_match", name)],
     ))
-    pattern_result = ResolverResult(
-        resolver="pattern_gen",
+    # ENG-8: both addresses are BOUND (observed in the bound github account's
+    # commits + on the employer domain = two signals), so probing them is the
+    # legitimate Matt-Smith split the Google probe disambiguates — not a guess.
+    observed_result = ResolverResult(
+        resolver="git_emails",
         candidates=[
             EmailCandidate(address="real@google.com",
-                           sources=[src("pattern")], employer_match=True),
+                           sources=[src("git_commit")], employer_match=True),
             EmailCandidate(address="phantom@google.com",
-                           sources=[src("pattern")], employer_match=True),
+                           sources=[src("git_commit")], employer_match=True),
         ],
         status="ok",
     )
     empty = ResolverResult(resolver="x", candidates=[], status="empty")
-    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: observed_result)
     monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
     monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
-    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: pattern_result)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
     monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
 
     # Capture google_account invocation and apply canned verdicts
@@ -1031,22 +1082,27 @@ def test_main_workspace_domain_flag_broadens_targeting(monkeypatch, capsys):
     """--google-workspace-domain acme.com tells the pipeline to probe
     candidates on acme.com via the Google API too."""
     monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
-        name=name,
+        name=name, handles={"github": "xh"},
         employer=Employer(name="Acme", domains=["acme.com"]),
         ambiguity="single_plausible_match",
+        bound_anchors=[("github_name_match", name)],
     ))
-    pattern_result = ResolverResult(
-        resolver="pattern_gen",
+    # ENG-8: a BOUND candidate on acme.com (observed in the bound account's commits
+    # + employer_match) — the workspace flag still has to broaden TARGETING to
+    # acme.com for it to be probed.
+    observed_result = ResolverResult(
+        resolver="git_emails",
         candidates=[EmailCandidate(address="x@acme.com",
-                                    sources=[src("pattern")],
+                                    sources=[src("git_commit")],
                                     employer_match=True)],
         status="ok",
     )
     empty = ResolverResult(resolver="x", candidates=[], status="empty")
-    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_git_emails", lambda *a, **kw: observed_result)
     monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
     monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
-    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: pattern_result)
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: empty)
+    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
     monkeypatch.setattr(snoop, "verify_candidates", lambda cands, **kw: cands)
 
     captured_targets = []

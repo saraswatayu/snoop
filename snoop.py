@@ -1174,19 +1174,29 @@ def _probe_candidates(
     *, google_ready: bool,
 ) -> None:
     """Run the verification sensors (Google account, then SMTP) over candidates,
-    mutating them in place. Shared by the discovery path and the --verify path."""
+    mutating them in place. Shared by the discovery path and the --verify path.
+
+    ENG-8 Phase-2: deliverability probes fire ONLY on candidates that bound to the
+    target in Phase 1 (_candidate_is_bound). When NOTHING binds, this is a no-op —
+    we never fall back to probing the unbound top-K, so snoop opens no socket to a
+    namesake's (or a pure pattern guess's) mailbox. The card then renders the 4A
+    honest blank instead of an unearned 'deliverable'."""
+    bound = [c for c in candidates if _candidate_is_bound(c, person)]
+    if not bound:
+        return
+
     # Google account verification on Google-hosted candidates. Runs BEFORE SMTP
     # so that not_found verdicts short-circuit SMTP probes on dead candidates
     # (Google's view is authoritative when it returns a verdict). Skipped when
     # the capability probe already told us no usable Google session exists, so
     # "always pass --allow-google-account" stays free.
-    if candidates and args.allow_google_account and google_ready:
+    if bound and args.allow_google_account and google_ready:
         # Auto-detect Workspace MX so the user doesn't need to pass
         # --google-workspace-domain for every YC startup on Gmail.
         merged_workspace = _autodetect_workspace_domains(
-            candidates, args.google_workspace_domain,
+            bound, args.google_workspace_domain,
         )
-        google_targets = _google_account_candidates(candidates, merged_workspace)
+        google_targets = _google_account_candidates(bound, merged_workspace)
         if google_targets:
             google_result = fetch_google_account(
                 google_targets,
@@ -1207,9 +1217,10 @@ def _probe_candidates(
                     f"google_account {google_result.status}: {google_result.error_detail}"
                 )
 
-    # SMTP probe top-K candidates
-    if candidates and not args.no_smtp:
-        smtp_targets = _smtp_candidates(candidates)
+    # SMTP probe the bound candidates (top-K within the bound set, _probe_rank
+    # ordering). Unbound candidates are never probed.
+    if not args.no_smtp:
+        smtp_targets = _smtp_candidates(bound)
         if smtp_targets:
             verify_candidates(smtp_targets, budget=default_budget())
 
