@@ -1081,6 +1081,39 @@ def test_run_summary_to_stderr(monkeypatch, capsys):
     assert "skipped" in err
 
 
+def test_pgp_corroboration_merges_source_onto_candidate(monkeypatch, capsys):
+    """E3: a keys.openpgp.org hit on a discovered address adds a `pgp` Source to
+    that candidate (owner-verified corroboration)."""
+    import json as _json
+    _resolver_setup(monkeypatch)  # produces alice@corp.com
+    monkeypatch.setattr(snoop, "fetch_pgp_emails",
+                        lambda emails, **kw: ResolverResult(
+                            resolver="pgp",
+                            candidates=[EmailCandidate(
+                                address="alice@corp.com",
+                                sources=[src("pgp", url="https://keys.openpgp.org/x")])],
+                            status="ok"))
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    email_obs = [o for o in bundle["observations"] if o["type"] == "email_candidate"]
+    blob = "\n".join(o["content"] for o in email_obs)
+    assert "pgp" in blob  # the pgp source surfaced on the candidate
+    sensors = {s["sensor"]: s for s in bundle["sensors"]}
+    assert sensors["pgp"]["status"] == "ran"
+
+
+def test_no_pgp_flag_skips_corroboration(monkeypatch, capsys):
+    import json as _json
+    _resolver_setup(monkeypatch)
+    def boom(emails, **kw):
+        raise AssertionError("pgp must not run with --no-pgp")
+    monkeypatch.setattr(snoop, "fetch_pgp_emails", boom)
+    snoop.main(["Alice Smith", "--no-smtp", "--no-pgp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    sensors = {s["sensor"]: s for s in bundle["sensors"]}
+    assert sensors["pgp"]["status"] == "skipped"
+
+
 # ---- --no-search escape hatch -----------------------------------------------
 
 

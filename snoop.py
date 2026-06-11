@@ -52,6 +52,7 @@ from lib.normalize import is_personal_provider, name_match
 from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
+from lib.pgp_keyserver import fetch_pgp_emails
 from lib.personal_site import fetch_personal_site
 from lib.schema import (
     BUNDLE_SCHEMA_VERSION,
@@ -235,6 +236,11 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-smtp",
         action="store_true",
         help="Skip SMTP probing entirely (faster; loses deliverable signal).",
+    )
+    p.add_argument(
+        "--no-pgp",
+        action="store_true",
+        help="Skip the keys.openpgp.org corroboration of discovered addresses.",
     )
     p.add_argument(
         "--deadline",
@@ -528,7 +534,7 @@ def run_pipeline(
 
 
 def _sensor_skips(
-    person: Person, *, packages: list[dict], no_smtp: bool,
+    person: Person, *, packages: list[dict], no_smtp: bool, no_pgp: bool,
     allow_google_account: bool,
 ) -> list[RunRecord]:
     """Synthesize 'skipped' RunRecords for sensors that COULD run but didn't, with
@@ -553,7 +559,34 @@ def _sensor_skips(
         skip("google_account", "--allow-google-account not set")
     if no_smtp:
         skip("smtp", "--no-smtp")
+    if no_pgp:
+        skip("pgp", "--no-pgp")
     return skips
+
+
+def _pgp_corroborate(candidates: list[EmailCandidate]) -> RunRecord:
+    """Corroborate discovered addresses against keys.openpgp.org (E3). A hit is an
+    OWNER-VERIFIED positive by construction (the keyserver only publishes a UID
+    after the owner confirmed it) — especially valuable on M365-inconclusive
+    addresses. Merges a `pgp` Source onto each matching candidate. Best-effort:
+    never raises, never blocks the run on a failure."""
+    addrs = [c.address for c in candidates if "@" in c.address]
+    if not addrs:
+        return RunRecord(sensor="pgp", status="skipped",
+                         reason="no candidate addresses to check")
+    t0 = time.monotonic()
+    result = fetch_pgp_emails(addrs)
+    result.elapsed_ms = int((time.monotonic() - t0) * 1000)
+    by_addr = {c.address.lower(): c for c in candidates}
+    for pc in result.candidates:
+        c = by_addr.get(pc.address.lower())
+        if c is None:
+            continue
+        existing = {(s.type, s.url) for s in c.sources}
+        for s in pc.sources:
+            if (s.type, s.url) not in existing:
+                c.sources.append(s)
+    return RunRecord.from_resolver(result)
 
 
 def _run_summary(run_records: list[RunRecord]) -> str:
@@ -1145,12 +1178,15 @@ def main(argv: list[str] | None = None) -> int:
     # sensors with reasons — the typed degradation contract.
     run_records = [RunRecord.from_resolver(r) for r in results]
     run_records += _sensor_skips(
-        person, packages=packages, no_smtp=args.no_smtp,
+        person, packages=packages, no_smtp=args.no_smtp, no_pgp=args.no_pgp,
         allow_google_account=args.allow_google_account,
     )
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 
+    # PGP corroboration (E3) of discovered addresses, then existence probes.
+    if candidates and not args.no_pgp:
+        run_records.append(_pgp_corroborate(candidates))
     _probe_candidates(person, candidates, args,
                       google_ready=_google_ready(capabilities))
     _reassess_identity(person, candidates)
