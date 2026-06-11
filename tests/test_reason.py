@@ -153,6 +153,45 @@ def test_non_email_observations_have_no_data():
     assert all(o.data is None for o in obs)
 
 
+# --- employer corroboration provenance ----------------------------------------
+
+
+def _employer_obs(obs):
+    return [o for o in obs if o.type == "employer"]
+
+
+def test_employer_without_source_is_declared_only():
+    person = Person(name="X", employer=Employer(name="Corp", domains=["corp.com"]))
+    o = _employer_obs(reason.build_evidence(person, []))[0]
+    assert "declared current employer: Corp" in o.content
+    assert o.source_url is None
+
+
+def test_employer_with_source_url_is_citable():
+    """When the host set employer.source_url (where it confirmed the employer),
+    the observation says 'confirmed via source' and carries the URL — so a role
+    fact cites real corroboration, not just the host's plan declaration."""
+    person = Person(
+        name="X",
+        employer=Employer(name="Simile", domains=["simile.ai"],
+                          source_url="https://www.bloomberg.com/news/simile"),
+    )
+    o = _employer_obs(reason.build_evidence(person, []))[0]
+    assert "current employer confirmed via source: Simile" in o.content
+    assert o.source_url == "https://www.bloomberg.com/news/simile"
+
+
+def test_former_employer_source_url_is_citable():
+    person = Person(
+        name="X",
+        former_employers=[Employer(name="Figma", domains=["figma.com"], until="2026",
+                                   source_url="https://lennys/figma")],
+    )
+    o = _employer_obs(reason.build_evidence(person, []))[0]
+    assert "former employer confirmed via source: Figma" in o.content
+    assert o.source_url == "https://lennys/figma"
+
+
 # --- mx provider / M365 honesty -----------------------------------------------
 
 

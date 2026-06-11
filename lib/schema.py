@@ -97,6 +97,10 @@ class Employer:
     domains: list[str]            # email domains used by this employer (lowercase, IDNA-encoded)
     since: str | None = None      # ISO date "YYYY-MM" or "YYYY-MM-DD" if known
     until: str | None = None      # None == current; ISO date if past
+    source_url: str | None = None # where the host confirmed this employer during
+                                  # resolution (e.g. a news article / their profile);
+                                  # lets a role fact cite real corroboration instead
+                                  # of just the host's plan declaration
 
 
 @dataclass

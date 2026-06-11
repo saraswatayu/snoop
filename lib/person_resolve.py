@@ -165,6 +165,7 @@ def _employer_from_plan_dict(d: Any) -> Employer | None:
         domains=norm_domains,
         since=d.get("since") if isinstance(d.get("since"), str) else None,
         until=d.get("until") if isinstance(d.get("until"), str) else None,
+        source_url=d.get("source_url") if isinstance(d.get("source_url"), str) else None,
     )
 
 

@@ -97,11 +97,19 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
     for atype, value in person.bound_anchors:
         add("anchor", f"identity anchor validated: {atype} = {value}")
 
+    # Employer observations carry the host's resolution provenance when it set a
+    # source_url (where it confirmed the employer): "confirmed via <url>" + a
+    # citable URL, vs. a bare "declared" echo of the plan. A role fact can then
+    # cite the corroboration instead of just the host's say-so.
     if person.employer and person.employer.name:
-        add("employer", f"declared current employer: {person.employer.name}")
+        src = person.employer.source_url
+        verb = "current employer confirmed via source" if src else "declared current employer"
+        add("employer", f"{verb}: {person.employer.name}", src)
     for fe in person.former_employers:
         if fe and fe.name:
-            add("employer", f"declared former employer: {fe.name}")
+            src = fe.source_url
+            verb = "former employer confirmed via source" if src else "declared former employer"
+            add("employer", f"{verb}: {fe.name}", src)
 
     for repo in person.gh_recent_repos:
         desc = f" — {repo.description}" if getattr(repo, "description", None) else ""

@@ -54,7 +54,13 @@ Pass it structured. Minimum useful plan:
 
 Optional fields:
 
-- `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}]`
+- `employer.source_url` / `former_employers[].source_url`: where you **confirmed
+  the employer during resolution** (the news article, their profile, the company
+  page). Set it whenever you learned the employer from WebSearch rather than the
+  user — the role/employer facts then cite that corroboration instead of just
+  your own declaration. You almost always resolve the employer by searching, so
+  almost always set this.
+- `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023", "source_url": "https://..."}]`
 - `handles.hn`: a Hacker News username → snoop reads the public email off their
   HN profile (high-yield on YC/founder targets). It's an untrusted hint, so
   facts from it are `[?]` at most.
