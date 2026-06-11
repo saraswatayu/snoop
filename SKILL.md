@@ -38,10 +38,26 @@ rebrands, intent ranking).
 `snoop.py` is in this skill's own directory — resolve that directory at runtime;
 don't hardcode an absolute path.
 
-## Step 1 — Build the `--person-plan` (you)
+## Step 1 — Resolve the person, then build the `--person-plan` (you)
 
-You know context the sensors don't: nicknames, employer chronology, handles.
-Pass it structured. Minimum useful plan:
+**This is the highest-leverage step — don't skimp.** snoop has no bundled search;
+the sensors only find what you feed them. Before sensing, do a focused
+**resolution pass** with WebSearch (and WebFetch on the hits) to learn who this
+person is and what they have online, then pour it into the plan:
+
+- their **personal site / domain** → `personal_domains` (fires the `personal_site`
+  `mailto:` sensor — often their address directly — and is a strong identity
+  anchor). This is the single highest-yield thing to find.
+- their **primary socials** (X, LinkedIn, GitHub, HN) → `handles` / `channel_hints`
+  (WebFetch the public profile and match name + employer → pass it `confirmed`).
+- their **current employer + domain**, with the URL you confirmed it from →
+  `employer` + `employer.source_url`.
+- a few **body-of-work** items (talks, articles, papers) → `work_search_results`.
+
+A name + company alone (no site, no handle) leaves the sensors with only
+pattern-guessing — so spend the searches here. You know context the sensors
+don't: nicknames, employer chronology, handles. Pass it all structured. Minimum
+useful plan:
 
 ```json
 {
@@ -291,7 +307,8 @@ identity (or directly user-supplied).
 | Rule | Limit |
 |---|---|
 | Sensor fan-out | one batched call — never loop per resolver |
-| Web searches (you, before sensing) | ≤ 2 |
+| Resolution pass (you, before sensing) | a focused **~2–5 searches + WebFetches** — rich resolution is the highest-leverage step (a personal domain → a direct mailbox). Don't skimp to hit a number; don't spelunk past diminishing returns. |
+| Sensor re-runs | re-run `--observations` once if resolution turned up a personal domain / handle worth feeding — a second pass with a real domain beats a first pass without one |
 | Pre-validate a handle yourself | only when the user EXPLICITLY asks; otherwise trust the anchor binding to flag bad handles |
 
 ## Notes
