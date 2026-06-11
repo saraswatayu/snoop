@@ -56,7 +56,7 @@ from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
-from lib.schema import EmailCandidate, Person, ResolverResult, Source
+from lib.schema import BUNDLE_SCHEMA_VERSION, EmailCandidate, Person, ResolverResult, Source
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
 
 
@@ -745,6 +745,7 @@ def _build_bundle(person: Person, candidates: list[EmailCandidate],
         return d
 
     bundle: dict[str, Any] = {
+        "schema": BUNDLE_SCHEMA_VERSION,
         "warnings": warnings or [],
         "person": {"name": person.name, "ambiguity": person.ambiguity},
         "observations": [_obs_dict(o) for o in observations],
@@ -809,6 +810,14 @@ def _run_ground(observations_file: str | None = None) -> int:
             file_bundle = json.loads(Path(observations_file).expanduser().read_text())
         except (OSError, json.JSONDecodeError) as exc:
             sys.stderr.write(f"--observations-file: cannot read {observations_file}: {exc}\n")
+            return 2
+        # Schema gate: reject a stale bundle written by an older --observations.
+        ver = file_bundle.get("schema")
+        if ver != BUNDLE_SCHEMA_VERSION:
+            sys.stderr.write(
+                f"--observations-file: bundle is schema {ver!r} (expected "
+                f"{BUNDLE_SCHEMA_VERSION}); re-run --observations to regenerate it.\n"
+            )
             return 2
         obs_dicts.extend(o for o in file_bundle.get("observations", []) if isinstance(o, dict))
         # Let the file supply person/warnings if stdin didn't.

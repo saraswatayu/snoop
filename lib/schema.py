@@ -202,3 +202,65 @@ class ResolverResult:
     status: Literal["ok", "empty", "timeout", "unavailable", "error"]
     elapsed_ms: int | None = None
     error_detail: str | None = None
+
+
+# ---- run telemetry -----------------------------------------------------------
+
+# Bundle schema version. Bumped to 2 for the timing/degradation contract;
+# `--ground` rejects a stale v1 bundle and tells you to re-run --observations.
+BUNDLE_SCHEMA_VERSION = 2
+
+# The typed degradation contract: what a sensor actually did, independent of the
+# resolver-status enum. "ran" = produced a real reading (ok or honest-empty);
+# "skipped" = never invoked (no input, or SMTP unprobed); "degraded" = invoked
+# but couldn't complete (timeout, deadline-exceeded, unavailable, error).
+SensorStatus = Literal["ran", "skipped", "degraded"]
+
+_RESOLVER_TO_SENSOR_STATUS: dict[str, SensorStatus] = {
+    "ok": "ran",
+    "empty": "ran",
+    "timeout": "degraded",
+    "unavailable": "degraded",
+    "error": "degraded",
+}
+
+
+def sensor_status_of(resolver_status: str) -> SensorStatus:
+    """Map a ResolverResult.status onto the typed sensor-status contract."""
+    return _RESOLVER_TO_SENSOR_STATUS.get(resolver_status, "degraded")
+
+
+@dataclass
+class RunRecord:
+    """One sensor's run outcome — the single record that serializes three ways:
+    into the bundle (per-sensor timing the host reasons about), into a ledger
+    line (yield metadata only — never target names/addresses/handles), and into
+    a calibration row. Carries no target data by construction."""
+    sensor: str                            # "git_emails", "gh_profile", ...
+    status: SensorStatus                   # ran | skipped | degraded
+    elapsed_ms: int | None = None
+    outcome: str | None = None             # outcome class: "candidates" | "empty" | "<reason>"
+    reason: str | None = None              # for skipped/degraded: a short why
+
+    @classmethod
+    def from_resolver(cls, r: "ResolverResult") -> "RunRecord":
+        """Derive a RunRecord from a completed resolver result."""
+        status = sensor_status_of(r.status)
+        if status == "degraded":
+            outcome = r.status
+        elif r.candidates:
+            outcome = "candidates"
+        else:
+            outcome = "empty"
+        return cls(sensor=r.resolver, status=status, elapsed_ms=r.elapsed_ms,
+                   outcome=outcome, reason=r.error_detail)
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"sensor": self.sensor, "status": self.status}
+        if self.elapsed_ms is not None:
+            d["elapsed_ms"] = self.elapsed_ms
+        if self.outcome is not None:
+            d["outcome"] = self.outcome
+        if self.reason is not None:
+            d["reason"] = self.reason
+        return d

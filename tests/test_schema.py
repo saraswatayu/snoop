@@ -122,3 +122,44 @@ def test_resolver_result_defaults():
     r = ResolverResult(resolver="gh_profile", candidates=[], status="empty")
     assert r.elapsed_ms is None
     assert r.error_detail is None
+
+
+# ---- RunRecord / sensor status -----------------------------------------------
+
+
+def test_sensor_status_mapping():
+    from lib.schema import sensor_status_of
+    assert sensor_status_of("ok") == "ran"
+    assert sensor_status_of("empty") == "ran"
+    assert sensor_status_of("timeout") == "degraded"
+    assert sensor_status_of("unavailable") == "degraded"
+    assert sensor_status_of("error") == "degraded"
+
+
+def test_runrecord_from_resolver_ran_with_candidates():
+    from lib.schema import RunRecord
+    r = ResolverResult(resolver="git_emails",
+                       candidates=[EmailCandidate(address="a@b.com")],
+                       status="ok", elapsed_ms=120)
+    rec = RunRecord.from_resolver(r)
+    assert rec.sensor == "git_emails"
+    assert rec.status == "ran"
+    assert rec.outcome == "candidates"
+    assert rec.elapsed_ms == 120
+
+
+def test_runrecord_from_resolver_degraded_carries_reason():
+    from lib.schema import RunRecord
+    r = ResolverResult(resolver="personal_site", candidates=[], status="timeout",
+                       elapsed_ms=5000, error_detail="exceeded 5s budget")
+    rec = RunRecord.from_resolver(r)
+    assert rec.status == "degraded"
+    assert rec.outcome == "timeout"
+    assert rec.reason == "exceeded 5s budget"
+
+
+def test_runrecord_to_dict_omits_none():
+    from lib.schema import RunRecord
+    rec = RunRecord(sensor="x", status="skipped")
+    d = rec.to_dict()
+    assert d == {"sensor": "x", "status": "skipped"}  # no None keys

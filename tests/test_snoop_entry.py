@@ -1248,6 +1248,32 @@ def _ground_stdin(monkeypatch, payload):
     monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(payload)))
 
 
+def test_bundle_carries_schema_version(monkeypatch, capsys):
+    import json as _json
+    _resolver_setup(monkeypatch)
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    assert bundle["schema"] == 2
+
+
+def test_ground_rejects_stale_v1_bundle_file(monkeypatch, capsys, tmp_path):
+    """--observations-file with a schema-v1 (or unversioned) bundle is rejected
+    with a named error pointing at re-running --observations."""
+    import io
+    import json as _json
+    stale = tmp_path / "old.json"
+    stale.write_text(_json.dumps({
+        "warnings": [], "person": {"name": "X", "ambiguity": "single_plausible_match"},
+        "observations": [{"id": "o1", "type": "email_candidate",
+                          "content": "candidate email: x@y.com"}],
+    }))  # no "schema" key → v1
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps({"facts": []})))
+    rc = snoop.main(["--ground", "--observations-file", str(stale)])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "schema" in err and "re-run --observations" in err
+
+
 def test_ground_drops_uncited_facts_and_renders(monkeypatch, capsys):
     """--ground keeps facts citing a real observation, drops the rest, renders."""
     payload = {
