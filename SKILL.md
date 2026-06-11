@@ -68,7 +68,14 @@ Optional fields:
   person published. snoop pulls the publisher/author email from the registry
   (near-100% precision when present). Supply these when you know them.
 - `channel_hints`: `{"x_dms_open": true, "linkedin": "<url>", "prefers": "x"}` —
-  populate whenever you learned a backup channel while resolving the person.
+  populate whenever you learned a backup channel while resolving the person. A
+  bare URL value is a declaration. snoop has no LinkedIn/X sensor (deep profiles
+  are auth-walled and scraping them is ToS-laden), but **you can WebFetch a
+  public profile preview during resolution** and match it to the target (name +
+  current employer). When you do, pass the confirmation so the channel fact can
+  cite it instead of grounding as a bare declaration:
+  `{"linkedin": {"url": "<url>", "confirmed_via": "public profile: name + employer match"}}`.
+  A confirmed self-published profile is a strong cross-link — mark it `[+]`.
 - `name_variants`: explicit overrides for non-Latin spellings normalization misses.
 - `work_search_results`: the body-of-work feed. snoop has no bundled search
   provider — **you are the provider.** Run your built-in WebSearch (≤2 queries)

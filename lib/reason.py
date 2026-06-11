@@ -116,9 +116,25 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
         add("github_repo", f"recent public repo: {repo.name}{desc}",
             getattr(repo, "html_url", None))
 
+    # Channel hints. A plain value is a host declaration ("declared channel
+    # hint"). A {"url", "confirmed_via"} value means the host fetched the public
+    # profile during resolution and matched it to the target (e.g. a LinkedIn
+    # preview showing the name + current employer) — emit it as a "confirmed
+    # channel" with the basis, so a channel fact can cite real confirmation
+    # rather than a bare declaration. snoop has no LinkedIn sensor (deep profiles
+    # are auth-walled + ToS-laden); the host confirms the public preview.
     for key, value in (person.channel_hints or {}).items():
-        add("channel_hint", f"declared channel hint: {key} = {value}",
-            value if isinstance(value, str) and value.startswith("http") else None)
+        if isinstance(value, dict):
+            url = value.get("url")
+            via = value.get("confirmed_via")
+            url = url if isinstance(url, str) and url.startswith("http") else None
+            if via:
+                add("channel_hint", f"confirmed channel: {key} = {url} (via {via})", url)
+            else:
+                add("channel_hint", f"declared channel hint: {key} = {url}", url)
+        else:
+            add("channel_hint", f"declared channel hint: {key} = {value}",
+                value if isinstance(value, str) and value.startswith("http") else None)
 
     for cand in candidates:
         src_types = ",".join(sorted({s.type for s in cand.sources})) or "none"

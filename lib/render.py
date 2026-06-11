@@ -78,18 +78,23 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None) -> str:
 
     # Two non-confident states, two different banners. multiple_plausible_matches
     # (or the model signalling strong doubt) is the genuine namesake case → loud
-    # cap-and-confirm. insufficient_identity_evidence just means no anchor was
-    # bound → a softer, scoped caveat that doesn't bury verified facts.
+    # cap-and-confirm. insufficient_identity_evidence just means snoop's own
+    # probes didn't bind an anchor → a softer caveat that doesn't bury verified
+    # facts, and is suppressed when the host says it confirmed the identity
+    # another way (high identity_confidence) — e.g. a WebFetched public profile
+    # snoop can't sense. The banner doesn't enumerate what wasn't found, since the
+    # host may have found exactly that.
     ic = profile.identity_confidence
+    host_confident = ic is not None and ic >= 0.75
     if person.ambiguity == "multiple_plausible_matches" or (ic is not None and ic < 0.5):
         lines.append("")
         lines.append("[?] identity is NOT a single confident match — more than one "
                      "person may fit; confirm WHO before relying.")
-    elif person.ambiguity == "insufficient_identity_evidence":
+    elif person.ambiguity == "insufficient_identity_evidence" and not host_confident:
         lines.append("")
-        lines.append("[·] identity not independently anchored (no GitHub or "
-                     "cross-linked profile found) — verified facts are still "
-                     "verified-deliverable; confirm the person if it matters.")
+        lines.append("[·] identity not independently anchored by snoop's own probes "
+                     "— verified facts are still verified-deliverable; confirm the "
+                     "person if you haven't already.")
 
     by_kind: dict[str, list] = {}
     for f in profile.facts:

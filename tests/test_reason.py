@@ -192,6 +192,39 @@ def test_former_employer_source_url_is_citable():
     assert o.source_url == "https://lennys/figma"
 
 
+# --- channel-hint confirmation ------------------------------------------------
+
+
+def _channel_obs(obs):
+    return [o for o in obs if o.type == "channel_hint"]
+
+
+def test_bare_channel_hint_is_declared():
+    person = Person(name="X", channel_hints={"linkedin": "https://linkedin.com/in/x"})
+    o = _channel_obs(reason.build_evidence(person, []))[0]
+    assert "declared channel hint: linkedin = https://linkedin.com/in/x" in o.content
+    assert o.source_url == "https://linkedin.com/in/x"
+
+
+def test_confirmed_channel_hint_carries_basis():
+    """When the host confirmed a public profile during resolution, the channel is
+    emitted as 'confirmed channel' with the basis and a citable URL."""
+    person = Person(name="X", channel_hints={
+        "linkedin": {"url": "https://linkedin.com/in/x",
+                     "confirmed_via": "public profile: name + Simile match"},
+    })
+    o = _channel_obs(reason.build_evidence(person, []))[0]
+    assert "confirmed channel: linkedin = https://linkedin.com/in/x" in o.content
+    assert "public profile: name + Simile match" in o.content
+    assert o.source_url == "https://linkedin.com/in/x"
+
+
+def test_non_http_channel_hint_has_no_source_url():
+    person = Person(name="X", channel_hints={"x_dms_open": True})
+    o = _channel_obs(reason.build_evidence(person, []))[0]
+    assert o.source_url is None
+
+
 # --- mx provider / M365 honesty -----------------------------------------------
 
 

@@ -29,7 +29,7 @@ def _fact(kind="email", value="alice@corp.com", *, confidence=0.9,
 
 
 def _profile(facts, *, ambiguity="single_plausible_match",
-             summary="Alice Smith, engineer.", identity_confidence=0.9):
+             summary="Alice Smith, engineer.", identity_confidence: float | None = 0.9):
     return ReasonedProfile(
         identity=_person(ambiguity), summary=summary, facts=facts,
         identity_confidence=identity_confidence,
@@ -98,13 +98,35 @@ def test_multiple_matches_caps_marker_and_warns_loudly():
 def test_insufficient_evidence_does_not_cap_verified_fact():
     """The fixed bug: 'no anchor bound' (insufficient_identity_evidence) is NOT a
     namesake — a high-confidence verified fact keeps its [+] marker, and the
-    banner is the softer 'not independently anchored' note, not the loud one."""
+    banner is the softer 'not anchored' note, not the loud one."""
     out = render_reasoned_card(
-        _profile([_fact(confidence=0.9)], ambiguity="insufficient_identity_evidence")
+        _profile([_fact(confidence=0.9)], ambiguity="insufficient_identity_evidence",
+                 identity_confidence=None)
     )
     assert "[+]" in out                               # NOT capped to [?]
     assert "not independently anchored" in out         # the soft caveat
     assert "more than one person may fit" not in out   # not the loud namesake banner
+
+
+def test_high_host_confidence_suppresses_soft_banner():
+    """When the host says it confirmed the identity another way (high
+    identity_confidence) — e.g. a WebFetched public profile snoop can't sense —
+    the soft 'not anchored' banner is suppressed; the host's call wins."""
+    out = render_reasoned_card(
+        _profile([_fact(confidence=0.9)],
+                 ambiguity="insufficient_identity_evidence", identity_confidence=0.85)
+    )
+    assert "not independently anchored" not in out
+    assert "[+]" in out
+
+
+def test_soft_banner_shows_when_host_confidence_absent_or_modest():
+    # omitted identity_confidence → cautious default, banner shows
+    out = render_reasoned_card(
+        _profile([_fact()], ambiguity="insufficient_identity_evidence",
+                 identity_confidence=None)
+    )
+    assert "not independently anchored" in out
 
 
 def test_low_identity_confidence_triggers_loud_banner_even_when_single_match():
