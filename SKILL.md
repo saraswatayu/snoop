@@ -474,6 +474,30 @@ address and raise the banner:
 
 `log()` the dropped angles so the hard target never reads as a clean one.
 
+## Meeting prep — the same bundle, a different question
+
+The observation bundle isn't only for "find their email." For **"who am I meeting
+at 2pm?"** drive the *same* sensor loop (Step 1 resolve → Step 2 sense → Step 3
+reason → Step 4 ground), but shift the card's emphasis: **role context and body of
+work lead; the reachable email is secondary** (you already have the meeting). Same
+plan, same `--observations`, same `--ground` — you just weight the facts
+differently when you reason:
+
+- Lead with **who they are**: current role + employer (cite `employer.source_url`),
+  then their `work_search_results` (talks, papers, launches) as the "what they're
+  known for" line. A `role` fact's `value` is the company, `detail` the title/tenure.
+- Keep the identity discipline unchanged: the bound/`[?]` markers, the namesake
+  refutation pass, and `--ground` all apply exactly as in outreach mode. A
+  meeting-prep card that confidently profiles the *wrong* same-named person is the
+  same failure as emailing one.
+- The reachable email still appears, just lower — useful for the follow-up, not the
+  headline.
+
+This is the platform seam: the bundle is the contract, and a second consumer
+(meeting prep, light due-diligence) is a different *synthesis* over the same
+sensors, not a different tool. For a hard/common-name meeting target, the Tier-2
+workflow above applies unchanged.
+
 ## When to pass `--allow-google-account`
 
 SMTP can't disambiguate candidates on a Google Workspace domain (literal
