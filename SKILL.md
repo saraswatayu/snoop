@@ -301,6 +301,64 @@ trailing `Sources:` / `References:` block** — the citations ARE the sourcing
 (this supersedes the WebSearch "include a Sources section" reminder). If asked
 for sources, surface the per-fact observation ids.
 
+## Tiered resolution — escalate only where the target earns it
+
+The blind-angle + refutation disciplines (Step 1, Step 3) are cheap to *say* and
+easy to skimp under time pressure. Make them mechanical with a tier:
+
+- **Tier 1 (default — most targets).** One bounded resolution loop → sense
+  (the two-phase ENG-8 pipeline) → reason → `--ground` → card. No workflow. This
+  is the cheap, fast path you run unless a signal below fires.
+- **Tier 2 (hard target — a dynamic workflow).** You drive snoop from inside a
+  workflow: `parallel()` the **blind** resolution angles → merge → `parallel()`
+  the **blind** refutation skeptics → bind the survivors (Step 3 item 5's
+  grounded-refutation rule) → `--ground` → card. The blindness is a **contract,
+  not a hope**: each blind subagent runs `snoop.py` + WebSearch and receives ONLY
+  *the original target ask + its own angle's seed* (name+employer / domain /
+  handle / work) — never another angle's intermediate candidates. The merge
+  happens only after all angles return. Because each blind bundle numbers its
+  observations from `w1` independently, **re-namespace the observation ids across
+  bundles before the single deterministic `--ground`** — naive concatenation
+  collides ids and mis-attributes citations.
+
+**Difficulty trigger (mechanical, not a vibe).** Escalate to Tier 2 when the
+Tier-1 bundle reports `ambiguity == "multiple_plausible_matches"` OR still
+carries unresolved `resolution_gaps` after the loop bound. The only
+host-discretion trigger is genuine high stakes (e.g. pre-meeting safety).
+Binding the trigger to bundle signals keeps the split auditable instead of a
+rationalization for always/never escalating.
+
+**Constraints that keep Tier 2 honest:**
+
+- It is **host-side orchestration calling `snoop.py` as a tool** — never code
+  inside snoop. snoop is the sensor; don't rebuild a brain in it.
+- Workflows are **non-interactive**, so Tier 2 runs in the consent-pre-armed or
+  no-probe lane: the Google-probe decision can't happen mid-run — it's the
+  pre-run `--allow-google-account` flag, decided before the workflow starts.
+- `log()` what you dropped, so a hard target never silently reads as a clean one.
+- **Opt-in by the trigger above, never every run** (cost, and the
+  one-target-manual-research spirit). Multi-angle is still **one target from many
+  angles, not bulk** — the identity fence holds.
+
+## Evidence tiers per sensor
+
+When you mark `[+]`/`[?]` (Step 3) and `✓`/`~`, use the tier the *sensor class*
+earns. `[+]`/`✓` is bound-by-construction; `[?]`/`~` is weaker or cited-not-self.
+
+| Observation class | Binds at | Rejects to `[?]`/`~` when |
+|---|---|---|
+| **rel=me bidirectional** (site ↔ profile) | `[+]` identity — self-attested both ways | only one-way (site→profile, no link back); or **conflicting** bidirectional identities on the page (ambiguity signal, not a binding) |
+| **Bluesky domain handle** | `[+]` identity | the DID doesn't resolve at runtime to the claimed profile |
+| **PGP owner-UID** (keys.openpgp.org) | `[+]` **deliverability only** (email-control / the deliverability axis) — **never identity-binding by itself** | *always* for identity: a published key proves control of the address, not who owns it. Pair it with an identity signal or it stays color, not a person-binding |
+| **Google `account_exists=verified` + `name_match=yes`** | `[+]` identity + existence | `name_match=no` (a different person — drop it); display name absent (locked tenant → existence only, no name bind) |
+| **git_commit / gh_profile on a bound handle** | `[+]` | the handle isn't anchor-bound (≥2 anchors) → `[?]` |
+| **personal_site mailto on a verified domain** | `[+]` | the domain is only plan-declared (not rel=me/WHOIS-bound) → `[?]` |
+| **hn_profile / web_search / bare channel declaration** | `[?]` at most | always — untrusted hints |
+| **press-confirmed role** (reputable independent article names them in the role) | `~` with the article cited — **never `✓`** | press confirmation is *provenance strength, not identity-binding*: cite the URL and render `~`. `✓` stays reserved for self-published or probe-verified facts |
+
+These tiers are what `--ground` and the refutation pass enforce from two sides —
+keep them consistent with the marker you write.
+
 ## When to pass `--allow-google-account`
 
 SMTP can't disambiguate candidates on a Google Workspace domain (literal
