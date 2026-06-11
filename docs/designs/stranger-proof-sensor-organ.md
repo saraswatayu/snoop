@@ -205,3 +205,44 @@ provisional ground-truth protocol — real-person entries in the gitignored
 `tests/fixtures/calibration_targets.local.json` ONLY — and run one supervised
 live `python3 -m tests.calibration` — this week. Everything else sequences
 behind the measured number.
+
+---
+comments:
+  c1:
+    body: >-
+      The ongoing attention I've been attracted to in the Spookmon game is the
+      system of AI. If you look at some of the astrodes, maybe we've been
+      sourcing telemetry astrogames or thinking about them. The thing that keeps
+      coming up is that we're not using AI to explain AI. If you all wanted to
+      explore some scary AI projects, then ideally what we're doing is giving
+      you all an AI tool list to be able to do a lot of the research on its own
+      and to verify that it actually reads a bar, etc.
+
+
+      My question for you is more so around how are we coming up with AI
+      protection, and are we really leaning in on the right set of things?
+    by: user
+    at: 2026-06-11T14:15:22.303Z
+  c2:
+    body: >-
+      Reading your question as: "are we giving the AI the right tool list to do
+      the research on its own and verify it actually did the reading — and is
+      our AI-protection thinking right?" Answer in the plan's terms: every
+      accepted item is (a) I/O the AI can't do — probes, strengthened by E2
+      rel=me, E3 PGP, getuserrealm; (b) contract — typed degradation + timing +
+      schema v2, so the AI can reason about what its sensors did; or (c)
+      measurement — calibration + ledger. Zero judgment code added; judgment
+      stays in the host model. "Research on its own" = the SKILL.md self-plan
+      contract (Claude runs WebSearch, builds the plan, decides probes, no
+      human authoring). "Verify it read the bar" = --ground, extended this
+      branch (schema gate, not-checked-because lines, designed honest blank).
+      AI protection is two-directional here: --ground protects the human from
+      the AI's uncited claims; finding 3B (_oneline forgery defense on PGP
+      UIDs / fetched pages) protects the AI from the data — fetched text is
+      treated as prompt-injection surface aimed at the analyst, not just card
+      text. Deliberate non-AI spots: probe ordering and ground truth stay
+      deterministic/human-gated until ledger evidence earns automation (T1.2).
+      If this misreads your question, mark it up and I'll re-engage.
+    by: AI
+    at: 2026-06-11T14:25:00.000Z
+    re: c1
