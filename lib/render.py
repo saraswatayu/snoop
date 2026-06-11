@@ -60,13 +60,38 @@ def _conf_marker(confidence: float, person: Person) -> str:
     return band
 
 
-def render_reasoned_card(profile, *, warnings: list[str] | None = None) -> str:
+def _honest_blank(sensors: list[dict]) -> list[str]:
+    """The 4A honest-blank surface: when nothing tied back to this person, the
+    card still shows WHAT was checked, what was NOT, and why — so a blank reads as
+    'we looked here and here and found nothing' rather than a silent dead end. The
+    data is the bundle's per-sensor run records (the typed degradation contract)."""
+    ran = [s for s in sensors if s.get("status") == "ran"]
+    not_checked = [s for s in sensors if s.get("status") in ("skipped", "degraded")]
+    if not ran and not not_checked:
+        return []
+    out = ["", "What snoop checked:"]
+    if ran:
+        names = ", ".join(_oneline(s.get("sensor", "?")) for s in ran)
+        out.append(f"  ran: {names}")
+    if not_checked:
+        out.append("  not checked:")
+        for s in not_checked:
+            why = _oneline(s.get("reason") or s.get("outcome") or "")
+            tail = f" — {why}" if why else ""
+            out.append(f"    · {_oneline(s.get('sensor', '?'))}{tail}")
+    return out
+
+
+def render_reasoned_card(profile, *, warnings: list[str] | None = None,
+                         sensors: list[dict] | None = None) -> str:
     """Render the grounded profile (lib.reason.ReasonedProfile).
 
     The model wrote the summary and every fact; this renderer formats and
     sanitizes. Each fact shows its confidence marker and an `unverified` tag when
     the deterministic grounding check could not find the value in a cited
-    observation."""
+    observation. When there are no facts and `sensors` (the bundle's run records)
+    is supplied, the 4A honest-blank surface enumerates checked / not-checked /
+    why instead of a bare one-liner."""
     person = profile.identity
     lines: list[str] = []
     if warnings:
@@ -121,5 +146,7 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None) -> str:
         lines.append("")
         lines.append("No attributable facts — nothing tied back to a confirmed "
                      "observation for this person.")
+        if sensors:
+            lines.extend(_honest_blank(sensors))
 
     return "\n".join(lines).rstrip() + "\n"

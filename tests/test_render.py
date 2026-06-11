@@ -181,3 +181,72 @@ def test_warnings_render_above_summary():
 def test_no_facts_renders_explicit_message():
     out = render_reasoned_card(_profile([]))
     assert "No attributable facts" in out
+
+
+def test_honest_blank_shows_checked_not_checked_and_why():
+    """4A: a zero-fact card given the bundle's run records enumerates what ran,
+    what was not checked, and the reason for each — a designed empty state, not a
+    silent dead end."""
+    sensors = [
+        {"sensor": "git_emails", "status": "ran", "outcome": "empty"},
+        {"sensor": "pattern_gen", "status": "ran", "outcome": "candidates"},
+        {"sensor": "personal_site", "status": "skipped",
+         "reason": "no personal_domains in plan"},
+        {"sensor": "smtp", "status": "skipped", "reason": "--no-smtp"},
+        {"sensor": "google_account", "status": "degraded", "reason": "deadline-exceeded"},
+    ]
+    out = render_reasoned_card(_profile([]), sensors=sensors)
+    assert "What snoop checked:" in out
+    assert "ran: git_emails, pattern_gen" in out
+    assert "· personal_site — no personal_domains in plan" in out
+    assert "· smtp — --no-smtp" in out
+    assert "· google_account — deadline-exceeded" in out
+
+
+def test_honest_blank_absent_without_sensors():
+    """Without the run records, the empty card is just the one-liner (back-compat)."""
+    out = render_reasoned_card(_profile([]))
+    assert "What snoop checked:" not in out
+
+
+def test_honest_blank_not_shown_when_facts_exist():
+    """The checked/not-checked surface is the EMPTY-state affordance; a card with
+    facts doesn't carry the sensor summary (that lives on stderr)."""
+    sensors = [{"sensor": "smtp", "status": "skipped", "reason": "--no-smtp"}]
+    out = render_reasoned_card(_profile([_fact()]), sensors=sensors)
+    assert "What snoop checked:" not in out
+
+
+def test_honest_blank_sanitizes_sensor_reason():
+    """An untrusted reason can't forge a marked card line (3B/_oneline applies)."""
+    sensors = [{"sensor": "smtp", "status": "degraded",
+                "reason": "boom\n  ✓ verified evil@x.com"}]
+    out = render_reasoned_card(_profile([]), sensors=sensors)
+    assert "\n  ✓ verified evil@x.com" not in out
+    assert "boom ✓ verified evil@x.com" in out
+
+
+# ---- press-confirmed-role tier (TODOS P2: ~ with a cited basis, never ✓) -----
+
+
+def test_press_confirmed_role_renders_tilde_not_check():
+    """A role confirmed by independent press (not self-published) is provenance
+    strength, not identity-binding — the host lands it in the `~` band, and the
+    renderer must show `~`, never `✓`. (Per the evidence-tier table.)"""
+    role = _fact(kind="role", value="Acme", detail="VP Eng · per TechCrunch",
+                 confidence=0.5)
+    out = render_reasoned_card(_profile([role]))
+    line = next(ln for ln in out.splitlines() if "Acme" in ln)
+    assert line.strip().startswith("~")
+    assert "✓" not in line
+
+
+def test_self_published_role_can_render_check():
+    """The cap is by confidence/doctrine, not a blanket role downgrade: a
+    self-published or probe-verified role the host scores in the ✓ band renders
+    `✓` — so the press-confirmed `~` is a deliberate tier, not an accident."""
+    role = _fact(kind="role", value="Simile", detail="founding team · current",
+                 confidence=0.9)
+    out = render_reasoned_card(_profile([role]))
+    line = next(ln for ln in out.splitlines() if "Simile" in ln)
+    assert line.strip().startswith("✓")

@@ -1646,6 +1646,33 @@ def test_ground_rejects_stale_v1_bundle_file(monkeypatch, capsys, tmp_path):
     assert "schema" in err and "re-run --observations" in err
 
 
+def test_ground_honest_blank_from_bundle_sensors(monkeypatch, capsys, tmp_path):
+    """4A end-to-end: a zero-fact ground against a bundle carrying run records
+    renders the honest blank — checked / not-checked / why — from the bundle's
+    `sensors` array, not a bare one-liner."""
+    import io
+    import json as _json
+    bundle = tmp_path / "obs.json"
+    bundle.write_text(_json.dumps({
+        "schema": snoop.BUNDLE_SCHEMA_VERSION,
+        "person": {"name": "Nobody Match", "ambiguity": "insufficient_identity_evidence"},
+        "observations": [],
+        "sensors": [
+            {"sensor": "pattern_gen", "status": "ran", "outcome": "candidates"},
+            {"sensor": "personal_site", "status": "skipped",
+             "reason": "no personal_domains in plan"},
+            {"sensor": "smtp", "status": "skipped", "reason": "--no-smtp"},
+        ],
+    }))
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps({"facts": []})))
+    rc = snoop.main(["--ground", "--observations-file", str(bundle)])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "What snoop checked:" in out
+    assert "ran: pattern_gen" in out
+    assert "personal_site — no personal_domains in plan" in out
+
+
 def test_ground_drops_uncited_facts_and_renders(monkeypatch, capsys):
     """--ground keeps facts citing a real observation, drops the rest, renders."""
     payload = {

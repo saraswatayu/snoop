@@ -1138,6 +1138,10 @@ def _run_ground(observations_file: str | None = None) -> int:
             payload["person"] = file_bundle["person"]
         if "warnings" not in payload and "warnings" in file_bundle:
             payload["warnings"] = file_bundle["warnings"]
+        # Carry the per-sensor run records so a zero-fact card can render the 4A
+        # honest blank (checked / not-checked / why) from what the sensors did.
+        if "sensors" not in payload and isinstance(file_bundle.get("sensors"), list):
+            payload["sensors"] = file_bundle["sensors"]
     obs_dicts.extend(o for o in payload.get("observations", []) if isinstance(o, dict))
 
     observations = [
@@ -1163,10 +1167,12 @@ def _run_ground(observations_file: str | None = None) -> int:
         identity_confidence=payload.get("identity_confidence"),
         observations=observations,
     )
+    sensors = payload.get("sensors") if isinstance(payload.get("sensors"), list) else None
     if payload.get("json"):
         sys.stdout.write(_format_reasoned_json(rp, warnings=payload.get("warnings")))
     else:
-        sys.stdout.write(render.render_reasoned_card(rp, warnings=payload.get("warnings")))
+        sys.stdout.write(render.render_reasoned_card(
+            rp, warnings=payload.get("warnings"), sensors=sensors))
     return 0
 
 
