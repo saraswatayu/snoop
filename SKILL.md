@@ -169,6 +169,7 @@ positional (`snoop.py jane@acme.com`) does the same.
 | `--out PATH` | Write the bundle to a file; print the `--ground` command. |
 | `--verify EMAIL` | Verify one address (repeatable); skip discovery. |
 | `--no-smtp` | Skip SMTP probing. `email_candidate` shows `smtp=unprobed`. |
+| `--deadline SEC` | Shared wall-clock budget for the sensor fan-out (default 60s). A sensor still running at the deadline is abandoned and reports `deadline-exceeded`. |
 | `--allow-google-account` | Opt-in: Google People API existence check on Google-hosted domains, via your logged-in Chrome cookies. Always safe to pass — a no-op when no cookies or no Google candidates. |
 | `--google-workspace-domain DOMAIN` | Rarely needed — Google MX is auto-detected. Force a domain that isn't already a candidate. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |

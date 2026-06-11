@@ -972,9 +972,10 @@ def test_main_workspace_domain_flag_broadens_targeting(monkeypatch, capsys):
     assert captured_targets == [{"google.com", "acme.com"}]
 
 
-def test_pipeline_marks_timed_out_resolvers(monkeypatch):
-    """If a resolver takes longer than the per-resolver timeout, mark it
-    as timeout and keep the pipeline running."""
+def test_pipeline_abandons_hung_resolvers_at_deadline(monkeypatch):
+    """The E6 chaos test: a hung resolver is abandoned at the shared deadline,
+    reports deadline-exceeded (status=timeout), and the others' results survive —
+    the run never blocks on the hung sensor."""
     import time
 
     def slow_resolver(*args, **kwargs):
@@ -1005,15 +1006,56 @@ def test_pipeline_marks_timed_out_resolvers(monkeypatch):
             ("github_employer_match", "y"),
         ],
     )
-    # Use a very tight timeout so the test doesn't actually wait 10s
-    results = snoop.run_pipeline(person, per_resolver_timeout_sec=0.5)
+    # Tight shared deadline so the test doesn't actually wait 10s. The slow
+    # daemon threads keep sleeping in the background; the run abandons them.
+    t0 = time.monotonic()
+    results = snoop.run_pipeline(person, deadline_sec=0.3, per_sensor_floor_sec=0.2)
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0, f"run blocked on the hung resolver ({elapsed:.1f}s)"
     statuses = {r.resolver: r.status for r in results}
-    # The slow ones timed out; the fast one returned ok
-    assert "pattern_gen" in statuses
+    by_name = {r.resolver: r for r in results}
+    # The fast one's result survives despite the hung siblings
     assert statuses["pattern_gen"] == "ok"
-    # At least one of the slow resolvers timed out
-    timed_out = [s for s in statuses.values() if s == "timeout"]
-    assert timed_out, f"expected at least one timeout, got statuses: {statuses}"
+    # The hung ones are abandoned: status=timeout, reason=deadline-exceeded
+    timed_out = [r for r in results if r.status == "timeout"]
+    assert timed_out
+    assert any("deadline-exceeded" in (r.error_detail or "") for r in timed_out)
+    # every result carries elapsed_ms (timing stamped)
+    assert by_name["pattern_gen"].elapsed_ms is not None
+
+
+def test_pipeline_isolates_crashing_resolver(monkeypatch):
+    """A resolver that raises is isolated to status=error; siblings survive."""
+    def boom(*a, **kw):
+        raise RuntimeError("kaboom")
+    monkeypatch.setattr(snoop, "fetch_git_emails", boom)
+    monkeypatch.setattr(snoop, "fetch_gh_profile",
+                        lambda *a, **kw: ResolverResult(resolver="gh_profile",
+                                                        candidates=[], status="empty"))
+    monkeypatch.setattr(snoop, "fetch_pattern_candidates",
+                        lambda *a, **kw: ResolverResult(resolver="pattern_gen",
+                                                        candidates=[], status="empty"))
+    person = Person(name="X", handles={"github": "x"},
+                    ambiguity="single_plausible_match",
+                    bound_anchors=[("github_name_match", "X"),
+                                   ("github_employer_match", "y")])
+    results = snoop.run_pipeline(person, deadline_sec=2.0)
+    by_name = {r.resolver: r for r in results}
+    assert by_name["git_emails"].status == "error"
+    assert "kaboom" in by_name["git_emails"].error_detail
+    assert by_name["pattern_gen"].status == "empty"  # sibling survived
+
+
+def test_bundle_carries_per_sensor_timing(monkeypatch, capsys):
+    import json as _json
+    _resolver_setup(monkeypatch)
+    snoop.main(["Alice Smith", "--no-smtp", "--observations"])
+    bundle = _json.loads(capsys.readouterr().out)
+    assert "sensors" in bundle
+    sensors = {s["sensor"]: s for s in bundle["sensors"]}
+    assert sensors  # at least pattern_gen
+    assert all("status" in s for s in bundle["sensors"])
+    assert all(s["status"] in ("ran", "skipped", "degraded") for s in bundle["sensors"])
 
 
 # ---- --no-search escape hatch -----------------------------------------------

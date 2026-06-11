@@ -36,12 +36,9 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
+import time
 from datetime import datetime, timezone
-from concurrent.futures import (
-    Future,
-    ThreadPoolExecutor,
-    TimeoutError as FutureTimeoutError,
-)
 from pathlib import Path
 from typing import Any, Callable
 
@@ -56,11 +53,24 @@ from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.personal_site import fetch_personal_site
-from lib.schema import BUNDLE_SCHEMA_VERSION, EmailCandidate, Person, ResolverResult, Source
+from lib.schema import (
+    BUNDLE_SCHEMA_VERSION,
+    EmailCandidate,
+    Person,
+    ResolverResult,
+    RunRecord,
+    Source,
+)
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
 
 
-_PER_RESOLVER_TIMEOUT_SEC = 5.0
+# Shared wall-clock budget for the whole sensor fan-out (E6). Sensors run
+# concurrently, so each gets up to the full budget; a sensor still running at the
+# deadline is abandoned (its daemon thread + its own socket timeout are the real
+# backstops — Python can't kill a blocking thread). The floor is the minimum the
+# budget can be clamped to, so a tiny --deadline never starves every sensor.
+_DEFAULT_DEADLINE_SEC = 60.0
+_PER_SENSOR_FLOOR_SEC = 2.0
 
 
 # ---- capability warnings (top-of-card error surface) ------------------------
@@ -225,6 +235,18 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-smtp",
         action="store_true",
         help="Skip SMTP probing entirely (faster; loses deliverable signal).",
+    )
+    p.add_argument(
+        "--deadline",
+        type=float,
+        default=_DEFAULT_DEADLINE_SEC,
+        metavar="SEC",
+        help=(
+            f"Shared wall-clock budget for the sensor fan-out (default "
+            f"{_DEFAULT_DEADLINE_SEC:g}s). Sensors run concurrently; one still "
+            f"running at the deadline is abandoned and reports deadline-exceeded. "
+            f"Clamped to a {_PER_SENSOR_FLOOR_SEC:g}s floor."
+        ),
     )
     p.add_argument(
         "--no-search",
@@ -404,9 +426,9 @@ def _run_resolver(
     name: str,
     fn: Callable[[], ResolverResult],
 ) -> ResolverResult:
-    """Wrap a resolver call with a uniform error → ResolverResult contract.
-    Per-call timeout is enforced by the outer ThreadPoolExecutor via
-    future.result(timeout=N)."""
+    """Wrap a resolver call with a uniform error → ResolverResult contract, so a
+    crashing sensor degrades to status="error" instead of taking down the run
+    (crash isolation)."""
     try:
         return fn()
     except Exception as e:  # noqa: BLE001
@@ -423,13 +445,21 @@ def run_pipeline(
     *,
     manual_known: list[tuple[str, str | None]] | None = None,
     packages: list[dict] | None = None,
-    per_resolver_timeout_sec: float = _PER_RESOLVER_TIMEOUT_SEC,
+    deadline_sec: float = _DEFAULT_DEADLINE_SEC,
+    per_sensor_floor_sec: float = _PER_SENSOR_FLOOR_SEC,
 ) -> list[ResolverResult]:
-    """Fan out all enabled resolvers in parallel.
+    """Fan out all enabled sensors concurrently under one shared wall-clock
+    deadline.
 
-    Each resolver gets a wall-clock timeout via future.result(timeout=N).
-    A timed-out resolver returns ResolverResult(status="timeout"); the
-    pipeline keeps going.
+    Each sensor runs in a daemon thread, stamping its own elapsed_ms. We wait for
+    them collectively up to `deadline_sec` (clamped to at least the per-sensor
+    floor). A sensor that finishes in time keeps its result; one still running at
+    the deadline is **abandoned** — its daemon thread is left to die with the
+    process (Python can't kill a blocking thread; the sensor's own socket timeout
+    is the true backstop) and it reports `status="timeout"` with a
+    `deadline-exceeded` reason, distinct from a sensor's internal timeout. A
+    crashing sensor is isolated to `status="error"`. The run never blocks on a
+    hung socket — the defect the old per-future ThreadPoolExecutor join had.
     """
     manual_known = manual_known or []
     packages = packages or []
@@ -458,23 +488,42 @@ def run_pipeline(
         lambda: fetch_pattern_candidates(person, manual_known=manual_known),
     ))
 
+    results_by_name: dict[str, ResolverResult] = {}
+    lock = threading.Lock()
+
+    def worker(name: str, fn: Callable[[], ResolverResult]) -> None:
+        t0 = time.monotonic()
+        rr = _run_resolver(name, fn)
+        rr.elapsed_ms = int((time.monotonic() - t0) * 1000)
+        with lock:
+            results_by_name[name] = rr
+
+    threads: list[tuple[str, threading.Thread]] = []
+    for name, fn in tasks:
+        th = threading.Thread(target=worker, args=(name, fn),
+                              name=f"snoop:{name}", daemon=True)
+        th.start()
+        threads.append((name, th))
+
+    budget = max(deadline_sec, per_sensor_floor_sec)
+    deadline = time.monotonic() + budget
+    for _name, th in threads:
+        th.join(timeout=max(0.0, deadline - time.monotonic()))
+
     results: list[ResolverResult] = []
-    with ThreadPoolExecutor(max_workers=max(1, len(tasks))) as ex:
-        future_to_name: dict[Future, str] = {
-            ex.submit(_run_resolver, name, fn): name for name, fn in tasks
-        }
-        for future in list(future_to_name):
-            name = future_to_name[future]
-            try:
-                results.append(future.result(timeout=per_resolver_timeout_sec))
-            except FutureTimeoutError:
-                results.append(ResolverResult(
-                    resolver=name,
-                    candidates=[],
-                    status="timeout",
-                    error_detail=f"exceeded {per_resolver_timeout_sec}s budget",
-                ))
-                future.cancel()
+    for name, _fn in tasks:
+        with lock:
+            rr = results_by_name.get(name)
+        if rr is not None:
+            results.append(rr)
+        else:
+            results.append(ResolverResult(
+                resolver=name,
+                candidates=[],
+                status="timeout",
+                elapsed_ms=int(budget * 1000),
+                error_detail=f"deadline-exceeded: abandoned after {budget:g}s shared budget",
+            ))
     return results
 
 
@@ -724,13 +773,15 @@ def _resolution_gaps(person: Person) -> list[str]:
 
 def _build_bundle(person: Person, candidates: list[EmailCandidate],
                   plan: dict[str, Any], warnings: list[str],
-                  *, resolution_gaps: list[str] | None = None) -> dict[str, Any]:
+                  *, resolution_gaps: list[str] | None = None,
+                  run_records: list[RunRecord] | None = None) -> dict[str, Any]:
     """Build the raw observation bundle the host model reasons over.
 
     snoop's irreducible job is the I/O the host can't do (git/GitHub/SMTP/Google/
     MX); this dumps what those sensors saw, typed and cited, plus any host-model
     web-search observations. No binding, no rendering — the host is the analyst.
-    `resolution_gaps` (when present) coaches a richer Step-1 resolution + re-run."""
+    `resolution_gaps` (when present) coaches a richer Step-1 resolution + re-run;
+    `run_records` stamp per-sensor status + elapsed_ms into the bundle (E6)."""
     observations = reason.build_evidence(person, candidates)
     base = len(observations)
     for i, o in enumerate(_work_search_observations(plan), start=base + 1):
@@ -750,6 +801,10 @@ def _build_bundle(person: Person, candidates: list[EmailCandidate],
         "person": {"name": person.name, "ambiguity": person.ambiguity},
         "observations": [_obs_dict(o) for o in observations],
     }
+    if run_records:
+        # Per-sensor timing + status (E6) so the host can reason about what its
+        # sensors did and how long they took.
+        bundle["sensors"] = [r.to_dict() for r in run_records]
     if resolution_gaps:
         # A thin plan: surface what a richer resolution pass would add. Placed
         # near the top so the host sees it before reasoning over a weak bundle.
@@ -760,11 +815,13 @@ def _build_bundle(person: Person, candidates: list[EmailCandidate],
 def _emit_observations(person: Person, candidates: list[EmailCandidate],
                        plan: dict[str, Any], warnings: list[str],
                        *, out_path: str | None = None,
-                       resolution_gaps: list[str] | None = None) -> None:
+                       resolution_gaps: list[str] | None = None,
+                       run_records: list[RunRecord] | None = None) -> None:
     """Write the observation bundle to stdout, or to `out_path` (with a printed
     pointer + the ready-to-run --ground command) when --out is given."""
     bundle = _build_bundle(person, candidates, plan, warnings,
-                           resolution_gaps=resolution_gaps)
+                           resolution_gaps=resolution_gaps,
+                           run_records=run_records)
     text = json.dumps(bundle, indent=2, default=str)
     if not out_path:
         sys.stdout.write(text)
@@ -1036,8 +1093,10 @@ def main(argv: list[str] | None = None) -> int:
     if gh_handle_bound:
         person.gh_recent_repos = fetch_recent_repos(gh_handle_bound)
 
-    # Fan out resolvers
-    results = run_pipeline(person, manual_known=manual_known, packages=packages)
+    # Fan out resolvers under the shared wall-clock deadline (E6)
+    results = run_pipeline(person, manual_known=manual_known, packages=packages,
+                           deadline_sec=args.deadline)
+    run_records = [RunRecord.from_resolver(r) for r in results]
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 
@@ -1050,7 +1109,8 @@ def main(argv: list[str] | None = None) -> int:
     # --no-search drops the host-supplied work_search_results from the bundle.
     # resolution_gaps coaches a richer Step-1 pass when the plan was thin.
     _emit_observations(person, candidates, {} if args.no_search else plan, warnings,
-                       out_path=args.out, resolution_gaps=_resolution_gaps(person))
+                       out_path=args.out, resolution_gaps=_resolution_gaps(person),
+                       run_records=run_records)
     return 0
 
 
