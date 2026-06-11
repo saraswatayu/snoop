@@ -45,11 +45,17 @@ _KIND_ORDER = list(_KIND_SECTION)
 
 
 def _conf_marker(confidence: float, person: Person) -> str:
-    """Confidence band -> provenance marker, capped to [?] when the identity is
-    not a single confident match (the namesake gate, applied here against the
-    model's own confidence)."""
+    """Confidence band -> provenance marker.
+
+    The hard cap (no `[+]`) applies ONLY to `multiple_plausible_matches` — the
+    genuine namesake case, where attributing a fact to the wrong person is the
+    risk. `insufficient_identity_evidence` (we simply have no anchor yet) is NOT
+    capped: the model's per-fact confidence speaks, so a Google/SMTP-verified
+    address can read as strong while the card carries a scoped 'not anchored'
+    caveat. Conflating the two was the bug that buried verified results under a
+    wall of `[?]`."""
     band = "[+]" if confidence >= 0.66 else "[?]" if confidence >= 0.33 else "[·]"
-    if person.ambiguity != "single_plausible_match" and band == "[+]":
+    if person.ambiguity == "multiple_plausible_matches" and band == "[+]":
         return "[?]"
     return band
 
@@ -70,11 +76,20 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None) -> str:
     if profile.summary:
         lines.append(_oneline(profile.summary))
 
+    # Two non-confident states, two different banners. multiple_plausible_matches
+    # (or the model signalling strong doubt) is the genuine namesake case → loud
+    # cap-and-confirm. insufficient_identity_evidence just means no anchor was
+    # bound → a softer, scoped caveat that doesn't bury verified facts.
     ic = profile.identity_confidence
-    if person.ambiguity != "single_plausible_match" or (ic is not None and ic < 0.5):
+    if person.ambiguity == "multiple_plausible_matches" or (ic is not None and ic < 0.5):
         lines.append("")
-        lines.append("[?] identity is NOT a single confident match — fields below "
-                     "are shown as possibly; confirm before relying.")
+        lines.append("[?] identity is NOT a single confident match — more than one "
+                     "person may fit; confirm WHO before relying.")
+    elif person.ambiguity == "insufficient_identity_evidence":
+        lines.append("")
+        lines.append("[·] identity not independently anchored (no GitHub or "
+                     "cross-linked profile found) — verified facts are still "
+                     "verified-deliverable; confirm the person if it matters.")
 
     by_kind: dict[str, list] = {}
     for f in profile.facts:

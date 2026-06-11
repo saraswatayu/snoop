@@ -148,13 +148,26 @@ observation `id`s that support it, and a one-line reason.
 
 1. **Cite or omit.** Every fact must trace to an observation `id`. If you can't
    tie a claim to one, it doesn't go in the output. Never invent ids or sources.
-2. **Provenance markers are a contract.** Mark each fact `[+]` (asserted:
-   bound-by-construction — an observation from the validated GitHub surface, a
-   `manual_known`, or a source on a cross-link-bound personal domain) or `[?]`
-   (weaker binding). A domain merely declared in the plan is `[?]`, never `[+]`.
-   A `web_search` observation is `[?]` at most. If `person.ambiguity !=
-   "single_plausible_match"`, cap **every** marker to `[?]` and open with the
-   ambiguity banner.
+2. **Two separate axes — don't fuse them.** The *verdict word* (`verified` /
+   `google-confirmed` / `pattern-guess`) describes **deliverability/existence**
+   and is always truthful — a `data.smtp == "verified"` address is `verified`
+   even if you're unsure whose it is. The *provenance marker* (`[+]`/`[?]`)
+   describes **belongs-to-this-person**: `[+]` = bound-by-construction (validated
+   GitHub surface, `manual_known`, a Google `name_match=yes`, or a source on a
+   cross-link-bound personal domain); `[?]` = weaker binding. A domain merely
+   declared in the plan is `[?]`, never `[+]`; a `web_search` observation is
+   `[?]` at most.
+   - `person.ambiguity == "multiple_plausible_matches"` (a real namesake — more
+     than one person could fit): cap **every** marker to `[?]` and open with the
+     loud "confirm WHO before relying" banner.
+   - `person.ambiguity == "insufficient_identity_evidence"` (just no anchor
+     bound yet — the common case for non-developers with no public GitHub): do
+     **not** blanket-cap. State each fact's verdict word plainly (a verified
+     email is `verified`) and mark belongs-to-person honestly — a Google/SMTP-
+     verified address that is the unique match for the target on their employer
+     domain is strong even without a display-name confirmation. Add the scoped
+     caveat ("identity not independently anchored — confirm the person if it
+     matters"), don't bury the result.
 3. **Verdict vocabulary is precise — use the exact word the evidence supports:**
    - `verified` — ONLY when `data.smtp == "verified"` on a non-catch-all domain.
    - `google-confirmed` — `data.account_exists == "verified"` but SMTP was

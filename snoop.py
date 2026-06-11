@@ -51,7 +51,7 @@ from lib.git_emails import fetch_git_emails
 from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
 from lib.hn_profile import fetch_hn_profile
-from lib.normalize import is_personal_provider
+from lib.normalize import is_personal_provider, name_match
 from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
@@ -855,6 +855,36 @@ def _probe_candidates(
             verify_candidates(smtp_targets, budget=default_budget())
 
 
+def _reassess_identity(person: Person, candidates: list[EmailCandidate]) -> None:
+    """Promote identity confidence using the probe verdicts.
+
+    person_resolve runs BEFORE the Google/SMTP probes and only knows how to bind
+    identity from a validated GitHub handle — so without a handle it defaults to
+    `insufficient_identity_evidence` and never sees the strongest identity signal
+    snoop can produce: a Google account that is `verified` AND whose display name
+    matches the target. That is genuine identity binding (existence + name), so
+    when exactly one verified candidate name-matches, promote to
+    `single_plausible_match` and record the anchor. Only acts on the
+    not-yet-bound state; a declared `multiple_plausible_matches` (real namesake)
+    is never auto-promoted."""
+    if person.ambiguity != "insufficient_identity_evidence" or not person.name:
+        return
+    name_matched = [
+        c for c in candidates
+        if c.account_exists == "verified" and c.account_display_name
+        and name_match(c.account_display_name, person.name)
+    ]
+    if len(name_matched) == 1:
+        c = name_matched[0]
+        person.ambiguity = "single_plausible_match"
+        person.bound_anchors.append(("google_name_match", str(c.account_display_name)))
+        person.notes.append(
+            f"identity promoted to single_plausible_match: Google account "
+            f"{c.address} is verified with display name "
+            f"'{c.account_display_name}' matching the target"
+        )
+
+
 def _google_ready(capabilities: list[Capability]) -> bool:
     """True when the capability probe found a usable Google session. Lets the
     caller skip the probe (and its failed-cookie-read attempt) when none exists,
@@ -926,6 +956,7 @@ def main(argv: list[str] | None = None) -> int:
         candidates.sort(key=_probe_rank)
         _probe_candidates(person, candidates, args,
                           google_ready=_google_ready(capabilities))
+        _reassess_identity(person, candidates)
         _emit_observations(person, candidates, {}, warnings, out_path=args.out)
         return 0
 
@@ -965,6 +996,7 @@ def main(argv: list[str] | None = None) -> int:
 
     _probe_candidates(person, candidates, args,
                       google_ready=_google_ready(capabilities))
+    _reassess_identity(person, candidates)
 
     # The deliverable: the observation bundle the host model reasons over.
     # (Identity state + resolver notes are observations even with no candidates.)

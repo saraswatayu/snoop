@@ -85,9 +85,9 @@ def test_low_confidence_is_weak_marker():
     assert "[·]" in out
 
 
-def test_ambiguous_identity_caps_marker_to_possibly():
-    """The namesake gate: even a high-confidence fact shows [?] when the identity
-    is not a single confident match, and the banner warns loudly."""
+def test_multiple_matches_caps_marker_and_warns_loudly():
+    """The genuine namesake case: even a high-confidence fact shows [?] when more
+    than one person may fit, and the banner warns loudly."""
     out = render_reasoned_card(
         _profile([_fact(confidence=0.95)], ambiguity="multiple_plausible_matches")
     )
@@ -95,7 +95,19 @@ def test_ambiguous_identity_caps_marker_to_possibly():
     assert "NOT a single confident match" in out
 
 
-def test_low_identity_confidence_triggers_banner_even_when_single_match():
+def test_insufficient_evidence_does_not_cap_verified_fact():
+    """The fixed bug: 'no anchor bound' (insufficient_identity_evidence) is NOT a
+    namesake — a high-confidence verified fact keeps its [+] marker, and the
+    banner is the softer 'not independently anchored' note, not the loud one."""
+    out = render_reasoned_card(
+        _profile([_fact(confidence=0.9)], ambiguity="insufficient_identity_evidence")
+    )
+    assert "[+]" in out                               # NOT capped to [?]
+    assert "not independently anchored" in out         # the soft caveat
+    assert "more than one person may fit" not in out   # not the loud namesake banner
+
+
+def test_low_identity_confidence_triggers_loud_banner_even_when_single_match():
     out = render_reasoned_card(
         _profile([_fact()], identity_confidence=0.3)
     )

@@ -735,6 +735,65 @@ def test_main_threads_plan_packages_into_pipeline(monkeypatch, capsys):
     assert "package_registry" in blob
 
 
+# ---- _reassess_identity: Google name_match promotes identity ----------------
+
+
+def test_reassess_promotes_on_unique_google_name_match():
+    """A verified Google account whose display name matches the target is genuine
+    identity binding — promote insufficient → single_plausible_match."""
+    person = Person(name="Mihika Kapoor", ambiguity="insufficient_identity_evidence")
+    cands = [
+        EmailCandidate(address="mihika@simile.ai", account_exists="verified",
+                       account_display_name="Mihika Kapoor"),
+        EmailCandidate(address="kapoor@simile.ai", account_exists="not_found"),
+    ]
+    snoop._reassess_identity(person, cands)
+    assert person.ambiguity == "single_plausible_match"
+    assert any(a[0] == "google_name_match" for a in person.bound_anchors)
+
+
+def test_reassess_does_not_promote_without_display_name():
+    """A verified account with NO display name (locked-down tenant) is not enough
+    to bind identity by itself — stays insufficient (the render layer keeps the
+    verified email honest without overclaiming the person)."""
+    person = Person(name="Mihika Kapoor", ambiguity="insufficient_identity_evidence")
+    cands = [EmailCandidate(address="mihika@simile.ai", account_exists="verified")]
+    snoop._reassess_identity(person, cands)
+    assert person.ambiguity == "insufficient_identity_evidence"
+
+
+def test_reassess_does_not_promote_on_name_mismatch():
+    person = Person(name="Mihika Kapoor", ambiguity="insufficient_identity_evidence")
+    cands = [EmailCandidate(address="mihika@simile.ai", account_exists="verified",
+                            account_display_name="Mihika Sharma")]
+    snoop._reassess_identity(person, cands)
+    assert person.ambiguity == "insufficient_identity_evidence"
+
+
+def test_reassess_does_not_touch_multiple_plausible_matches():
+    """A declared namesake is never auto-promoted, even if one verified account
+    name-matches — the operator flagged genuine ambiguity."""
+    person = Person(name="John Smith", ambiguity="multiple_plausible_matches")
+    cands = [EmailCandidate(address="john@acme.com", account_exists="verified",
+                            account_display_name="John Smith")]
+    snoop._reassess_identity(person, cands)
+    assert person.ambiguity == "multiple_plausible_matches"
+
+
+def test_reassess_does_not_promote_when_two_accounts_name_match():
+    """Two verified accounts both matching the name is real ambiguity, not a
+    confident bind — don't promote."""
+    person = Person(name="Mihika Kapoor", ambiguity="insufficient_identity_evidence")
+    cands = [
+        EmailCandidate(address="mihika@simile.ai", account_exists="verified",
+                       account_display_name="Mihika Kapoor"),
+        EmailCandidate(address="mkapoor@simile.ai", account_exists="verified",
+                       account_display_name="Mihika Kapoor"),
+    ]
+    snoop._reassess_identity(person, cands)
+    assert person.ambiguity == "insufficient_identity_evidence"
+
+
 # ---- google_account integration ---------------------------------------------
 
 
