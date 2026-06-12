@@ -17,3 +17,9 @@ docs/plans/
 # Local-only; never committed.
 tests/fixtures/calibration_targets.local.json
 tests/fixtures/calibration_report.md
+
+# Eval fixtures distilled from real cases may contain real identities while
+# being fictionalized, and eval runs transcribe whatever bundle they graded.
+# Local-only; never committed.
+tests/evals/fixtures/*.local.json
+tests/evals/runs/
