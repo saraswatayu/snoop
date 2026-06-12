@@ -68,6 +68,15 @@ def _wire_documented_pipeline(monkeypatch):
             c.mx_provider = "other"
     monkeypatch.setattr(snoop, "verify_candidates", verify)
 
+    # Stub the Google existence check to a no-op: this machine may have a live
+    # Chrome/Google session, and the real probe would make a nondeterministic
+    # network call to Google's People API for pete@openai.com (a Workspace domain).
+    # A not_found there would mark the candidate dead and skip SMTP — the documented
+    # flow is the SMTP-verified path, so we keep Google out of it here.
+    monkeypatch.setattr(snoop, "fetch_google_account",
+                        lambda cands, **kw: ResolverResult(
+                            resolver="google_account", candidates=[], status="empty"))
+
 
 def test_documented_tier1_worked_example_runs_green(monkeypatch, capsys, tmp_path):
     _wire_documented_pipeline(monkeypatch)
