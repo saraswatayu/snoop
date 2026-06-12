@@ -155,10 +155,15 @@ it's an authed call through the user's own cookies — no socket — and the onl
 disambiguator on a catch-all Workspace domain, so it *also* runs on the unbound
 pattern guesses on a Google-hosted domain, collapsing them to the one account that
 exists. A pure name×domain guess never binds (so never SMTP-probed), but on a
-Workspace tenant its existence is still checkable. `--ground` then checks the
-citations from the other side, so two independent verifiers police two axes —
-identity (does this address belong to the person?) and provenance (does each claim
-cite a real observation?).
+Workspace tenant its existence is still checkable. When several addresses verify,
+snoop clusters them by **Gaia (Google account) id**: same id = aliases of one
+person (collapse — no namesake), different ids = distinct accounts (a real
+collision to split). That answers *same-person?* even on a locked tenant that
+returns no display name — though never *the-right-person?* on its own, and locked
+tenants return the id only intermittently. `--ground` then checks the citations
+from the other side, so two independent verifiers police two axes — identity (does
+this address belong to the person?) and provenance (does each claim cite a real
+observation?).
 
 ## Calibration (how the numbers are measured)
 

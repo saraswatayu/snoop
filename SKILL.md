@@ -523,6 +523,22 @@ locked tenant returns existence without a display name, so the belongs-to-person
 call is still yours (`google-confirmed`, marked honestly by the `name_match`/rare-
 name reasoning) — but you no longer have to hand-run `--verify` to get there.
 
+**Same person or different people? Cluster the verified hits by Gaia id.** When
+several addresses verify (e.g. `jibben@` *and* `jh@`), each carries a Gaia (Google
+account) id in `data.gaia_id`, and snoop emits an `account_cluster` observation
+grouping them. **Same id = aliases of ONE account** (one person — collapse them,
+no namesake). **Different ids = DISTINCT accounts** (different people — a real
+name-collision; raise the "confirm WHO" banner and split). This is the
+disambiguator that survives a locked tenant: it answers *same-person?*
+deterministically even with no display name. Two honest limits: (1) it answers
+*same person*, never *the right person* — a lone verified account can still be a
+collision, so identity still needs a `name_match` or an observed cross-reference;
+(2) locked tenants return the Gaia **inconsistently** (a burst of lookups often
+gets the email echoed back with no `personId`), so when `gaia_id` is absent there's
+simply no cluster signal — fall back to the rare-name prior, the `google_photo`
+(human eyeball), or abstention. The per-domain daily probe budget also caps how
+many lookups a domain gets, so heavy same-domain testing can exhaust it.
+
 Passing the flag is **always safe** — it no-ops when there are no Google-hosted
 candidates or no Chrome cookies (you'll see a warning, not an error). So pass it
 whenever account-existence disambiguation might help, especially when the
