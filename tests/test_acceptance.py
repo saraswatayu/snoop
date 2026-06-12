@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
 _SKILL_ROOT = Path(__file__).resolve().parent.parent
@@ -20,9 +19,7 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 import snoop  # noqa: E402
-from lib.schema import EmailCandidate, Employer, Person, ResolverResult, Source  # noqa: E402
-
-NOW = datetime(2026, 6, 11, 12, 0, tzinfo=timezone.utc)
+from tests.evals._pipeline_mock import documented_spec, wire_pipeline  # noqa: E402
 
 # The documented Step-2 plan, verbatim from SKILL.md.
 PLAN = json.dumps({
@@ -34,48 +31,12 @@ PLAN = json.dumps({
 
 
 def _wire_documented_pipeline(monkeypatch):
-    """Monkeypatch every sensor to the canned readings of the documented bundle:
-    Peter Steinberger, github-bound, pete@openai.com observed in git commits on
-    the employer domain (so it BINDS under ENG-8) and SMTP-verified."""
-    monkeypatch.setattr(snoop, "resolve_person", lambda name, **kw: Person(
-        name="Peter Steinberger", handles={"github": "steipete"},
-        personal_domains=["steipete.com"],
-        employer=Employer(name="OpenAI", domains=["openai.com"]),
-        ambiguity="single_plausible_match",
-        bound_anchors=[("github_name_match", "Peter Steinberger"),
-                       ("github_handle_exists", "steipete")],
-    ))
-
-    def git_emails(*a, **kw):
-        return ResolverResult(
-            resolver="git_emails",
-            candidates=[EmailCandidate(
-                address="pete@openai.com", employer_match=True,
-                sources=[Source(type="git_commit", url="https://github.com/steipete",
-                                observed_at=NOW, detail="commit author email")])],
-            status="ok")
-
-    empty = ResolverResult(resolver="x", candidates=[], status="empty")
-    monkeypatch.setattr(snoop, "fetch_git_emails", git_emails)
-    monkeypatch.setattr(snoop, "fetch_gh_profile", lambda *a, **kw: empty)
-    monkeypatch.setattr(snoop, "fetch_personal_site", lambda *a, **kw: empty)
-    monkeypatch.setattr(snoop, "fetch_pattern_candidates", lambda *a, **kw: empty)
-    monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
-
-    def verify(cands, **kw):
-        for c in cands:
-            c.smtp_verdict = "verified"
-            c.mx_provider = "other"
-    monkeypatch.setattr(snoop, "verify_candidates", verify)
-
-    # Stub the Google existence check to a no-op: this machine may have a live
-    # Chrome/Google session, and the real probe would make a nondeterministic
-    # network call to Google's People API for pete@openai.com (a Workspace domain).
-    # A not_found there would mark the candidate dead and skip SMTP — the documented
-    # flow is the SMTP-verified path, so we keep Google out of it here.
-    monkeypatch.setattr(snoop, "fetch_google_account",
-                        lambda cands, **kw: ResolverResult(
-                            resolver="google_account", candidates=[], status="empty"))
+    """Wire every sensor to the canned readings of the documented bundle
+    (Peter Steinberger, github-bound, pete@openai.com SMTP-verified). The
+    wiring itself lives in tests/evals/_pipeline_mock.py — one source of truth
+    shared with the eval fixture builder — and documented_spec() is the
+    byte-equivalent of the helper that used to live here."""
+    wire_pipeline(monkeypatch, documented_spec())
 
 
 def test_documented_tier1_worked_example_runs_green(monkeypatch, capsys, tmp_path):
