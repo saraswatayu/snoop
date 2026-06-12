@@ -1131,6 +1131,13 @@ def test_google_account_candidates_orders_observed_first():
     assert [c.address for c in out] == ["z@google.com", "a@google.com", "m@google.com"]
 
 
+def _noname_person():
+    """A person with no parseable name → _primary_localparts returns None, so the
+    speculative filter applies no local-part restriction. Isolates the domain/rank
+    behavior under test from the primary-name-parse filter."""
+    return Person(name="", ambiguity="insufficient_identity_evidence")
+
+
 def test_speculative_google_candidates_picks_unbound_workspace_only():
     """ENG-9: the speculative set is unbound pattern guesses on a Google-hosted
     domain. Bound addresses (probed via the bound path) and non-Workspace domains
@@ -1141,7 +1148,8 @@ def test_speculative_google_candidates_picks_unbound_workspace_only():
         EmailCandidate(address="x@nonworkspace.com", sources=[src("pattern")]),
         EmailCandidate(address="x@google.com", sources=[src("pattern")]),
     ]
-    out = snoop._speculative_google_candidates(cands, {"bound@stripe.com"}, ["stripe.com"])
+    out = snoop._speculative_google_candidates(
+        cands, {"bound@stripe.com"}, ["stripe.com"], _noname_person())
     assert {c.address for c in out} == {"jibben@stripe.com", "x@google.com"}
 
 
@@ -1152,8 +1160,26 @@ def test_speculative_google_candidates_skips_already_probed():
                        account_exists="not_found"),
         EmailCandidate(address="b@stripe.com", sources=[src("pattern")]),
     ]
-    out = snoop._speculative_google_candidates(cands, set(), ["stripe.com"])
+    out = snoop._speculative_google_candidates(
+        cands, set(), ["stripe.com"], _noname_person())
     assert [c.address for c in out] == ["b@stripe.com"]
+
+
+def test_speculative_google_excludes_reversed_name_order():
+    """ENG-9 cost control: only the PRIMARY name parse's local-parts probe
+    speculatively. For 'Jibben Hillen' that means jibben@/jhillen@/j.hillen@ but NOT
+    the reversed-order hillen@/hjibben@ — those roughly double the burst and are
+    almost always noise. The bound path still covers every variant."""
+    person = Person(name="Jibben Hillen", ambiguity="single_plausible_match")
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", sources=[src("pattern")]),    # first (primary)
+        EmailCandidate(address="j.hillen@stripe.com", sources=[src("pattern")]),  # f.last (primary)
+        EmailCandidate(address="hillen@stripe.com", sources=[src("pattern")]),    # first (reversed) → drop
+        EmailCandidate(address="hjibben@stripe.com", sources=[src("pattern")]),   # flast (reversed) → drop
+    ]
+    out = {c.address for c in snoop._speculative_google_candidates(
+        cands, set(), ["stripe.com"], person)}
+    assert out == {"jibben@stripe.com", "j.hillen@stripe.com"}
 
 
 def test_speculative_rank_keeps_first_template_within_cap():
@@ -1161,14 +1187,15 @@ def test_speculative_rank_keeps_first_template_within_cap():
     must survive the cap. Template-plausibility ordering (not alphabetical) keeps it
     ahead of the long tail even though `first` is a low-popularity corporate pattern."""
     # 25 junk guesses that would alphabetically bury 'jibben@' (j... mid-pack), plus
-    # the real first@ candidate. With template ranking, 'first' beats unknown-template
-    # noise and lands inside the cap.
+    # the real first@ candidate. No name filter here (_noname_person) so this isolates
+    # the rank/cap behavior; template ranking lifts 'first' over the 'lastf' noise.
     noise = [EmailCandidate(address=f"zzz{i}@stripe.com",
                             sources=[src("pattern", detail="generic template 'lastf'")])
              for i in range(25)]
     first = EmailCandidate(address="jibben@stripe.com",
                            sources=[src("pattern", detail="generic template 'first'")])
-    out = snoop._speculative_google_candidates([*noise, first], set(), ["stripe.com"])
+    out = snoop._speculative_google_candidates(
+        [*noise, first], set(), ["stripe.com"], _noname_person())
     assert len(out) == snoop._SPECULATIVE_GOOGLE_CAP
     assert "jibben@stripe.com" in {c.address for c in out}  # 'first' < 'lastf' in template order
 
@@ -1179,7 +1206,8 @@ def test_speculative_rank_company_inferred_winner_leads():
                               sources=[src("pattern", detail="matches company pattern 'first.last' corroborated by 2 known addresses")])
     generic = EmailCandidate(address="aaa@stripe.com",
                              sources=[src("pattern", detail="generic template 'first.last'")])
-    out = snoop._speculative_google_candidates([generic, inferred], set(), ["stripe.com"])
+    out = snoop._speculative_google_candidates(
+        [generic, inferred], set(), ["stripe.com"], _noname_person())
     assert out[0].address == "j.hillen@stripe.com"
 
 

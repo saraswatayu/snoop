@@ -52,7 +52,12 @@ from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
 from lib.hn_profile import fetch_hn_profile
 from lib.ledger import append_run, build_record, ledger_health
-from lib.normalize import is_personal_provider, name_match
+from lib.normalize import (
+    is_personal_provider,
+    localpart_templates,
+    name_match,
+    parse_name,
+)
 from lib.package_registry import fetch_package_emails
 from lib.pattern_gen import _DEFAULT_TEMPLATE_ORDER, fetch_pattern_candidates
 from lib.person_resolve import resolve_person
@@ -937,8 +942,23 @@ def _google_account_candidates(
 # per-domain daily ProbeBudget plus this cap (a name-variant blowup can't spend the
 # whole budget on one target); on an unlocked tenant the name-match short-circuit
 # in fetch_google_account stops it early.
-_SPECULATIVE_GOOGLE_CAP = 20
+_SPECULATIVE_GOOGLE_CAP = 12
 _TEMPLATE_RANK = {t: i for i, t in enumerate(_DEFAULT_TEMPLATE_ORDER)}
+
+
+def _primary_localparts(name: str) -> set[str] | None:
+    """The local-parts for the PRIMARY name parse (e.g. 'jibben', 'jhillen',
+    'j.hillen' for 'Jibben Hillen'). The speculative Google burst is restricted to
+    these: the reversed-order guesses (last-as-first, 'hillen@') roughly double the
+    probe count, are almost always noise for a Western name, and can hit unrelated
+    employees — dropping them keeps the burst small enough to fit the Phase-2
+    deadline and cheap against the daily budget. Returns None when the name can't be
+    parsed (then no restriction is applied). The bound path still covers every name
+    variant; this trims only the speculative fan-out."""
+    parsed = parse_name(name) if name else None
+    if not parsed:
+        return None
+    return {lp.lower() for lp in localpart_templates(parsed.first, parsed.last).values()}
 
 
 def _pattern_template(c: EmailCandidate) -> str | None:
@@ -968,12 +988,16 @@ def _speculative_google_candidates(
     candidates: list[EmailCandidate],
     bound_addrs: set[str],
     workspace_domains: list[str],
+    person: Person,
 ) -> list[EmailCandidate]:
     """ENG-9: unbound candidates on a Google-hosted domain, eligible for the Google
     existence check (but NOT SMTP). Excludes already-bound addresses (those probe
-    via the bound path) and anything already carrying an account_exists verdict.
-    Ordered by template plausibility, capped at _SPECULATIVE_GOOGLE_CAP."""
+    via the bound path), anything already carrying an account_exists verdict, and —
+    to keep the burst within the Phase-2 deadline — the reversed-order name guesses
+    (only the primary name parse's local-parts probe speculatively). Ordered by
+    template plausibility, capped at _SPECULATIVE_GOOGLE_CAP."""
     domains = _google_target_domains(workspace_domains)
+    allowed_localparts = _primary_localparts(person.name)
     out: list[EmailCandidate] = []
     seen: set[str] = set()
     for c in candidates:
@@ -983,10 +1007,14 @@ def _speculative_google_candidates(
             continue
         if c.account_exists != "unprobed":
             continue
-        domain = c.address.rsplit("@", 1)[1].lower()
-        if domain in domains:
-            seen.add(c.address)
-            out.append(c)
+        local, _, domain = c.address.partition("@")
+        domain = domain.lower()
+        if domain not in domains:
+            continue
+        if allowed_localparts is not None and local.lower() not in allowed_localparts:
+            continue
+        seen.add(c.address)
+        out.append(c)
     out.sort(key=_speculative_rank)
     return out[:_SPECULATIVE_GOOGLE_CAP]
 
@@ -1342,7 +1370,7 @@ def _probe_candidates(
             candidates, args.google_workspace_domain,
         )
         speculative = _speculative_google_candidates(
-            candidates, bound_addrs, merged_workspace,
+            candidates, bound_addrs, merged_workspace, person,
         )
 
     probe_targets = bound + speculative
