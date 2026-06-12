@@ -188,12 +188,50 @@ def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Obs
                       " (human-review artifact, not an automated match)")
             data["google_photo"] = cand.account_photo_url
             data["google_photo_note"] = "human-review artifact, not an automated match"
+        # The Gaia (Google account) id: lets the host cluster verified hits into
+        # accounts. Same id across two addresses = aliases of one person; different
+        # ids = distinct people. Surfaced in the content too so it grounds.
+        if cand.gaia_id:
+            extra += f", gaia={cand.gaia_id[:8]}…"
+            data["gaia_id"] = cand.gaia_id
         add("email_candidate",
             f"candidate email: {cand.address} "
             f"(smtp={cand.smtp_verdict}{provider_note}, "
             f"account_exists={cand.account_exists}, sources={src_types}{extra})",
             next((s.url for s in cand.sources if s.url), None),
             data=data)
+
+    # Account clustering (the locked-tenant disambiguator). When ≥2 verified
+    # addresses carry a Gaia id, group them: same id = aliases of ONE account
+    # (collapse to one person — no ambiguity), different ids = DISTINCT accounts (a
+    # name-collision → namesake risk the host must split). Pure id-equality, so the
+    # sensor may state it; the "is the distinct account my target?" judgment stays
+    # with the host. Gaia clustering answers "same person?", never "the right
+    # person?" — a lone account can still be a collision.
+    verified_with_gaia = [c for c in candidates
+                          if c.account_exists == "verified" and c.gaia_id]
+    if len(verified_with_gaia) >= 2:
+        clusters: dict[str, list[str]] = {}
+        for c in verified_with_gaia:
+            clusters.setdefault(c.gaia_id, []).append(c.address)  # type: ignore[arg-type]
+        parts = []
+        for gid, addrs in clusters.items():
+            addrs = sorted(addrs)
+            joined = " = ".join(addrs)
+            parts.append(f"{joined} (gaia {gid[:8]}…, one account)"
+                         if len(addrs) > 1 else f"{addrs[0]} (gaia {gid[:8]}…)")
+        n_accounts = len(clusters)
+        if n_accounts == 1:
+            summary = (f"Google account clustering: {'; '.join(parts)} — every verified "
+                       f"address is an alias of ONE account (same person).")
+        else:
+            summary = (f"Google account clustering: {'; '.join(parts)} — {n_accounts} "
+                       f"DISTINCT accounts (different people; namesake risk — confirm WHO "
+                       f"before relying).")
+        add("account_cluster", summary,
+            data={"distinct_account_count": n_accounts,
+                  "clusters": [{"gaia_id": gid, "addresses": sorted(addrs)}
+                               for gid, addrs in clusters.items()]})
 
     for note in person.notes:
         add("resolver_note", f"resolver note: {note}")

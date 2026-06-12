@@ -153,6 +153,69 @@ def test_non_email_observations_have_no_data():
     assert all(o.data is None for o in obs)
 
 
+# --- Gaia clustering (the locked-tenant disambiguator) -----------------------
+
+
+def _cluster_obs(obs):
+    return next((o for o in obs if o.type == "account_cluster"), None)
+
+
+def test_email_candidate_mirrors_gaia_id():
+    cand = EmailCandidate(address="jibben@stripe.com", account_exists="verified",
+                          gaia_id="10876228334455")
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert o.data["gaia_id"] == "10876228334455"
+    assert "gaia=10876228" in o.content   # truncated in the human line, grounds
+
+
+def test_no_cluster_observation_for_single_verified():
+    """Clustering needs ≥2 verified-with-gaia hits; one alone has nothing to group."""
+    cand = EmailCandidate(address="jibben@stripe.com", account_exists="verified",
+                          gaia_id="111")
+    assert _cluster_obs(reason.build_evidence(_person(), [cand])) is None
+
+
+def test_same_gaia_collapses_to_one_account():
+    """Two verified addresses sharing a Gaia id are aliases of ONE person — the
+    cluster note collapses them, no namesake."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", account_exists="verified", gaia_id="555"),
+        EmailCandidate(address="jh@stripe.com", account_exists="verified", gaia_id="555"),
+    ]
+    o = _cluster_obs(reason.build_evidence(_person(), cands))
+    assert o is not None
+    assert o.data["distinct_account_count"] == 1
+    assert "ONE account" in o.content
+    assert "jh@stripe.com = jibben@stripe.com" in o.content  # sorted, joined as aliases
+
+
+def test_distinct_gaia_flags_namesake():
+    """Two verified addresses with DIFFERENT Gaia ids are different people — the
+    cluster note raises the namesake flag for the host to split."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", account_exists="verified", gaia_id="555"),
+        EmailCandidate(address="jh@stripe.com", account_exists="verified", gaia_id="999"),
+    ]
+    o = _cluster_obs(reason.build_evidence(_person(), cands))
+    assert o is not None
+    assert o.data["distinct_account_count"] == 2
+    assert "DISTINCT accounts" in o.content and "namesake risk" in o.content
+    gaias = {c["gaia_id"] for c in o.data["clusters"]}
+    assert gaias == {"555", "999"}
+
+
+def test_cluster_ignores_unverified_and_gaialess():
+    """Only verified hits that actually carry a Gaia id cluster — a not_found or a
+    verified-without-gaia hit can't be grouped."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", account_exists="verified", gaia_id="555"),
+        EmailCandidate(address="jhillen@stripe.com", account_exists="not_found"),
+        EmailCandidate(address="j.hillen@stripe.com", account_exists="verified"),  # no gaia
+    ]
+    # Only one verified-with-gaia → no cluster note.
+    assert _cluster_obs(reason.build_evidence(_person(), cands)) is None
+
+
 # --- employer corroboration provenance ----------------------------------------
 
 

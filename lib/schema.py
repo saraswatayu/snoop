@@ -140,6 +140,16 @@ class EmailCandidate:
     # placeholder avatars are dropped at capture (a generic silhouette tells you
     # nothing). Set by lib.google_account.fetch_google_account.
     account_photo_url: str | None = None
+    # When account_exists=="verified", Google returns a stable Gaia (Google
+    # account) id for the mailbox. Two verified addresses with the SAME gaia_id are
+    # aliases of ONE account (same person — collapse them); DIFFERENT gaia_ids are
+    # distinct accounts (a name-collision → namesake risk). This is the disambiguator
+    # for a locked Workspace tenant that returns existence but no display name: it
+    # answers "same person or different people?" deterministically. It does NOT by
+    # itself prove the account belongs to the target (a lone account may still be a
+    # collision) — identity still needs name_match / an observed cross-reference.
+    # Set by lib.google_account.fetch_google_account.
+    gaia_id: str | None = None
 
     # Domain-level facts
     employer_match: bool = False           # address domain ∈ resolved current employer.domains

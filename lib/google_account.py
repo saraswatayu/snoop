@@ -511,6 +511,11 @@ def fetch_google_account(
                 c.account_display_name = real_name
             if result.get("photo_url"):
                 c.account_photo_url = result["photo_url"]
+            # Stable Gaia (account) id: two verified addresses with the same id are
+            # aliases of one account; different ids are distinct people. The
+            # disambiguator on a locked tenant that returns no display name.
+            if result.get("gaia_id"):
+                c.gaia_id = result["gaia_id"]
             # Short-circuit ONLY when we can confirm this is the target
             # (name match) OR the caller didn't pass a target name and so
             # opted into the legacy "any verified short-circuits" behavior.
