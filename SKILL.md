@@ -374,10 +374,11 @@ and her HN handle. The plan keeps those angles distinct:
 
 `hn_profile` reads `nadia@linear.app` off her HN page — an **untrusted hint**, so
 on its own that fact is `[?]`. But the address also lands on the resolved employer
-domain, so `employer_match` is a second signal: it **binds**, and Phase 2 fires a
-Google probe. `account_exists=verified` + `name_match=yes` → `google-confirmed`,
-`[+]`. An HN-only address with no employer hit never binds, never gets probed —
-two signals, not one.
+domain, so `employer_match` is a second signal: it **binds**, and Phase 2 fires
+both probes. `account_exists=verified` + `name_match=yes` → `google-confirmed`,
+`[+]`. An HN-only address with no employer hit never binds, so SMTP never touches
+it — two signals, not one. (On a Google-hosted domain the *existence* check still
+runs on it speculatively — ENG-9 — but only SMTP needs the bind.)
 
 ```
 ✓ nadia@linear.app — google-confirmed · Google account + name match [+]
@@ -416,9 +417,11 @@ LinkedIn channel and one PGP hit.
 ```
 
 `pattern_gen` emits `marta@heliologistics.com` with `employer_match` — but that's
-**one** signal, so it never binds and is never probed. A PGP owner-UID on that
-same address is a second signal: now it's bound (deliverability-only — PGP proves
-email-control, not identity). `data.mx_provider=microsoft`,
+**one** signal, so it never binds and is never probed (the domain is M365, not
+Google-hosted, so the ENG-9 speculative existence check doesn't apply either —
+that path is Google-only). A PGP owner-UID on that same address is a second
+signal: now it's bound (deliverability-only — PGP proves email-control, not
+identity). `data.mx_provider=microsoft`,
 `data.smtp=inconclusive` — M365 has no existence oracle, so you do NOT infer
 existence. Without the PGP hit it stays a bare `pattern-guess [?]`; lead with the
 channel, never a fake `verified`.
@@ -507,6 +510,18 @@ to one `account_exists=verified` + others `not_found`, and the verified one
 returns a display name you cross-check with the **text** `name_match`. On a
 common-name tenant several accounts may verify (other employees); `name_match`
 separates them.
+
+**The Google check fires even when nothing binds (ENG-9).** SMTP stays
+identity-bind-gated — it opens a socket to the mailbox, so snoop never SMTP-probes
+an unbound namesake — but the Google existence check is an authed API call (no
+socket) and is the *only* disambiguator on a catch-all tenant, so it runs on the
+**unbound** pattern candidates on a Google-hosted domain too. That closes the
+Workspace-no-footprint gap: a target with no public-dev surface (no git email, no
+personal site, no PGP) used to leave the obvious work address (`first@employer`)
+unprobed; now the existence check collapses the guesses to the one that exists. A
+locked tenant returns existence without a display name, so the belongs-to-person
+call is still yours (`google-confirmed`, marked honestly by the `name_match`/rare-
+name reasoning) — but you no longer have to hand-run `--verify` to get there.
 
 Passing the flag is **always safe** — it no-ops when there are no Google-hosted
 candidates or no Chrome cookies (you'll see a warning, not an error). So pass it

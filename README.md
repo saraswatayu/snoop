@@ -147,11 +147,16 @@ Before any deliverability probe, snoop decides whether an address actually
 *belongs* to the target. A candidate **binds** only when ≥2 independent signals
 agree — observed on a bound surface (a validated GitHub account, or a personal
 site on a rel=me-verified domain), the resolved employer domain, rel=me domain
-ownership, or a PGP owner-UID. SMTP and the Google People API fire **only on bound
-candidates**; when nothing binds, snoop opens no socket and renders an honest
-blank (what it checked, what it didn't, and why) rather than probing a same-named
-stranger's mailbox. A pure name×domain guess never binds. `--ground` then checks
-the citations from the other side, so two independent verifiers police two axes —
+ownership, or a PGP owner-UID. **SMTP fires only on bound candidates** — it opens a
+socket to the mailbox, so snoop never RCPT-probes a same-named stranger; when
+nothing binds it opens no socket and renders an honest blank (what it checked, what
+it didn't, and why). The **Google People API existence check splits off (ENG-9)**:
+it's an authed call through the user's own cookies — no socket — and the only
+disambiguator on a catch-all Workspace domain, so it *also* runs on the unbound
+pattern guesses on a Google-hosted domain, collapsing them to the one account that
+exists. A pure name×domain guess never binds (so never SMTP-probed), but on a
+Workspace tenant its existence is still checkable. `--ground` then checks the
+citations from the other side, so two independent verifiers police two axes —
 identity (does this address belong to the person?) and provenance (does each claim
 cite a real observation?).
 
