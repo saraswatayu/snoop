@@ -18,9 +18,10 @@ Pipeline:
               ↓
     order  (_probe_rank: observed addresses before pure name×domain guesses)
               ↓
-    google_account probe  (Google-hosted candidates, --allow-google-account)
+    google_account probe  (bound candidates + unbound Workspace pattern guesses,
+                           --allow-google-account; the authed disambiguator)
               ↓
-    verify_smtp top-K candidates  (skip personal-provider / known-dead)
+    verify_smtp top-K BOUND candidates  (skip personal-provider / known-dead)
               ↓
     build_evidence → emit the observation bundle as JSON
 
@@ -36,6 +37,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import re
 import sys
 import threading
 import time
@@ -52,7 +54,7 @@ from lib.hn_profile import fetch_hn_profile
 from lib.ledger import append_run, build_record, ledger_health
 from lib.normalize import is_personal_provider, name_match
 from lib.package_registry import fetch_package_emails
-from lib.pattern_gen import fetch_pattern_candidates
+from lib.pattern_gen import _DEFAULT_TEMPLATE_ORDER, fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.pgp_keyserver import fetch_pgp_emails
 from lib.rel_me import verify_rel_me
@@ -923,6 +925,72 @@ def _google_account_candidates(
     return out
 
 
+# ENG-9 — split the Phase-2 gate by probe class. SMTP opens a socket to the
+# target's mailbox and can't disambiguate on a catch-all Workspace domain, so it
+# stays bind-gated (ENG-8). The Google People API existence check is categorically
+# different: it's an authed call through the user's OWN cookies (no socket to the
+# mailbox) and is the ONLY disambiguator when SMTP returns catch_all — its whole
+# value is collapsing pattern guesses to the one account that exists. So it MAY
+# run on UNBOUND pattern candidates on a Google-hosted domain. A verified hit then
+# becomes deliverability signal the host reasons over; a verified+name_match hit is
+# promoted to identity binding by _reassess_identity. Cost is bounded by the
+# per-domain daily ProbeBudget plus this cap (a name-variant blowup can't spend the
+# whole budget on one target); on an unlocked tenant the name-match short-circuit
+# in fetch_google_account stops it early.
+_SPECULATIVE_GOOGLE_CAP = 20
+_TEMPLATE_RANK = {t: i for i, t in enumerate(_DEFAULT_TEMPLATE_ORDER)}
+
+
+def _pattern_template(c: EmailCandidate) -> str | None:
+    """Extract the pattern template name (e.g. 'first', 'flast') from a candidate's
+    pattern Source detail, so the speculative set can be ranked by template
+    plausibility rather than alphabetically — `first@` for a rare first name must
+    stay reachable within the cap, even though `first` is a low-popularity template."""
+    for s in c.sources:
+        m = re.search(r"(?:template|pattern) '([^']+)'", s.detail or "")
+        if m:
+            return m.group(1)
+    return None
+
+
+def _speculative_rank(c: EmailCandidate) -> tuple:
+    """Order the unbound Google probe set: company-inferred winners first, then by
+    template popularity, then address for determinism. Ensures the cap keeps the
+    plausible patterns rather than slicing by alphabet."""
+    detail = " ".join(s.detail or "" for s in c.sources)
+    inferred = 0 if "matches company pattern" in detail else 1
+    tmpl = _pattern_template(c)
+    rank = _TEMPLATE_RANK[tmpl] if tmpl in _TEMPLATE_RANK else len(_DEFAULT_TEMPLATE_ORDER)
+    return (inferred, rank, c.address)
+
+
+def _speculative_google_candidates(
+    candidates: list[EmailCandidate],
+    bound_addrs: set[str],
+    workspace_domains: list[str],
+) -> list[EmailCandidate]:
+    """ENG-9: unbound candidates on a Google-hosted domain, eligible for the Google
+    existence check (but NOT SMTP). Excludes already-bound addresses (those probe
+    via the bound path) and anything already carrying an account_exists verdict.
+    Ordered by template plausibility, capped at _SPECULATIVE_GOOGLE_CAP."""
+    domains = _google_target_domains(workspace_domains)
+    out: list[EmailCandidate] = []
+    seen: set[str] = set()
+    for c in candidates:
+        if not c.address or "@" not in c.address:
+            continue
+        if c.address in bound_addrs or c.address in seen:
+            continue
+        if c.account_exists != "unprobed":
+            continue
+        domain = c.address.rsplit("@", 1)[1].lower()
+        if domain in domains:
+            seen.add(c.address)
+            out.append(c)
+    out.sort(key=_speculative_rank)
+    return out[:_SPECULATIVE_GOOGLE_CAP]
+
+
 def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[EmailCandidate]:
     """Pick the top candidates worth SMTP-probing: non-personal-provider, at
     least one source, not already known-dead via Google. Ordered by _probe_rank
@@ -1182,21 +1250,21 @@ def _run_ground(observations_file: str | None = None) -> int:
 
 
 def _run_phase2_probes(
-    person: Person, bound: list[EmailCandidate], args: argparse.Namespace,
-    *, google_ready: bool, notes: list[str],
+    person: Person, google_set: list[EmailCandidate],
+    smtp_set: list[EmailCandidate], args: argparse.Namespace,
+    *, merged_workspace: list[str], google_ready: bool, notes: list[str],
 ) -> None:
-    """The actual Phase-2 work: Google-account verification, then SMTP, over the
-    BOUND set — mutating those candidates in place. Google runs first so a
-    not_found verdict short-circuits the SMTP probe on a dead candidate. Non-ok
-    google outcomes go to the passed `notes` sink (NOT person.notes directly), so
-    a straggler abandoned at the deadline can't leak its notes into the bundle."""
-    if bound and args.allow_google_account and google_ready:
-        # Auto-detect Workspace MX so the user doesn't need to pass
-        # --google-workspace-domain for every YC startup on Gmail.
-        merged_workspace = _autodetect_workspace_domains(
-            bound, args.google_workspace_domain,
-        )
-        google_targets = _google_account_candidates(bound, merged_workspace)
+    """The actual Phase-2 work, mutating the passed candidates in place. ENG-9: the
+    two probes have DIFFERENT eligibility. The Google existence check runs over
+    `google_set` (the bound candidates PLUS unbound pattern guesses on a Workspace
+    domain) — an authed API call, the only disambiguator on a catch-all tenant. SMTP
+    runs over `smtp_set` (bound candidates only) — it opens a socket, so it never
+    touches an unbound namesake's mailbox. Google runs first so a not_found verdict
+    short-circuits the SMTP probe on a dead candidate. Non-ok google outcomes go to
+    the passed `notes` sink (NOT person.notes directly), so a straggler abandoned at
+    the deadline can't leak its notes into the bundle."""
+    if google_set and args.allow_google_account and google_ready:
+        google_targets = _google_account_candidates(google_set, merged_workspace)
         if google_targets:
             google_result = fetch_google_account(
                 google_targets,
@@ -1218,9 +1286,9 @@ def _run_phase2_probes(
                 )
 
     # SMTP probe the bound candidates (top-K within the bound set, _probe_rank
-    # ordering). Unbound candidates are never probed.
+    # ordering). Unbound candidates are never SMTP-probed (ENG-8).
     if not args.no_smtp:
-        smtp_targets = _smtp_candidates(bound)
+        smtp_targets = _smtp_candidates(smtp_set)
         if smtp_targets:
             verify_candidates(smtp_targets, budget=default_budget())
 
@@ -1247,29 +1315,50 @@ def _probe_candidates(
 ) -> RunRecord | None:
     """Phase-2 deliverability probing, wrapped in the shared wall-clock deadline.
 
-    ENG-8: probes fire ONLY on candidates that bound to the target in Phase 1
-    (_candidate_is_bound). When NOTHING binds, this is a no-op — we never fall
-    back to probing the unbound top-K, so snoop opens no socket to a namesake's
-    (or a pure pattern guess's) mailbox; the card renders the 4A honest blank.
+    ENG-8: SMTP fires ONLY on candidates that bound to the target in Phase 1
+    (_candidate_is_bound) — snoop opens no socket to a namesake's (or a pure
+    pattern guess's) mailbox. ENG-9: the Google existence check ALSO runs on
+    unbound pattern guesses that sit on a Google-hosted domain (an authed API call,
+    not a socket, and the only disambiguator on a catch-all Workspace tenant). When
+    nothing binds AND no candidate is on a Workspace domain, this is a no-op and the
+    card renders the honest blank.
 
-    ENG-5/E6: the probes run in a daemon thread over deep COPIES of the bound
-    candidates; their verdicts are merged onto the real candidates ONLY if the
-    thread finishes before the deadline. A straggler abandoned at the deadline
-    keeps running against its own copies, which we discard — its verdicts are
-    never merged (the generation guarantee), and the probe phase reports a
-    `deadline-exceeded` degradation. Returns that degraded RunRecord on
-    abandonment, else None."""
+    ENG-5/E6: the probes run in a daemon thread over deep COPIES of the probe set;
+    their verdicts are merged onto the real candidates ONLY if the thread finishes
+    before the deadline. A straggler abandoned at the deadline keeps running against
+    its own copies, which we discard — its verdicts are never merged (the generation
+    guarantee), and the probe phase reports a `deadline-exceeded` degradation.
+    Returns that degraded RunRecord on abandonment, else None."""
     bound = [c for c in candidates if _candidate_is_bound(c, person)]
-    if not bound:
+    bound_addrs = {c.address for c in bound}
+
+    # ENG-9 speculative set: unbound Workspace candidates eligible for the Google
+    # existence check only. Autodetect Workspace MX from ALL candidates (not just
+    # bound) so a target with nothing bound still gets its employer tenant probed.
+    speculative: list[EmailCandidate] = []
+    merged_workspace: list[str] = []
+    if args.allow_google_account and google_ready:
+        merged_workspace = _autodetect_workspace_domains(
+            candidates, args.google_workspace_domain,
+        )
+        speculative = _speculative_google_candidates(
+            candidates, bound_addrs, merged_workspace,
+        )
+
+    probe_targets = bound + speculative
+    if not probe_targets:
         return None
 
-    staged = [copy.deepcopy(c) for c in bound]
+    staged = [copy.deepcopy(c) for c in probe_targets]
+    staged_google = staged
+    staged_smtp = [s for s in staged if s.address in bound_addrs]
     staged_notes: list[str] = []
     done = threading.Event()
 
     def worker() -> None:
         try:
-            _run_phase2_probes(person, staged, args,
+            _run_phase2_probes(person, staged_google, staged_smtp, args,
+                               merged_workspace=merged_workspace,
                                google_ready=google_ready, notes=staged_notes)
         finally:
             done.set()
@@ -1287,7 +1376,7 @@ def _probe_candidates(
             outcome="timeout",
             reason=f"deadline-exceeded: probe phase abandoned after {budget:g}s shared budget",
         )
-    by_addr = {c.address: c for c in bound}
+    by_addr = {c.address: c for c in probe_targets}
     for s in staged:
         c = by_addr.get(s.address)
         if c is not None:

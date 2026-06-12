@@ -385,10 +385,11 @@ def _probe_args(**kw):
     return argparse.Namespace(**base)
 
 
-def test_probe_candidates_no_op_when_zero_bound(monkeypatch):
-    """Zero bound candidates → Phase 2 opens NO socket: neither the Google
-    existence probe nor the SMTP probe is invoked. This is the honesty win — a
-    pure pattern guess on a Workspace tenant is never probed against a namesake."""
+def test_probe_candidates_no_op_when_zero_bound_and_not_workspace(monkeypatch):
+    """Zero bound candidates AND nothing on a Google-hosted domain → Phase 2 is a
+    no-op: neither the Google existence probe nor SMTP is invoked. SMTP never sees
+    an unbound guess (ENG-8); the Google check only fires on Workspace domains, and
+    here the autodetect returns none."""
     person = Person(name="X", ambiguity="single_plausible_match",
                     employer=Employer(name="Acme", domains=["acme.com"]))
     candidates = [
@@ -396,6 +397,9 @@ def test_probe_candidates_no_op_when_zero_bound(monkeypatch):
                        employer_match=True),               # 1 signal → unbound
         EmailCandidate(address="other@gmail.com", sources=[src("pattern")]),
     ]
+    # Stub MX autodetect so no real DNS runs and acme.com is NOT a Workspace tenant.
+    monkeypatch.setattr(snoop, "_autodetect_workspace_domains",
+                        lambda cands, explicit: [])
     smtp_calls, google_calls = [], []
     monkeypatch.setattr(snoop, "verify_candidates",
                         lambda cands, **kw: smtp_calls.append(list(cands)))
@@ -403,6 +407,78 @@ def test_probe_candidates_no_op_when_zero_bound(monkeypatch):
                         lambda cands, **kw: google_calls.append(list(cands)))
     snoop._probe_candidates(person, candidates, _probe_args(), google_ready=True)
     assert smtp_calls == [] and google_calls == []
+
+
+def test_probe_candidates_google_probes_unbound_on_workspace(monkeypatch):
+    """ENG-9: zero bound candidates, but an unbound pattern guess sits on a
+    Google-hosted employer domain → the Google existence check DOES run on it (the
+    authed disambiguator), while SMTP stays silent (no socket to an unbound mailbox).
+    This is the Workspace-no-footprint gap the split gate closes."""
+    person = Person(name="Jibben Hillen", ambiguity="single_plausible_match",
+                    employer=Employer(name="Stripe", domains=["stripe.com"]))
+    candidates = [
+        EmailCandidate(address="jibben@stripe.com", sources=[src("pattern", detail="generic template 'first'")],
+                       employer_match=True),               # 1 signal → unbound
+        EmailCandidate(address="jhillen@stripe.com", sources=[src("pattern", detail="generic template 'flast'")],
+                       employer_match=True),
+    ]
+    monkeypatch.setattr(snoop, "_autodetect_workspace_domains",
+                        lambda cands, explicit: ["stripe.com"])
+    smtp_calls, google_calls = [], []
+    monkeypatch.setattr(snoop, "verify_candidates",
+                        lambda cands, **kw: smtp_calls.extend(c.address for c in cands))
+    monkeypatch.setattr(snoop, "fetch_google_account",
+                        lambda cands, **kw: google_calls.extend(c.address for c in cands)
+                        or ResolverResult(resolver="google_account", candidates=[], status="ok"))
+    snoop._probe_candidates(person, candidates, _probe_args(), google_ready=True)
+    assert set(google_calls) == {"jibben@stripe.com", "jhillen@stripe.com"}
+    assert smtp_calls == []                                # SMTP never touched the unbound guesses
+
+
+def test_probe_candidates_smtp_stays_bound_only_with_speculative(monkeypatch):
+    """ENG-9: when bound and speculative candidates coexist, the Google check covers
+    BOTH but SMTP covers only the bound one — the split gate keeps the socket away
+    from the unbound Workspace guess."""
+    person = Person(name="Jane", ambiguity="single_plausible_match",
+                    personal_domains=["jane.dev"],
+                    bound_anchors=[("personal_domain_verified", "jane.dev")],
+                    employer=Employer(name="Acme", domains=["acme.com"]))
+    bound = EmailCandidate(address="jane@jane.dev", sources=[src("personal_site")])
+    spec = EmailCandidate(address="jane@acme.com", sources=[src("pattern")],
+                          employer_match=True)             # 1 signal → unbound
+    monkeypatch.setattr(snoop, "_autodetect_workspace_domains",
+                        lambda cands, explicit: ["acme.com"])
+    smtp_calls, google_calls = [], []
+    monkeypatch.setattr(snoop, "verify_candidates",
+                        lambda cands, **kw: smtp_calls.extend(c.address for c in cands))
+    monkeypatch.setattr(snoop, "fetch_google_account",
+                        lambda cands, **kw: google_calls.extend(c.address for c in cands)
+                        or ResolverResult(resolver="google_account", candidates=[], status="ok"))
+    snoop._probe_candidates(person, [bound, spec], _probe_args(), google_ready=True)
+    assert "jane@acme.com" in google_calls               # speculative reached Google
+    assert smtp_calls == ["jane@jane.dev"]               # but only the bound one reached SMTP
+
+
+def test_probe_candidates_skips_speculative_without_google_flag(monkeypatch):
+    """The speculative Google path requires --allow-google-account AND a ready
+    session. Without the flag, an unbound Workspace guess is neither Google- nor
+    SMTP-probed (back to the ENG-8 honest blank)."""
+    person = Person(name="Jibben Hillen", ambiguity="single_plausible_match",
+                    employer=Employer(name="Stripe", domains=["stripe.com"]))
+    cand = EmailCandidate(address="jibben@stripe.com", sources=[src("pattern")],
+                          employer_match=True)
+    autodetect_calls = []
+    monkeypatch.setattr(snoop, "_autodetect_workspace_domains",
+                        lambda cands, explicit: autodetect_calls.append(1) or ["stripe.com"])
+    smtp_calls, google_calls = [], []
+    monkeypatch.setattr(snoop, "verify_candidates",
+                        lambda cands, **kw: smtp_calls.append(1))
+    monkeypatch.setattr(snoop, "fetch_google_account",
+                        lambda cands, **kw: google_calls.append(1))
+    rec = snoop._probe_candidates(person, [cand],
+                                  _probe_args(allow_google_account=False), google_ready=False)
+    assert rec is None
+    assert smtp_calls == [] and google_calls == [] and autodetect_calls == []
 
 
 def test_probe_candidates_probes_only_the_bound_subset(monkeypatch):
@@ -1053,6 +1129,58 @@ def test_google_account_candidates_orders_observed_first():
     sourceless = EmailCandidate(address="m@google.com")  # no sources → last
     out = snoop._google_account_candidates([pattern, sourceless, observed], [])
     assert [c.address for c in out] == ["z@google.com", "a@google.com", "m@google.com"]
+
+
+def test_speculative_google_candidates_picks_unbound_workspace_only():
+    """ENG-9: the speculative set is unbound pattern guesses on a Google-hosted
+    domain. Bound addresses (probed via the bound path) and non-Workspace domains
+    are excluded."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", sources=[src("pattern")]),
+        EmailCandidate(address="bound@stripe.com", sources=[src("pattern")]),
+        EmailCandidate(address="x@nonworkspace.com", sources=[src("pattern")]),
+        EmailCandidate(address="x@google.com", sources=[src("pattern")]),
+    ]
+    out = snoop._speculative_google_candidates(cands, {"bound@stripe.com"}, ["stripe.com"])
+    assert {c.address for c in out} == {"jibben@stripe.com", "x@google.com"}
+
+
+def test_speculative_google_candidates_skips_already_probed():
+    """A candidate that already has an account_exists verdict isn't re-probed."""
+    cands = [
+        EmailCandidate(address="a@stripe.com", sources=[src("pattern")],
+                       account_exists="not_found"),
+        EmailCandidate(address="b@stripe.com", sources=[src("pattern")]),
+    ]
+    out = snoop._speculative_google_candidates(cands, set(), ["stripe.com"])
+    assert [c.address for c in out] == ["b@stripe.com"]
+
+
+def test_speculative_rank_keeps_first_template_within_cap():
+    """The whole point of the split gate: a `first@` guess for a rare first name
+    must survive the cap. Template-plausibility ordering (not alphabetical) keeps it
+    ahead of the long tail even though `first` is a low-popularity corporate pattern."""
+    # 25 junk guesses that would alphabetically bury 'jibben@' (j... mid-pack), plus
+    # the real first@ candidate. With template ranking, 'first' beats unknown-template
+    # noise and lands inside the cap.
+    noise = [EmailCandidate(address=f"zzz{i}@stripe.com",
+                            sources=[src("pattern", detail="generic template 'lastf'")])
+             for i in range(25)]
+    first = EmailCandidate(address="jibben@stripe.com",
+                           sources=[src("pattern", detail="generic template 'first'")])
+    out = snoop._speculative_google_candidates([*noise, first], set(), ["stripe.com"])
+    assert len(out) == snoop._SPECULATIVE_GOOGLE_CAP
+    assert "jibben@stripe.com" in {c.address for c in out}  # 'first' < 'lastf' in template order
+
+
+def test_speculative_rank_company_inferred_winner_leads():
+    """A candidate matching the company-inferred pattern outranks generic guesses."""
+    inferred = EmailCandidate(address="j.hillen@stripe.com",
+                              sources=[src("pattern", detail="matches company pattern 'first.last' corroborated by 2 known addresses")])
+    generic = EmailCandidate(address="aaa@stripe.com",
+                             sources=[src("pattern", detail="generic template 'first.last'")])
+    out = snoop._speculative_google_candidates([generic, inferred], set(), ["stripe.com"])
+    assert out[0].address == "j.hillen@stripe.com"
 
 
 def test_google_target_domains_always_includes_literal_google_com():
