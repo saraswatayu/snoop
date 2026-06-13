@@ -192,12 +192,23 @@ def _run_ground(fixture: dict[str, Any],
 # g1_verdict_vocabulary (soft)
 # --------------------------------------------------------------------------- #
 
-VERDICT_RULE_QUOTE = (
-    "`verified` — ONLY when `data.smtp == \"verified\"` on a non-catch-all "
-    "domain. `google-confirmed` — `data.account_exists == \"verified\"` but SMTP "
-    "was catch-all/inconclusive/unprobed. NOT the same as `verified`. "
+# Each verdict word's licensing is its own SKILL.md bullet. Quoting them as three
+# constants (rather than one concatenation carrying the markdown "- " list
+# markers between them) keeps the drift lint robust to SKILL.md re-flowing the
+# list — every quote is a clean standalone sentence.
+VERDICT_VERIFIED_RULE_QUOTE = (
+    "`verified` — ONLY when `data.smtp == \"verified\"` on a non-catch-all domain."
+)
+VERDICT_GOOGLE_CONFIRMED_RULE_QUOTE = (
+    "`google-confirmed` — `data.account_exists == \"verified\"` but SMTP was "
+    "catch-all/inconclusive/unprobed. NOT the same as `verified`."
+)
+VERDICT_PATTERN_GUESS_RULE_QUOTE = (
     "`pattern-guess` — no positive existence signal, just a name×domain template."
 )
+# The grader cites the verified-word sentence as its headline rule; the drift lint
+# checks all three (and every other *RULE_QUOTE) by introspection.
+VERDICT_RULE_QUOTE = VERDICT_VERIFIED_RULE_QUOTE
 
 
 def g1_verdict_vocabulary(fixture: dict[str, Any],
