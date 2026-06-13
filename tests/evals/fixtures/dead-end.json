@@ -1,0 +1,94 @@
+{
+  "bundle": {
+    "observations": [
+      {
+        "content": "declared current employer: Graymoor Holdings",
+        "id": "o1",
+        "source_url": null,
+        "type": "employer"
+      },
+      {
+        "content": "declared channel hint: contact_form = https://graymoor.example/contact",
+        "id": "o2",
+        "source_url": "https://graymoor.example/contact",
+        "type": "channel_hint"
+      }
+    ],
+    "person": {
+      "ambiguity": "insufficient_identity_evidence",
+      "name": "Dashiell Murkwater"
+    },
+    "resolution_gaps": [
+      "no personal_domains \u2014 the personal_site mailto sensor did not run. Finding their site is the highest-yield discovery step (often a direct mailbox + a strong identity anchor); resolve it and re-run.",
+      "no handles (github/hn) \u2014 the git/profile/HN sensors did not run, so discovery is name\u00d7domain pattern-guessing only. Resolve their GitHub/HN/socials and re-run.",
+      "employer is plan-declared only (no source_url) \u2014 role/employer facts will be uncited. Set employer.source_url to where you confirmed it."
+    ],
+    "schema": 2,
+    "sensors": [
+      {
+        "elapsed_ms": 0,
+        "outcome": "empty",
+        "sensor": "pattern_gen",
+        "status": "ran"
+      },
+      {
+        "reason": "no bound github handle",
+        "sensor": "git_emails",
+        "status": "skipped"
+      },
+      {
+        "reason": "no bound github handle",
+        "sensor": "gh_profile",
+        "status": "skipped"
+      },
+      {
+        "reason": "no hn handle in plan",
+        "sensor": "hn_profile",
+        "status": "skipped"
+      },
+      {
+        "reason": "no personal_domains in plan",
+        "sensor": "personal_site",
+        "status": "skipped"
+      },
+      {
+        "reason": "no personal_domains in plan",
+        "sensor": "rel_me",
+        "status": "skipped"
+      },
+      {
+        "reason": "no packages in plan",
+        "sensor": "package_registry",
+        "status": "skipped"
+      },
+      {
+        "reason": "--allow-google-account not set",
+        "sensor": "google_account",
+        "status": "skipped"
+      }
+    ],
+    "warnings": []
+  },
+  "id": "dead-end",
+  "labels": {
+    "banner_required": false,
+    "dead_end": true,
+    "forbidden_verdicts": [
+      "verified",
+      "google-confirmed",
+      "pattern-guess"
+    ],
+    "must_emit": [
+      {
+        "evidence": [
+          "o2"
+        ],
+        "kind": "channel",
+        "value": "https://graymoor.example/contact"
+      }
+    ],
+    "must_not_emit": [],
+    "rubric_notes": "Dead end: no candidate to ground. Emit ZERO email facts and surface the declared contact channel instead. Label rationale: SKILL.md's `dead-end` verdict is 'no usable candidate; suggest a channel from the hints' \u2014 inventing an address here would be a cite-or-omit violation."
+  },
+  "suite": "regression"
+}

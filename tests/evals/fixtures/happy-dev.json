@@ -1,0 +1,129 @@
+{
+  "bundle": {
+    "observations": [
+      {
+        "content": "github handle: snoop-fixture-zinnia (github.com/snoop-fixture-zinnia)",
+        "id": "o1",
+        "source_url": "https://github.com/snoop-fixture-zinnia",
+        "type": "github_handle"
+      },
+      {
+        "content": "identity anchor validated: github_name_match = Zinnia Voss-Calloway",
+        "id": "o2",
+        "source_url": null,
+        "type": "anchor"
+      },
+      {
+        "content": "identity anchor validated: github_handle_exists = snoop-fixture-zinnia",
+        "id": "o3",
+        "source_url": null,
+        "type": "anchor"
+      },
+      {
+        "content": "declared current employer: Brightforge Labs",
+        "id": "o4",
+        "source_url": null,
+        "type": "employer"
+      },
+      {
+        "content": "candidate email: zinnia@brightforge.example (smtp=verified, mx=other, account_exists=unprobed, sources=git_commit)",
+        "data": {
+          "account_exists": "unprobed",
+          "address": "zinnia@brightforge.example",
+          "mx_provider": "other",
+          "smtp": "verified",
+          "sources": [
+            {
+              "detail": "commit author email",
+              "type": "git_commit",
+              "url": "https://github.com/snoop-fixture-zinnia"
+            }
+          ]
+        },
+        "id": "o5",
+        "source_url": "https://github.com/snoop-fixture-zinnia",
+        "type": "email_candidate"
+      }
+    ],
+    "person": {
+      "ambiguity": "single_plausible_match",
+      "name": "Zinnia Voss-Calloway"
+    },
+    "resolution_gaps": [
+      "no personal_domains \u2014 the personal_site mailto sensor did not run. Finding their site is the highest-yield discovery step (often a direct mailbox + a strong identity anchor); resolve it and re-run.",
+      "employer is plan-declared only (no source_url) \u2014 role/employer facts will be uncited. Set employer.source_url to where you confirmed it."
+    ],
+    "schema": 2,
+    "sensors": [
+      {
+        "elapsed_ms": 0,
+        "outcome": "candidates",
+        "sensor": "git_emails",
+        "status": "ran"
+      },
+      {
+        "elapsed_ms": 0,
+        "outcome": "empty",
+        "sensor": "gh_profile",
+        "status": "ran"
+      },
+      {
+        "elapsed_ms": 0,
+        "outcome": "empty",
+        "sensor": "pattern_gen",
+        "status": "ran"
+      },
+      {
+        "reason": "no hn handle in plan",
+        "sensor": "hn_profile",
+        "status": "skipped"
+      },
+      {
+        "reason": "no personal_domains in plan",
+        "sensor": "personal_site",
+        "status": "skipped"
+      },
+      {
+        "reason": "no personal_domains in plan",
+        "sensor": "rel_me",
+        "status": "skipped"
+      },
+      {
+        "reason": "no packages in plan",
+        "sensor": "package_registry",
+        "status": "skipped"
+      },
+      {
+        "reason": "--allow-google-account not set",
+        "sensor": "google_account",
+        "status": "skipped"
+      },
+      {
+        "elapsed_ms": 0,
+        "outcome": "empty",
+        "sensor": "pgp",
+        "status": "ran"
+      }
+    ],
+    "warnings": []
+  },
+  "id": "happy-dev",
+  "labels": {
+    "banner_required": false,
+    "forbidden_verdicts": [],
+    "must_emit": [
+      {
+        "evidence": [
+          "o5"
+        ],
+        "kind": "email",
+        "marker": "[+]",
+        "value": "zinnia@brightforge.example",
+        "verdict": "verified"
+      }
+    ],
+    "must_not_emit": [],
+    "rubric_notes": "Tier-1 happy path: github-bound dev, git email on the employer domain, SMTP 250. Lead with the email line, verified/[+], citing the email_candidate observation. Label rationale: the two binding signals (github name anchor + employer-domain git commit) plus SMTP 250 are exactly what licenses `verified`+`[+]`."
+  },
+  "suite": "regression"
+}
