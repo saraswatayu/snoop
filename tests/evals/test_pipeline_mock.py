@@ -170,6 +170,65 @@ def test_package_emails_patch_point_serves_the_canned_reading(tmp_path, monkeypa
     assert _email_obs(bundle, "robin@example.com")
 
 
+def test_google_hosted_domains_arm_the_existence_check_hermetically(tmp_path, monkeypatch):
+    """A spec with google_ready + google_hosted_domains drives the Google
+    existence check to its mocked verdict with NO live MX lookup. The real
+    _autodetect_workspace_domains binds is_google_hosted as a default parameter
+    (so patching the name is useless) and would hit the network on .example
+    domains — booby-trap it to prove the mock stubs the autodetect itself."""
+    def boom(domain, *a, **kw):
+        raise AssertionError("live MX lookup (is_google_hosted) was called")
+    monkeypatch.setattr(snoop, "is_google_hosted", boom)
+
+    spec = PipelineSpec(
+        person=Person(
+            name="Avery Example", handles={"github": "snoop-fixture-avery"},
+            employer=Employer(name="Acme", domains=["acme.example"]),
+            ambiguity="single_plausible_match",
+            bound_anchors=[("github_name_match", "Avery Example"),
+                           ("github_handle_exists", "snoop-fixture-avery")],
+        ),
+        git_emails=ResolverResult(
+            resolver="git_emails", status="ok",
+            candidates=[EmailCandidate(
+                address="avery@acme.example", employer_match=True,
+                gaia_id="GAIA-AVERY-0001",
+                sources=[Source(type="git_commit",
+                                url="https://github.com/snoop-fixture-avery",
+                                observed_at=NOW, detail="commit author email")])]),
+        google_ready=True,
+        google_hosted_domains={"acme.example"},
+        probes={"avery@acme.example": ProbeOutcome(
+            smtp_verdict="verified", mx_provider="google",
+            account_exists="verified", account_display_name="Avery Example")},
+    )
+    wire_pipeline(monkeypatch, spec)
+    out = tmp_path / "bundle.json"
+    rc = snoop.main(["Avery Example", "--allow-google-account", "--out", str(out)])
+    assert rc == 0
+    bundle = json.loads(out.read_text())
+    assert _email_obs(bundle, "avery@acme.example")["data"]["account_exists"] == "verified"
+
+
+def test_google_burst_stays_disarmed_when_no_hosted_domains(tmp_path, monkeypatch):
+    """The default empty google_hosted_domains classifies every domain as
+    non-Workspace, so the Google burst never arms even with
+    --allow-google-account — the safety that keeps non-Google fixtures off the
+    network. account_exists stays unprobed."""
+    def boom(domain, *a, **kw):
+        raise AssertionError("live MX lookup (is_google_hosted) was called")
+    monkeypatch.setattr(snoop, "is_google_hosted", boom)
+
+    spec = _fictional_spec()  # no google_hosted_domains
+    spec.google_ready = True
+    wire_pipeline(monkeypatch, spec)
+    out = tmp_path / "bundle.json"
+    rc = snoop.main(["Avery Example", "--allow-google-account", "--out", str(out)])
+    assert rc == 0
+    bundle = json.loads(out.read_text())
+    assert _email_obs(bundle, "avery@acme.example")["data"]["account_exists"] == "unprobed"
+
+
 def test_bundle_is_byte_stable_across_reruns(tmp_path, monkeypatch):
     """Two runs of the same spec produce identical bundle bytes: elapsed_ms is
     normalized to 0, warnings are canned, and the per-call deep copies keep the

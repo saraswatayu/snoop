@@ -110,6 +110,14 @@ class PipelineSpec:
     # `--allow-google-account` actually arms the (mocked) existence check.
     google_ready: bool = False
 
+    # Domains the mocked MX classifier should treat as Google-hosted. The real
+    # `_autodetect_workspace_domains` calls `is_google_hosted` (a live MX lookup)
+    # on every candidate domain whenever the Google check is armed — left
+    # unstubbed, a Google fixture would hit the network on .example domains. The
+    # mock stubs it unconditionally (empty set ⇒ always-False), so even the
+    # non-Google fixtures can never reach a real resolver.
+    google_hosted_domains: set[str] = field(default_factory=set)
+
 
 def _empty(name: str) -> ResolverResult:
     return ResolverResult(resolver=name, candidates=[], status="empty")
@@ -198,6 +206,31 @@ def wire_pipeline(patcher, spec: PipelineSpec) -> None:
                                detail="canned", impact=""))
     patcher.setattr(snoop, "_fast_capability_probe",
                     lambda *, allow_google_account=False: list(caps))
+
+    # MX classification seam. _autodetect_workspace_domains shells out to a live
+    # MX lookup for every candidate domain once the Google check is armed. We
+    # CANNOT stub that by patching `snoop.is_google_hosted`: the function binds it
+    # as a default parameter at import time, so the rebinding never takes effect
+    # (and the real lookup hits the network on .example domains). Stub the whole
+    # autodetect to classify against the spec instead — empty set ⇒ no Workspace
+    # domains ⇒ the Google burst never arms, keeping every other fixture hermetic.
+    hosted = {d.lower() for d in spec.google_hosted_domains}
+
+    def autodetect_workspace(candidates, explicit, **kw):
+        explicit_set = {d.strip().lower() for d in explicit or [] if isinstance(d, str)}
+        seen: set[str] = set()
+        additions: list[str] = []
+        for c in candidates:
+            if "@" not in c.address:
+                continue
+            d = c.address.rsplit("@", 1)[1].lower()
+            if d in seen or d in explicit_set:
+                continue
+            seen.add(d)
+            if d in hosted:
+                additions.append(d)
+        return list(explicit or []) + additions
+    patcher.setattr(snoop, "_autodetect_workspace_domains", autodetect_workspace)
 
     # elapsed_ms is wall-clock noise; zero it in the emitted bundle so committed
     # fixtures are byte-stable across machines and reruns.
