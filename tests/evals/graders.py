@@ -56,11 +56,19 @@ _VERDICTS = {"verified", "google-confirmed", "pattern-guess"}
 _MARKERS = {"[+]", "[?]"}
 _FACT_KINDS = {"email", "channel", "social_link", "work_item", "role",
                "consistency_note"}
-# The marker/verdict fields are only meaningful (and only required by g1_structure)
-# on the binding-bearing fact kinds — an email or a social_link the analyst is
-# attributing to the person. A role/work_item/consistency_note carries context,
-# not a deliverability/binding claim.
-_VERDICT_BEARING_KINDS = {"email", "social_link"}
+# Two related-but-distinct scopes:
+#  - The verdict + marker FIELDS are required (g1_structure) on the
+#    binding-bearing kinds — an email or a social_link the analyst attributes to
+#    the person. A role/work_item/consistency_note carries context, not a
+#    deliverability/binding claim, so it needn't carry them.
+#  - Verdict LICENSING (the smtp/account_exists field check, g1_verdict_vocabulary)
+#    is email-only: the verdict vocabulary describes email deliverability/existence
+#    (data.smtp / data.account_exists live on email_candidate observations). A
+#    social_link's deliverability isn't a concept — its verdict word, when present,
+#    is only checked for vocabulary membership + forbidden_verdicts, not licensed
+#    against smtp/account_exists.
+_FIELD_BEARING_KINDS = {"email", "social_link"}
+_VERDICT_LICENSED_KINDS = {"email"}
 
 
 @dataclass
@@ -233,16 +241,21 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
     for fact in _facts(output):
         verdict = fact.get("verdict")
         value = fact.get("value")
-        if fact.get("kind") not in _VERDICT_BEARING_KINDS:
-            continue  # channel/role/etc. carry no deliverability verdict
+        kind = fact.get("kind")
         if verdict is None:
-            failures.append(f"{value!r} has no verdict field")
+            # Only email/social facts owe a verdict; a role/channel without one is
+            # fine. An email/social WITH none is a structure problem, not a
+            # licensing one — left to g1_structure.
             continue
         if verdict not in _VERDICTS:
             failures.append(f"{value!r} verdict {verdict!r} not in the vocabulary")
             continue
         if verdict in forbidden:
             failures.append(f"{value!r} carries forbidden verdict {verdict!r}")
+        if kind not in _VERDICT_LICENSED_KINDS:
+            # A social_link's verdict word is only vocab/forbidden-checked — its
+            # deliverability against smtp/account_exists isn't a concept.
+            continue
         data = _cited_data(fact, obs_by_id)
         smtp_verified = any(d.get("smtp") == "verified" for d in data)
         acct_verified = any(d.get("account_exists") == "verified" for d in data)
@@ -361,7 +374,7 @@ def g1_structure(fixture: dict[str, Any],
         if value and not any(str(value) in (c or "") for c in cited):
             failures.append(f"value {value!r} is not a whole substring of any "
                             "cited observation")
-        if kind in _VERDICT_BEARING_KINDS:
+        if kind in _FIELD_BEARING_KINDS:
             if fact.get("verdict") not in _VERDICTS:
                 failures.append(f"{value!r} ({kind}) missing/invalid verdict field")
             if fact.get("marker") not in _MARKERS:
