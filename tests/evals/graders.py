@@ -406,3 +406,195 @@ def g1_structure(fixture: dict[str, Any],
 # layered "cheapest first" reading order; the citation grader is the only HARD
 # axis among the four.
 G1_GRADERS = (g1_citation, g1_verdict_vocabulary, g1_marker_caps, g1_structure)
+
+
+# --------------------------------------------------------------------------- #
+# G2 — label graders (code over the fixture's labels)
+#
+# G1 reads the SKILL.md rules against the bundle FIELDS; G2 reads the fixture's
+# committed labels — the recall floor (must_emit), the abstention hard axis
+# (must_not_emit), and the confidence partial-order the labels imply. Unlike G1,
+# G2 graders carry NO RULE_QUOTE: they enforce the corpus's labels, not a SKILL.md
+# sentence, so the drift lint has nothing to anchor them to (brief D5).
+# --------------------------------------------------------------------------- #
+
+
+def _norm_value(value: Any) -> str:
+    """Casefold + strip for case-insensitive EXACT value equality. Never a
+    substring test — a substring match would let `bram@corvossa.example` pass a
+    must_not_emit on `bram@wrenfield.example` (the abstention axis depends on
+    exactness, plan §4)."""
+    return str(value).strip().casefold()
+
+
+# --------------------------------------------------------------------------- #
+# g2_must_emit_recall (soft)
+# --------------------------------------------------------------------------- #
+
+def g2_must_emit_recall(fixture: dict[str, Any],
+                        output: dict[str, Any]) -> GradeResult:
+    """SOFT. The recall floor: for every must_emit label there is an emitted fact
+    with EXACT (case-insensitive) value equality whose verdict and marker match
+    the label WHEN the label specifies them, and whose confidence is <=
+    confidence_max when the label sets one.
+
+    A missing must_emit fact fails (omission is a failure `--ground` can't see —
+    it only grades what was emitted). Verdict/marker/confidence_max are checked
+    only when the label carries them: happy-dev's must_emit pins verdict+marker,
+    m365-exec pins confidence_max 0.6, namesake-tempting pins verdict only."""
+    must_emit = fixture.get("labels", {}).get("must_emit", [])
+    facts = _facts(output)
+    failures: list[str] = []
+
+    for entry in must_emit:
+        value = entry.get("value")
+        matches = [f for f in facts
+                   if _norm_value(f.get("value")) == _norm_value(value)]
+        if not matches:
+            failures.append(f"must_emit {value!r} not emitted (recall floor)")
+            continue
+        # A label can in principle match more than one emitted fact; the recall
+        # floor is satisfied if ANY matching fact meets the label's constraints.
+        if not any(_recall_entry_ok(entry, fact) for fact in matches):
+            failures.append(_recall_mismatch_detail(entry, matches))
+
+    passed = not failures
+    detail = "every must_emit recalled with matching label fields" if passed \
+        else "; ".join(failures)
+    return GradeResult("g2_must_emit_recall", passed, False, detail)
+
+
+def _recall_entry_ok(entry: dict[str, Any], fact: dict[str, Any]) -> bool:
+    """Does this emitted fact satisfy the label's specified fields? Unspecified
+    label fields (no verdict / no marker / no confidence_max) impose no
+    constraint."""
+    if "verdict" in entry and fact.get("verdict") != entry["verdict"]:
+        return False
+    if "marker" in entry and fact.get("marker") != entry["marker"]:
+        return False
+    if "confidence_max" in entry:
+        conf = fact.get("confidence")
+        if not isinstance(conf, (int, float)) or conf > entry["confidence_max"]:
+            return False
+    return True
+
+
+def _recall_mismatch_detail(entry: dict[str, Any],
+                            matches: list[dict[str, Any]]) -> str:
+    """Human-readable account of why every matching fact missed the label — names
+    the first match's offending fields (the common case is a single match)."""
+    fact = matches[0]
+    parts: list[str] = []
+    if "verdict" in entry and fact.get("verdict") != entry["verdict"]:
+        parts.append(f"verdict {fact.get('verdict')!r} != label {entry['verdict']!r}")
+    if "marker" in entry and fact.get("marker") != entry["marker"]:
+        parts.append(f"marker {fact.get('marker')!r} != label {entry['marker']!r}")
+    if "confidence_max" in entry:
+        conf = fact.get("confidence")
+        if not isinstance(conf, (int, float)) or conf > entry["confidence_max"]:
+            parts.append(f"confidence {conf!r} > confidence_max {entry['confidence_max']}")
+    return (f"must_emit {entry.get('value')!r} emitted but "
+            + ", ".join(parts or ["no matching fact met the label"]))
+
+
+# --------------------------------------------------------------------------- #
+# g2_must_not_emit (HARD)
+# --------------------------------------------------------------------------- #
+
+def g2_must_not_emit(fixture: dict[str, Any],
+                     output: dict[str, Any]) -> GradeResult:
+    """HARD. The misattribution / abstention axis: no emitted fact's value equals
+    (case-insensitive, EXACT) any must_not_emit value. namesake-tempting's
+    must_not_emit is the rival bram@corvossa.example — attributing the
+    stranger's address to the target is a stranger's-email failure, and it gets
+    no partial credit (plan §6, brief D9).
+
+    Exact equality, never substring: the rival and the target share the local
+    part `bram@`, so a substring test would false-positive the legitimate target
+    address."""
+    forbidden = {_norm_value(e.get("value"))
+                 for e in fixture.get("labels", {}).get("must_not_emit", [])
+                 if e.get("value") is not None}
+    failures: list[str] = []
+
+    if forbidden:
+        for fact in _facts(output):
+            if _norm_value(fact.get("value")) in forbidden:
+                failures.append(
+                    f"emitted {fact.get('value')!r} is a must_not_emit value "
+                    "(misattribution)")
+
+    passed = not failures
+    detail = "no must_not_emit value was emitted" if passed \
+        else "; ".join(failures)
+    return GradeResult("g2_must_not_emit", passed, True, detail)
+
+
+# --------------------------------------------------------------------------- #
+# g2_confidence_ordering (soft)
+# --------------------------------------------------------------------------- #
+
+# The intended partial order over evidence strength, derived from the LABEL (not
+# any absolute number): a stronger verdict, or a [+] marker, should not carry a
+# LOWER confidence than a weaker one. Ordering only — no absolute bounds, which
+# invite calibration theater (plan §5, §3 confidence-calibration fixture).
+_VERDICT_RANK = {"verified": 2, "google-confirmed": 1, "pattern-guess": 0}
+_MARKER_RANK = {"[+]": 1, "[?]": 0}
+
+
+def g2_confidence_ordering(fixture: dict[str, Any],
+                           output: dict[str, Any]) -> GradeResult:
+    """SOFT. Confidences must ORDER correctly, never hit an absolute bound. For
+    every pair of emitted facts that both carry a confidence, if fact A is
+    strictly stronger than fact B (by verdict rank, then marker rank) then A's
+    confidence must be >= B's. A weaker fact out-confidencing a stronger one is
+    the only failure; equal confidences are fine, and an all-0.95 output is NOT
+    penalized here (that is calibration theater this grader deliberately does not
+    police).
+
+    Strength is read from the emitted verdict/marker FIELDS, not the labels: the
+    grader checks the output's INTERNAL consistency, so it works on any output
+    regardless of which fixture produced it."""
+    scored = [f for f in _facts(output)
+              if isinstance(f.get("confidence"), (int, float))
+              and (f.get("verdict") in _VERDICT_RANK or f.get("marker") in _MARKER_RANK)]
+    failures: list[str] = []
+
+    for stronger in scored:
+        for weaker in scored:
+            if stronger is weaker:
+                continue
+            if _strictly_stronger(stronger, weaker) \
+                    and stronger["confidence"] < weaker["confidence"]:
+                failures.append(
+                    f"{stronger.get('value')!r} (verdict={stronger.get('verdict')!r}, "
+                    f"marker={stronger.get('marker')!r}, conf={stronger['confidence']}) "
+                    f"is stronger than {weaker.get('value')!r} "
+                    f"(verdict={weaker.get('verdict')!r}, marker={weaker.get('marker')!r}, "
+                    f"conf={weaker['confidence']}) yet carries LOWER confidence")
+
+    passed = not failures
+    detail = "confidences order with evidence strength" if passed \
+        else "; ".join(failures)
+    return GradeResult("g2_confidence_ordering", passed, False, detail)
+
+
+def _rank(fact: dict[str, Any]) -> tuple[int, int]:
+    """(verdict_rank, marker_rank) — unknown verdict/marker rank as the floor so a
+    well-licensed fact is never judged weaker than a malformed one."""
+    return (_VERDICT_RANK.get(fact.get("verdict"), -1),
+            _MARKER_RANK.get(fact.get("marker"), -1))
+
+
+def _strictly_stronger(a: dict[str, Any], b: dict[str, Any]) -> bool:
+    """A is strictly stronger than B iff its (verdict, marker) rank tuple
+    dominates — both components >= and at least one strictly greater. A pair that
+    disagrees (stronger verdict but weaker marker) is NOT ordered, so it imposes
+    no confidence constraint."""
+    ra, rb = _rank(a), _rank(b)
+    return ra[0] >= rb[0] and ra[1] >= rb[1] and ra != rb
+
+
+# The G2 grader registry, cheapest-first like G1_GRADERS. g2_must_not_emit is the
+# OTHER hard axis (alongside g1_citation); recall and ordering are soft.
+G2_GRADERS = (g2_must_emit_recall, g2_must_not_emit, g2_confidence_ordering)
