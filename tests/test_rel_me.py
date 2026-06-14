@@ -120,18 +120,23 @@ def test_links_back_via_rel_me():
     assert _links_back_to_domain(html, "jane.com")
 
 
-def test_links_back_via_plain_href():
+def test_plain_href_backlink_is_not_reciprocal():
+    """SECURITY: a plain (non-rel=me) link back to the domain is NOT a mutual
+    rel=me attestation. Accepting any href lets an attacker forge a
+    bidirectional binding whenever the victim's profile merely links to the
+    attacker's domain (a bio URL, a pinned-repo homepage). IndieAuth requires
+    the backlink itself to carry rel="me"."""
     html = '<a href="https://jane.com/contact">contact</a>'
-    assert _links_back_to_domain(html, "jane.com")
+    assert not _links_back_to_domain(html, "jane.com")
 
 
 def test_links_back_strips_www():
-    html = '<a href="https://www.jane.com/">site</a>'
+    html = '<a rel="me" href="https://www.jane.com/">site</a>'
     assert _links_back_to_domain(html, "jane.com")
 
 
 def test_no_back_link():
-    html = '<a href="https://someoneelse.com/">other</a>'
+    html = '<a rel="me" href="https://someoneelse.com/">other</a>'
     assert not _links_back_to_domain(html, "jane.com")
 
 
@@ -181,7 +186,7 @@ def test_rel_me_parsed_from_both_tag_types():
             <a rel="me noopener" href="https://fosstodon.org/@jane">masto</a>
         ''',
         "https://github.com/jane":
-            '<a href="https://jane.com/">website</a>',
+            '<a rel="me" href="https://jane.com/">website</a>',
         "https://fosstodon.org/@jane":
             '<a rel="me" href="https://jane.com/">site</a>',
     })
@@ -199,7 +204,7 @@ def test_rel_token_list_is_matched():
         "https://jane.com/":
             '<a rel="me noopener" href="https://github.com/jane">gh</a>',
         "https://github.com/jane":
-            '<a href="https://jane.com/">back</a>',
+            '<a rel="me" href="https://jane.com/">back</a>',
     })
     links = verify_rel_me("jane.com", fetch_fn=fetch_fn)
     assert len(links) == 1

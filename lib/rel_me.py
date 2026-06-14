@@ -132,20 +132,20 @@ def _host_of(url: str) -> str | None:
 
 
 def _links_back_to_domain(html: str, domain: str) -> bool:
-    """True if `html` contains a back-reference to `domain`: either a rel="me"
-    link whose host equals the domain, or ANY href whose host equals the
-    domain. Host comparison is normalized (www. stripped, lowercased)."""
+    """True iff `html` carries a RECIPROCAL rel="me" link whose host equals
+    `domain`. Host comparison is normalized (www. stripped, lowercased).
+
+    Only a rel="me" backlink counts — NOT any href. The IndieAuth /
+    IndieWeb model is mutual rel="me" attestation; accepting a plain href would
+    let an attacker forge a bidirectional binding whenever the victim's profile
+    merely links to the attacker-controlled domain (a bio URL, a pinned-repo
+    homepage). The strong "asserted" tier must require the backlink itself to
+    declare rel="me"."""
     if not html:
         return False
     target = _bare(domain)
-
-    # rel="me" back-links are the strongest, but the contract accepts any href
-    # to the domain — so we scan every href.
-    for tag in _TAG_RE.finditer(html):
-        href = _HREF_ATTR_RE.search(tag.group(2))
-        if not href:
-            continue
-        host = _host_of(href.group(1).strip())
+    for href in _extract_rel_me_hrefs(html):
+        host = _host_of(href)
         if host and _bare(host) == target:
             return True
     return False
@@ -204,8 +204,8 @@ def verify_rel_me(
          <link rel="me" href> and <a rel="me" href> (rel may be a token list).
          Keep absolute https URLs only; cap at `max_links`.
       2. Classify each target's platform by host.
-      3. Fetch each target; if it links back to <domain> (a rel="me" link or
-         any href to the domain) → bidirectional/asserted, else → possibly.
+      3. Fetch each target; if it links back to <domain> with a reciprocal
+         rel="me" link → bidirectional/asserted, else → possibly.
       4. Independently probe the Bluesky domain-handle well-known endpoint.
 
     Never raises. Returns [] if the site itself can't be fetched. A blocked or
