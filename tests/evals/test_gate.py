@@ -35,6 +35,10 @@ def _soft_fail() -> GradeResult:
     return GradeResult("g2_must_emit_recall", False, False, "must_emit omitted")
 
 
+def _other_soft_fail() -> GradeResult:
+    return GradeResult("g1_marker_caps", False, False, "marker not capped")
+
+
 # --------------------------------------------------------------------------- #
 # Hard axis — immediate fail, no rerun
 # --------------------------------------------------------------------------- #
@@ -128,6 +132,39 @@ def test_soft_axis_rerun_clears_when_failure_does_not_persist():
     })
     assert final.passed is True
     assert final.hard_failures == []
+
+
+def test_finalize_catches_a_new_soft_grader_that_persists_in_the_rerun():
+    """finding #5: the rerun must catch ANY soft grader persistent across it, not
+    only the original complaint. A fixture flagged for g2_must_emit_recall whose
+    rerun clears recall but now persistently fails g1_marker_caps fails the gate —
+    the old previously∩rerun intersection silently dropped the new failure."""
+    first = gate.aggregate({
+        "happy-dev": [[_hard_pass(), _soft_fail()], [_hard_pass(), _soft_fail()]],
+    })
+    assert first.fixtures_needing_rerun == ["happy-dev"]
+    final = gate.finalize_soft_axis(first, {
+        "happy-dev": [
+            [_hard_pass(), _soft_pass(), _other_soft_fail()],
+            [_hard_pass(), _soft_pass(), _other_soft_fail()],
+        ],
+    })
+    assert final.passed is False
+    assert any(fid == "happy-dev" and grader == "g1_marker_caps"
+               for fid, grader, _ in final.hard_failures)
+
+
+def test_finalize_fails_closed_when_rerun_trials_are_missing():
+    """finding #5: a soft-flagged fixture whose rerun trials never arrived has no
+    evidence it recovered. finalize_soft_axis must FAIL it (fail closed), not
+    silently clear it — the old code returned passed=True on an empty rerun."""
+    first = gate.aggregate({
+        "happy-dev": [[_hard_pass(), _soft_fail()], [_hard_pass(), _soft_fail()]],
+    })
+    assert first.fixtures_needing_rerun == ["happy-dev"]
+    final = gate.finalize_soft_axis(first, {})  # no rerun trials supplied
+    assert final.passed is False
+    assert any(fid == "happy-dev" for fid, _, _ in final.hard_failures)
 
 
 def test_finalize_preserves_an_earlier_hard_failure():

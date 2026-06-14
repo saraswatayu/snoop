@@ -201,17 +201,22 @@ def finalize_soft_axis(
 
     for fixture_id in first.fixtures_needing_rerun:
         rerun = rerun_trials_by_fixture.get(fixture_id, [])
-        # Which soft graders were persistent in the FIRST run?
-        first_agg = first.per_fixture.get(fixture_id)
-        previously_persistent = set(
-            first_agg.soft_persistent_graders if first_agg else []
-        )
+        if not rerun:
+            # Fail closed (finding #5): a fixture flagged for a rerun whose rerun
+            # trials never arrived has NO evidence it recovered. A measurement
+            # instrument must not absolve a persistent soft failure on missing
+            # data — the old code returned passed=True here.
+            soft_failures.append(
+                (fixture_id, "<rerun>",
+                 "soft-flagged fixture had no rerun trials (failing closed)"))
+            continue
         rerun_agg = _grade_trials(rerun, fixture_id)
-        rerun_persistent = set(rerun_agg.soft_persistent_graders)
-        # A grader still failing in EVERY rerun trial (and that was the original
-        # complaint) is now a confirmed, gate-failing soft failure.
-        still_failing = sorted(previously_persistent & rerun_persistent)
-        for grader in still_failing:
+        # Any soft grader still failing EVERY rerun trial is a confirmed,
+        # gate-failing soft failure — INCLUDING one that newly persists in the
+        # rerun, not only the original complaint (finding #5: the old
+        # previously∩rerun intersection silently dropped a newly-persistent soft
+        # failure observed in the rerun).
+        for grader in rerun_agg.soft_persistent_graders:
             soft_failures.append(
                 (fixture_id, grader,
                  "soft-axis failure persisted across the rerun"))
