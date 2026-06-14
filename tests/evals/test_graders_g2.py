@@ -88,6 +88,39 @@ def test_g2_must_emit_recall_fails_when_must_emit_is_omitted():
     assert "recall floor" in result.detail
 
 
+def test_g2_must_emit_recall_channel_satisfied_by_summary_suggestion():
+    """finding #3: the dead-end output contract allows a channel surfaced as a
+    FACT or merely suggested in the summary. g2_must_emit_recall (which pins the
+    dead-end's must_emit channel) must accept a summary suggestion too, so it no
+    longer contradicts g1_structure's dead-end shape and fail a contract-faithful
+    summary-only output. The two graders now AGREE the output is valid."""
+    fixture = _load("dead-end")
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": ("Dashiell Murkwater — no verified mailbox; reach via the "
+                    "contact form at https://graymoor.example/contact."),
+        "facts": [],
+    }
+    recall = graders.g2_must_emit_recall(fixture, output)
+    assert recall.passed, recall.detail
+    structure = graders.g1_structure(fixture, output)
+    assert structure.passed, structure.detail
+
+
+def test_g2_must_emit_recall_summary_suggestion_only_helps_channel_kind():
+    """The and/or-summary allowance is channel-only: an email must_emit still needs
+    an emitted FACT — a bare mention of the address in the summary is not recall."""
+    fixture = _load("happy-dev")  # must_emit is a kind==email
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": "Zinnia — zinnia@brightforge.example (mentioned, not emitted).",
+        "facts": [],
+    }
+    result = graders.g2_must_emit_recall(fixture, output)
+    assert not result.passed
+    assert "recall floor" in result.detail
+
+
 def test_g2_must_emit_recall_fails_when_confidence_exceeds_cap():
     """m365-exec pins confidence_max 0.6 on the pattern-guess address. An output
     that emits it at the right verdict/marker but confidence 0.9 breaks the cap —

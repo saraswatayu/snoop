@@ -614,9 +614,16 @@ def g2_must_emit_recall(fixture: dict[str, Any],
     A missing must_emit fact fails (omission is a failure `--ground` can't see —
     it only grades what was emitted). Verdict/marker/confidence_max are checked
     only when the label carries them: happy-dev's must_emit pins verdict+marker,
-    m365-exec pins confidence_max 0.6, namesake-tempting pins verdict only."""
+    m365-exec pins confidence_max 0.6, namesake-tempting pins verdict only.
+
+    finding #3: a kind=="channel" must_emit is ALSO satisfied by the channel value
+    appearing in the summary (a channel SUGGESTION), matching the dead-end output
+    contract (_output.py) and g1_structure's dead-end shape — so a contract-faithful
+    summary-only dead end is not failed by the recall floor. The and/or-summary
+    allowance is channel-only; an email recall floor still needs an emitted fact."""
     must_emit = fixture.get("labels", {}).get("must_emit", [])
     facts = _facts(output)
+    summary_cf = (output.get("summary") or "").casefold()
     failures: list[str] = []
 
     for entry in must_emit:
@@ -624,6 +631,9 @@ def g2_must_emit_recall(fixture: dict[str, Any],
         matches = [f for f in facts
                    if _norm_value(f.get("value")) == _norm_value(value)]
         if not matches:
+            if (entry.get("kind") == "channel" and value
+                    and str(value).strip().casefold() in summary_cf):
+                continue  # a channel suggested in the summary satisfies recall
             failures.append(f"must_emit {value!r} not emitted (recall floor)")
             continue
         # A label can in principle match more than one emitted fact; the recall
