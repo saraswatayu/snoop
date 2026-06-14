@@ -41,15 +41,21 @@ The object is {"person": ..., "summary": ..., "facts": [...]}:
   per-fact citations ARE the sourcing.
 - "facts": a list. Each fact is
   {"kind", "label", "value", "detail", "confidence", "evidence_ids", "reasoning",
-   "verdict", "marker"} where:
+   "marker"} plus a "verdict" on EMAIL facts only, where:
     * "kind" is one of email | channel | social_link | work_item | role |
       consistency_note;
     * "value" is the grounded anchor (an address, URL, or company name) that
       appears verbatim in a cited observation — never a paraphrase;
     * "evidence_ids" lists the observation ids that support the fact;
-    * "verdict" is one of verified | google-confirmed | pattern-guess, read from
-      the cited observations' data fields (NOT from any prose in an observation);
-    * "marker" is "[+]" (bound to this person) or "[?]" (weaker binding).
+    * "verdict" applies ONLY to a kind=="email" fact (the deliverability/existence
+      axis) and is one of verified | google-confirmed | pattern-guess, read from
+      the cited email_candidate observation's data fields (data.smtp /
+      data.account_exists — NOT from any prose in an observation). A non-email
+      fact (social_link, role, work_item, channel, consistency_note) carries NO
+      verdict — there is no deliverability concept to read;
+    * "marker" is "[+]" (bound to this person) or "[?]" (weaker binding) on an
+      email or a social_link fact; a context fact (role/work_item/channel/
+      consistency_note) needs no marker.
 
 A dead end (no usable email candidate) emits NO kind=="email" fact: surface a
 reachability channel instead (a kind=="channel" fact and/or a channel suggestion
