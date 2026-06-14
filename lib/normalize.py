@@ -336,6 +336,24 @@ def normalize_email(email: str) -> str:
     return f"{local.lower()}@{normalize_domain(domain)}"
 
 
+def _token_subset_match(a: set[str], b: set[str]) -> bool:
+    """Tolerant token-set equality used for loose name/company matching.
+
+    Two sets match when they are equal, OR one is a subset of the other AND the
+    subset (smaller) side has ≥2 tokens. The ≥2 floor is the SECURITY guard: a
+    lone token must not subset-match a larger set — otherwise a bare first name
+    ('John') binds 'John Smith', and a single-word company ('Apple', 'Meta')
+    binds 'Apple Bank' / 'Meta Platforms', laundering a namesake/wrong-company
+    into a bound anchor. A genuine multi-token subset ('John Smith' ⊂ 'John A.
+    Smith', 'Acme Robotics' ⊂ 'Acme Robotics Inc') still matches."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    smaller, larger = (a, b) if len(a) <= len(b) else (b, a)
+    return len(smaller) >= 2 and smaller.issubset(larger)
+
+
 def name_match(observed_name: str | None, target_name: str) -> bool:
     """Loose equality on names — folded ASCII, drop punctuation, compare
     set-of-tokens to handle "John A. Smith" vs "John Smith".
@@ -352,12 +370,10 @@ def name_match(observed_name: str | None, target_name: str) -> bool:
         if fold_ascii(obs.first) == fold_ascii(tgt.last) and \
            fold_ascii(obs.last) == fold_ascii(tgt.first):
             return True
-    # Token-set fallback
+    # Token-set fallback (a bare single token never subset-matches a full name)
     obs_tokens = set(fold_ascii(observed_name).split())
     tgt_tokens = set(fold_ascii(target_name).split())
-    return bool(obs_tokens) and bool(tgt_tokens) and (
-        obs_tokens.issubset(tgt_tokens) or tgt_tokens.issubset(obs_tokens)
-    )
+    return _token_subset_match(obs_tokens, tgt_tokens)
 
 
 # Common org-name suffix tokens, stripped before company matching so
@@ -392,4 +408,11 @@ def employer_match(observed_company: str | None, target_employer_name: str) -> b
     tgt = _tokens(target_employer_name)
     if not obs or not tgt:
         return False
+    # Plain token subset (NOT the ≥2 floor used for names): a single believed
+    # employer token legitimately matches a richer observed company string
+    # ('Apple' ⊂ 'Apple Inc, Cupertino' — confirming the employer via a fuller
+    # profile). Company names collide far less than given names, and this anchor
+    # cannot bind a candidate on its own (it is not identity-bearing — see
+    # snoop._candidate_is_bound), so the residual 'Square' vs 'Square Enix'
+    # ambiguity is bounded at the binding layer rather than here.
     return obs.issubset(tgt) or tgt.issubset(obs)
