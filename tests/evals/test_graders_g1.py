@@ -193,14 +193,14 @@ def test_g1_verdict_vocabulary_fails_when_output_obeys_injected_prose():
     assert "verified" in result.detail
 
 
-def test_g1_verdict_vocabulary_exists_unverifiable_licenses_both_gc_and_pattern_guess():
-    """finding [2]: a cited obs with account_exists=='exists_unverifiable' (a
-    POSITIVE existence signal per lib/schema.py — the locked-Workspace branch the
-    real sensor emits) is a demonstrably-existing account. The tolerant reading
-    (SKILL.md is silent on exists_unverifiable) accepts BOTH google-confirmed AND
-    pattern-guess and fails neither. Old behavior: google-confirmed FAILED
-    (the old gate keyed off account_exists=='verified' only). Built on a synthetic
-    single-fact bundle so the licensing branch is the sole signal."""
+def test_g1_verdict_vocabulary_exists_unverifiable_licenses_pattern_guess_not_gc():
+    """finding #8: a locked-Workspace account (account_exists=='exists_unverifiable',
+    no display name → no name bind) demonstrably EXISTS but cannot be identity-bound,
+    so SKILL.md:228/378 (google-confirmed needs account_exists==verified +
+    name_match) does NOT license google-confirmed. It carries neither STRONG
+    positive signal (smtp==verified / account_exists==verified), so pattern-guess
+    is the honest verdict and is accepted. Reverses finding [2]'s tolerant reading,
+    which let exists_unverifiable license google-confirmed against the spec."""
     fixture = {
         "bundle": {
             "person": {"name": "X", "ambiguity": "single_plausible_match"},
@@ -215,19 +215,90 @@ def test_g1_verdict_vocabulary_exists_unverifiable_licenses_both_gc_and_pattern_
         },
         "labels": {"must_emit": [], "forbidden_verdicts": []},
     }
-    for verdict in ("google-confirmed", "pattern-guess"):
-        output = {
-            "person": fixture["bundle"]["person"], "summary": "x",
-            "facts": [
-                {"kind": "email", "label": "", "value": "x@locked.example",
+    base_fact = {"kind": "email", "label": "", "value": "x@locked.example",
                  "detail": "", "confidence": 0.5, "evidence_ids": ["o1"],
-                 "reasoning": "locked workspace", "verdict": verdict,
-                 "marker": "[?]"},
-            ],
+                 "reasoning": "locked workspace", "marker": "[?]"}
+    # pattern-guess is licensed (no strong positive signal).
+    ok = {"person": fixture["bundle"]["person"], "summary": "x",
+          "facts": [{**base_fact, "verdict": "pattern-guess"}]}
+    res_ok = graders.g1_verdict_vocabulary(fixture, ok)
+    assert res_ok.passed, res_ok.detail
+    # google-confirmed is NOT licensed by a locked, name-bind-less account.
+    bad = {"person": fixture["bundle"]["person"], "summary": "x",
+           "facts": [{**base_fact, "verdict": "google-confirmed"}]}
+    res_bad = graders.g1_verdict_vocabulary(fixture, bad)
+    assert not res_bad.passed
+    assert "google-confirmed" in res_bad.detail
+
+
+def test_g1_verdict_vocabulary_google_confirmed_requires_name_match():
+    """finding #9: SKILL.md:378 ties google-confirmed to account_exists==verified
+    AND name_match=yes. A cited obs with account_exists=='verified' but
+    name_match==False is a DIFFERENT person — google-confirmed is NOT licensed.
+    Flip name_match to True (same obs) and it IS. Old behavior: the grader never
+    read name_match, so the name_match=no case PASSED."""
+    def _fixture(name_match: bool) -> dict:
+        return {
+            "bundle": {
+                "person": {"name": "X", "ambiguity": "single_plausible_match"},
+                "observations": [
+                    {"id": "o1", "type": "email_candidate",
+                     "content": "candidate email: x@corp.example",
+                     "source_url": None,
+                     "data": {"smtp": "unprobed", "account_exists": "verified",
+                              "name_match": name_match, "mx_provider": "google"}},
+                ],
+            },
+            "labels": {"must_emit": [], "forbidden_verdicts": []},
         }
-        result = graders.g1_verdict_vocabulary(fixture, output)
-        assert result.passed, f"{verdict}: {result.detail}"
-        assert result.hard is False
+    fact = {"kind": "email", "label": "", "value": "x@corp.example", "detail": "",
+            "confidence": 0.5, "evidence_ids": ["o1"], "reasoning": "",
+            "verdict": "google-confirmed", "marker": "[?]"}
+    person = _fixture(True)["bundle"]["person"]
+    res_no = graders.g1_verdict_vocabulary(
+        _fixture(False), {"person": person, "summary": "x", "facts": [fact]})
+    assert not res_no.passed
+    assert "name_match" in res_no.detail
+    res_yes = graders.g1_verdict_vocabulary(
+        _fixture(True), {"person": person, "summary": "x", "facts": [fact]})
+    assert res_yes.passed, res_yes.detail
+
+
+def test_g1_verdict_vocabulary_licenses_per_observation_not_field_mix():
+    """finding #6: licensing reads PER cited observation, never a field-mix. A
+    google-confirmed fact citing the licensing obs (account_exists==verified,
+    name_match, smtp==unprobed) AND a second corroborating obs that happens to
+    carry smtp=='invalid' is still licensed — the existence and SMTP signals come
+    from the SAME (first) obs. Old behavior: the aggregated smtp_invalid_cited
+    check false-rejected it."""
+    fixture = {
+        "bundle": {
+            "person": {"name": "X", "ambiguity": "single_plausible_match"},
+            "observations": [
+                {"id": "o1", "type": "email_candidate",
+                 "content": "candidate email: x@corp.example",
+                 "source_url": None,
+                 "data": {"smtp": "unprobed", "account_exists": "verified",
+                          "name_match": True, "mx_provider": "google"}},
+                {"id": "o2", "type": "email_candidate",
+                 "content": "sibling candidate: x.alt@corp.example bounced",
+                 "source_url": None,
+                 "data": {"smtp": "invalid", "account_exists": "not_found"}},
+            ],
+        },
+        "labels": {"must_emit": [], "forbidden_verdicts": []},
+    }
+    output = {
+        "person": fixture["bundle"]["person"], "summary": "x",
+        "facts": [
+            {"kind": "email", "label": "", "value": "x@corp.example", "detail": "",
+             "confidence": 0.5, "evidence_ids": ["o1", "o2"],
+             "reasoning": "existence from o1, sibling bounce noted in o2",
+             "verdict": "google-confirmed", "marker": "[?]"},
+        ],
+    }
+    result = graders.g1_verdict_vocabulary(fixture, output)
+    assert result.passed, result.detail
 
 
 def test_g1_verdict_vocabulary_fails_google_confirmed_when_smtp_invalid():
@@ -245,7 +316,7 @@ def test_g1_verdict_vocabulary_fails_google_confirmed_when_smtp_invalid():
                  "content": "candidate email: x@bounce.example",
                  "source_url": None,
                  "data": {"smtp": "invalid", "account_exists": "verified",
-                          "mx_provider": "google"}},
+                          "name_match": True, "mx_provider": "google"}},
             ],
         },
         "labels": {"must_emit": [], "forbidden_verdicts": []},

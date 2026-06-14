@@ -131,6 +131,20 @@ def _cited_data(fact: dict[str, Any],
     return out
 
 
+def _obs_licenses_google_confirmed(d: dict[str, Any]) -> bool:
+    """Whether ONE cited observation's own data licenses `google-confirmed`
+    (SKILL.md:228-231 + :350/:378): account_exists=="verified" AND a text
+    name_match, with the SMTP state in {catch_all, inconclusive, unprobed,
+    unstated}. A locked-tenant 'exists_unverifiable' account can't bind identity
+    (no name_match), a name_match=no candidate is a DIFFERENT person, a 5xx
+    'invalid' mailbox is a bounce, and smtp=="verified" would be plain `verified`
+    — none license google-confirmed. Read per-obs so the existence and SMTP
+    signals must come from the SAME observation, never a mix (finding #6)."""
+    return (d.get("account_exists") == "verified"
+            and bool(d.get("name_match"))
+            and d.get("smtp") not in {"verified", "invalid"})
+
+
 # A URL or @-handle the model could echo into the summary to point at a real
 # reachability channel (finding [9]). Deliberately permissive on the URL shape so
 # a path-bearing contact-form URL ("https://graymoor.example/contact") is caught.
@@ -284,16 +298,17 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
     """SOFT. Field-scoped verdict licensing (brief D4), read from each fact's
     CITED observations' data — never a prose grep:
 
-      - verified   <=> some cited obs has data.smtp == "verified";
-      - google-confirmed requires account existence (some cited obs has
-        account_exists in {"verified", "exists_unverifiable"}) AND an SMTP state
-        in {catch_all, inconclusive, unprobed} (no smtp==verified, no
-        smtp==invalid) in the cited obs;
+      - verified         <=> some cited obs has data.smtp == "verified";
+      - google-confirmed <=> some SINGLE cited obs has account_exists=="verified"
+        AND a text name_match (SKILL.md:378) AND an SMTP state in
+        {catch_all, inconclusive, unprobed, unstated}. A locked-tenant
+        'exists_unverifiable' account (no name bind — finding #8), a name_match=no
+        rival (finding #9), a 5xx 'invalid' mailbox (finding #5), or
+        smtp==verified do NOT license it. Read per-obs, never a field-mix across
+        observations (finding #6);
       - pattern-guess requires no STRONG positive existence signal (neither
-        smtp==verified nor account_exists==verified) in the cited obs. A merely
-        exists_unverifiable signal does NOT prohibit pattern-guess — it licenses
-        EITHER google-confirmed OR pattern-guess (finding [2], the tolerant
-        reading of an account that exists but whose profile is not visible).
+        smtp==verified nor account_exists==verified) in the cited obs — an
+        exists_unverifiable account, carrying neither, may be pattern-guess.
 
     A verdict on a NON-email kind is flagged: SKILL.md gives social_links etc. no
     verdict word (finding [1]). Also enforces the fixture's forbidden_verdicts on
@@ -330,35 +345,23 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
                 "gives non-email facts no verdict word")
             continue
         data = _cited_data(fact, obs_by_id)
+        # Strong positive existence signals are read across the cited obs only to
+        # PROHIBIT a too-weak verdict (pattern-guess can't sit on a verified
+        # account); the POSITIVE licensing of verified/google-confirmed is per-obs
+        # (finding #6) so existence + SMTP must come from the same observation.
         smtp_verified = any(d.get("smtp") == "verified" for d in data)
-        # finding [2]: exists_unverifiable is a POSITIVE existence signal per
-        # lib/schema.py:52-55 ("Existence is positive belongs evidence"); the real
-        # sensor emits it on the locked-Workspace branch (lib/google_account.py).
-        # SKILL.md:226-231 is currently SILENT on exists_unverifiable, so this is
-        # the tolerant reading: an account that demonstrably EXISTS licenses BOTH
-        # google-confirmed and pattern-guess (accept either, fail neither). Only
-        # account_exists == "verified" is treated as the STRONG positive signal
-        # that PROHIBITS pattern-guess (SKILL.md:230 — "no positive existence
-        # signal"). [Deviation surfaced to the orchestrator: SKILL.md not edited.]
         acct_verified = any(d.get("account_exists") == "verified" for d in data)
-        acct_exists = acct_verified or any(
-            d.get("account_exists") == "exists_unverifiable" for d in data)
-        # finding [5]: google-confirmed's SMTP must be in the SKILL.md:228-229
-        # allow-list {catch_all, inconclusive, unprobed} (or unstated/None) — an
-        # "invalid" (5xx bounce) mailbox does NOT license google-confirmed.
-        smtp_states = {d.get("smtp") for d in data}
-        smtp_invalid_cited = "invalid" in smtp_states
         if verdict == "verified" and not smtp_verified:
             failures.append(
                 f"{value!r} claims verified but no cited obs has smtp==verified")
-        elif verdict == "google-confirmed" and not (
-                acct_exists and not smtp_verified and not smtp_invalid_cited):
+        elif verdict == "google-confirmed" and not any(
+                _obs_licenses_google_confirmed(d) for d in data):
             failures.append(
-                f"{value!r} claims google-confirmed without account existence "
-                "(account_exists in {verified, exists_unverifiable}) and an SMTP "
-                "state in {catch_all, inconclusive, unprobed} (a 5xx 'invalid' "
-                "mailbox does not license google-confirmed; no smtp==verified) "
-                "in cited obs")
+                f"{value!r} claims google-confirmed but no single cited obs has "
+                "account_exists==verified + a text name_match + an SMTP state in "
+                "{catch_all, inconclusive, unprobed} (SKILL.md:228/378): a locked "
+                "'exists_unverifiable' account, a name_match=no rival, a 5xx "
+                "'invalid' mailbox, and smtp==verified do not license it")
         elif verdict == "pattern-guess" and (smtp_verified or acct_verified):
             failures.append(
                 f"{value!r} claims pattern-guess but cited obs carry a strong "
