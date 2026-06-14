@@ -719,8 +719,9 @@ def g2_confidence_ordering(fixture: dict[str, Any],
                            output: dict[str, Any]) -> GradeResult:
     """SOFT. Confidences must ORDER correctly, never hit an absolute bound. For
     every pair of emitted facts that both carry a confidence, if fact A is
-    strictly stronger than fact B (by verdict rank, then marker rank) then A's
-    confidence must be >= B's. A weaker fact out-confidencing a stronger one is
+    strictly stronger than fact B (dominating on the strength axes BOTH define)
+    then A's confidence must be >= B's. A weaker fact out-confidencing a stronger
+    one is
     the only failure; equal confidences are fine, and an all-0.95 output is NOT
     penalized here (that is calibration theater this grader deliberately does not
     police).
@@ -752,20 +753,30 @@ def g2_confidence_ordering(fixture: dict[str, Any],
     return GradeResult("g2_confidence_ordering", passed, False, detail)
 
 
-def _rank(fact: dict[str, Any]) -> tuple[int, int]:
-    """(verdict_rank, marker_rank) — unknown verdict/marker rank as the floor so a
-    well-licensed fact is never judged weaker than a malformed one."""
-    return (_VERDICT_RANK.get(fact.get("verdict"), -1),
-            _MARKER_RANK.get(fact.get("marker"), -1))
-
-
 def _strictly_stronger(a: dict[str, Any], b: dict[str, Any]) -> bool:
-    """A is strictly stronger than B iff its (verdict, marker) rank tuple
-    dominates — both components >= and at least one strictly greater. A pair that
-    disagrees (stronger verdict but weaker marker) is NOT ordered, so it imposes
-    no confidence constraint."""
-    ra, rb = _rank(a), _rank(b)
-    return ra[0] >= rb[0] and ra[1] >= rb[1] and ra != rb
+    """A is strictly stronger than B over the axes BOTH facts define. An axis
+    (verdict, marker) counts only when both facts carry a RANKABLE value for it —
+    so a verdict-less social_link and an email compare on the marker axis alone,
+    never with the social_link's absent verdict floored below pattern-guess
+    (finding #1, which made any email out-rank a validated social_link of the same
+    marker). A dominates iff, over the shared axes, it is >= on every one and >
+    on at least one. With no shared axis — or a disagreement across axes — the two
+    are incomparable and impose no confidence constraint."""
+    shared = False
+    stronger_somewhere = False
+    if a.get("verdict") in _VERDICT_RANK and b.get("verdict") in _VERDICT_RANK:
+        shared = True
+        ra, rb = _VERDICT_RANK[a["verdict"]], _VERDICT_RANK[b["verdict"]]
+        if ra < rb:
+            return False
+        stronger_somewhere = stronger_somewhere or ra > rb
+    if a.get("marker") in _MARKER_RANK and b.get("marker") in _MARKER_RANK:
+        shared = True
+        ma, mb = _MARKER_RANK[a["marker"]], _MARKER_RANK[b["marker"]]
+        if ma < mb:
+            return False
+        stronger_somewhere = stronger_somewhere or ma > mb
+    return shared and stronger_somewhere
 
 
 # The G2 grader registry, cheapest-first like G1_GRADERS. g2_must_not_emit is the

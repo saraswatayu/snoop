@@ -181,8 +181,10 @@ def test_g2_must_not_emit_matches_case_insensitively_not_by_substring():
 # --------------------------------------------------------------------------- #
 
 def test_g2_confidence_ordering_passes_when_stronger_outranks_weaker():
-    """A verified/[+] fact at 0.95 alongside a pattern-guess/[?] fact at 0.5
-    orders correctly: the stronger verdict carries the higher confidence."""
+    """A verified/[+] email at 0.95 alongside a pattern-guess/[?] email at 0.5
+    orders correctly: the stronger verdict carries the higher confidence.
+    Contract-faithful — both facts are emails (a non-email fact carries no
+    verdict/marker, finding #11)."""
     fixture = _load("namesake-tempting")
     output = {
         "person": fixture["bundle"]["person"], "summary": "",
@@ -190,8 +192,8 @@ def test_g2_confidence_ordering_passes_when_stronger_outranks_weaker():
             {"kind": "email", "label": "", "value": "bram@wrenfield.example",
              "detail": "", "confidence": 0.95, "evidence_ids": ["o6"],
              "reasoning": "", "verdict": "verified", "marker": "[+]"},
-            {"kind": "role", "label": "", "value": "Wrenfield",
-             "detail": "", "confidence": 0.5, "evidence_ids": ["o4"],
+            {"kind": "email", "label": "", "value": "bram@wrenfield.example",
+             "detail": "", "confidence": 0.5, "evidence_ids": ["o6"],
              "reasoning": "", "verdict": "pattern-guess", "marker": "[?]"},
         ],
     }
@@ -232,13 +234,61 @@ def test_g2_confidence_ordering_does_not_police_absolute_bounds():
             {"kind": "email", "label": "", "value": "bram@wrenfield.example",
              "detail": "", "confidence": 0.95, "evidence_ids": ["o6"],
              "reasoning": "", "verdict": "verified", "marker": "[+]"},
-            {"kind": "role", "label": "", "value": "Wrenfield",
-             "detail": "", "confidence": 0.95, "evidence_ids": ["o4"],
+            {"kind": "email", "label": "", "value": "bram@wrenfield.example",
+             "detail": "", "confidence": 0.95, "evidence_ids": ["o6"],
              "reasoning": "", "verdict": "pattern-guess", "marker": "[?]"},
         ],
     }
     result = graders.g2_confidence_ordering(fixture, output)
     assert result.passed, result.detail
+
+
+def test_g2_confidence_ordering_does_not_false_fail_strong_social_link_vs_weak_email():
+    """finding #1: a social_link carries a marker but NO verdict (v1 contract), so
+    it must not be floored below a pattern-guess email on the verdict axis. A
+    rational output — a validated github social_link [+] at 0.9 alongside a weaker
+    pattern-guess email [+] at 0.5 — shares only the marker axis (a tie), so
+    ordering imposes NO constraint and passes. Old behavior: the email out-ranked
+    the social_link via the -1 verdict floor and the grader false-failed."""
+    fixture = _load("happy-dev")
+    output = {
+        "person": fixture["bundle"]["person"], "summary": "Zinnia.",
+        "facts": [
+            {"kind": "email", "label": "", "value": "zinnia@brightforge.example",
+             "detail": "", "confidence": 0.5, "evidence_ids": ["o5"],
+             "reasoning": "pattern guess on employer domain",
+             "verdict": "pattern-guess", "marker": "[+]"},
+            {"kind": "social_link", "label": "github",
+             "value": "github.com/snoop-fixture-zinnia", "detail": "",
+             "confidence": 0.9, "evidence_ids": ["o1"],
+             "reasoning": "validated identity surface", "marker": "[+]"},
+        ],
+    }
+    result = graders.g2_confidence_ordering(fixture, output)
+    assert result.passed, result.detail
+
+
+def test_g2_confidence_ordering_still_orders_on_the_shared_marker_axis():
+    """The fix compares on shared axes, so it does NOT make everything
+    incomparable: a [+] fact under-confident relative to a [?] fact still fails on
+    the marker axis they share — a strongly-bound [+] email at 0.3 below a
+    weakly-bound [?] social_link at 0.8 is flagged."""
+    fixture = _load("happy-dev")
+    output = {
+        "person": fixture["bundle"]["person"], "summary": "Zinnia.",
+        "facts": [
+            {"kind": "email", "label": "", "value": "zinnia@brightforge.example",
+             "detail": "", "confidence": 0.3, "evidence_ids": ["o5"],
+             "reasoning": "", "verdict": "pattern-guess", "marker": "[+]"},
+            {"kind": "social_link", "label": "github",
+             "value": "github.com/snoop-fixture-zinnia", "detail": "",
+             "confidence": 0.8, "evidence_ids": ["o1"], "reasoning": "",
+             "marker": "[?]"},
+        ],
+    }
+    result = graders.g2_confidence_ordering(fixture, output)
+    assert not result.passed
+    assert "LOWER confidence" in result.detail
 
 
 # --------------------------------------------------------------------------- #
