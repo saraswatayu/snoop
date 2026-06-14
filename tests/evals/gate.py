@@ -138,6 +138,8 @@ def _grade_trials(trials: list[list[GradeResult]],
 
 def aggregate(
     trials_by_fixture: dict[str, list[list[GradeResult]]],
+    *,
+    expected_fixtures: Iterable[str] | None = None,
 ) -> GateResult:
     """First pass: roll every fixture's trials, apply the hard axis immediately,
     and SIGNAL (not perform) the soft-axis reruns.
@@ -146,7 +148,16 @@ def aggregate(
     trial. `fixtures_needing_rerun` lists fixtures whose ONLY unresolved issue is
     a persistent soft-axis failure (a fixture that already hard-failed is not
     re-run — the gate is decided). The runner re-runs those fixtures and feeds the
-    new trials to finalize_soft_axis."""
+    new trials to finalize_soft_axis.
+
+    Fail-closed on an under-measured run: a run that produced NO fixtures at all
+    is a misconfiguration (wrong dir, an empty glob, an import error that skipped
+    SPECS) and must NOT read green. If `expected_fixtures` (the roster the runner
+    intended to run, e.g. SPECS keys) is supplied, any expected fixture that is
+    absent OR ran zero trials is also a hard failure — catching an
+    under-populated run that would otherwise pass on the fixtures that did run. A
+    present fixture with zero trials but NOT on the roster stays tolerated (a
+    deliberate skip)."""
     per_fixture: dict[str, FixtureAggregate] = {}
     hard_failures: list[tuple[str, str, str]] = []
     rerun: list[str] = []
@@ -166,6 +177,21 @@ def aggregate(
             # rerun. A hard-failed fixture is NOT re-run (the gate already fails).
             suite.soft_flagged += 1
             rerun.append(fixture_id)
+
+    # The measurement instrument must not pass when it measured nothing.
+    if expected_fixtures is not None:
+        for fid in expected_fixtures:
+            agg = per_fixture.get(fid)
+            if agg is None:
+                hard_failures.append(
+                    (fid, "<roster>", "expected fixture produced no trials (missing)"))
+            elif agg.trials == 0:
+                hard_failures.append(
+                    (fid, "<roster>", "expected fixture ran zero trials"))
+    elif not trials_by_fixture:
+        hard_failures.append(
+            ("<suite>", "<roster>",
+             "the gate ran zero fixtures — misconfigured suite (failing closed)"))
 
     return GateResult(
         passed=not hard_failures,

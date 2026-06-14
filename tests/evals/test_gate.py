@@ -265,12 +265,37 @@ def test_empty_trial_list_is_not_pass_k_but_does_not_fail_the_gate():
     assert result.suite_aggregates.passed_k == 0
 
 
-def test_empty_suite_passes_vacuously():
-    """No fixtures at all: the gate passes vacuously with empty everything, and
-    pass_k_rate over an empty set is 0.0 (no division by zero)."""
+def test_empty_suite_fails_closed():
+    """No fixtures at all is a MISCONFIGURED run (wrong dir, a glob that matched
+    nothing, an import error that skipped loading SPECS) — the gate must NOT read
+    green when it measured nothing. It fails closed with a hard failure."""
     result = gate.aggregate({})
-    assert result.passed is True
-    assert result.hard_failures == []
-    assert result.fixtures_needing_rerun == []
+    assert result.passed is False
+    assert result.hard_failures  # carries a "ran zero fixtures" hard failure
     assert result.suite_aggregates.fixtures == 0
     assert gate.pass_k_rate(result.per_fixture.values()) == 0.0
+
+
+def test_roster_fails_closed_on_missing_or_empty_expected_fixture():
+    """When the expected fixture roster is supplied, any expected fixture that
+    is absent OR ran zero trials fails the gate — catching an under-populated
+    run that would otherwise pass on the fixtures that did run."""
+    trials = {"happy-dev": [[_hard_pass()]]}
+    # 'm365-exec' is expected but never ran; 'dead-end' ran but with zero trials.
+    result = gate.aggregate(
+        {**trials, "dead-end": []},
+        expected_fixtures=["happy-dev", "m365-exec", "dead-end"],
+    )
+    assert result.passed is False
+    failed = {fid for fid, _grader, _detail in result.hard_failures}
+    assert "m365-exec" in failed  # missing entirely
+    assert "dead-end" in failed   # present but zero trials
+
+
+def test_roster_passes_when_all_expected_fixtures_ran():
+    trials = {
+        "happy-dev": [[_hard_pass()]],
+        "m365-exec": [[_hard_pass()]],
+    }
+    result = gate.aggregate(trials, expected_fixtures=["happy-dev", "m365-exec"])
+    assert result.passed is True
