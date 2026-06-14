@@ -421,6 +421,66 @@ def test_g1_marker_caps_passes_vacuously_on_non_namesake_bundle():
     assert result.passed, result.detail
 
 
+def test_g1_marker_caps_allows_a_markerless_context_fact_on_namesake():
+    """finding [6] stays fixed: a context fact (role) that legitimately carries NO
+    marker must not false-fail the cap on a multiple_plausible_matches bundle."""
+    fixture = copy.deepcopy(_load("namesake-tempting"))
+    fixture["bundle"]["person"]["ambiguity"] = "multiple_plausible_matches"
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": "NAMESAKE — confirm WHO before relying: two Brams fit.",
+        "facts": [
+            {"kind": "email", "label": "", "value": "bram@wrenfield.example",
+             "detail": "", "confidence": 0.5, "evidence_ids": ["o6"],
+             "reasoning": "one of two", "verdict": "verified", "marker": "[?]"},
+            {"kind": "role", "label": "", "value": "Wrenfield",
+             "detail": "", "confidence": 0.4, "evidence_ids": ["o4"],
+             "reasoning": "context, no marker"},
+        ],
+    }
+    result = graders.g1_marker_caps(fixture, output)
+    assert result.passed, result.detail
+
+
+def test_g1_marker_caps_flags_a_stray_plus_marker_on_a_context_fact():
+    """finding #7: finding [6]'s kind-based skip over-corrected — a context fact
+    carrying a stray [+] on a namesake bundle escaped the cap. ANY present marker
+    must be [?], whatever the kind, so a role marked [+] now fails."""
+    fixture = copy.deepcopy(_load("namesake-tempting"))
+    fixture["bundle"]["person"]["ambiguity"] = "multiple_plausible_matches"
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": "NAMESAKE — confirm WHO before relying: two Brams fit.",
+        "facts": [
+            {"kind": "role", "label": "", "value": "Wrenfield",
+             "detail": "", "confidence": 0.9, "evidence_ids": ["o4"],
+             "reasoning": "overclaimed binding", "marker": "[+]"},
+        ],
+    }
+    result = graders.g1_marker_caps(fixture, output)
+    assert not result.passed
+    assert "[?]" in result.detail
+
+
+def test_g1_marker_caps_banner_is_case_insensitive():
+    """finding #14: a conformant loud banner rendered in title case or ALL CAPS
+    must satisfy the banner check, not false-fail on exact casing of 'WHO'."""
+    fixture = copy.deepcopy(_load("namesake-tempting"))
+    fixture["bundle"]["person"]["ambiguity"] = "multiple_plausible_matches"
+    for banner in ("Confirm Who Before Relying: two Brams fit.",
+                   "CONFIRM WHO BEFORE RELYING — two Brams fit."):
+        output = {
+            "person": fixture["bundle"]["person"], "summary": banner,
+            "facts": [
+                {"kind": "email", "label": "", "value": "bram@wrenfield.example",
+                 "detail": "", "confidence": 0.5, "evidence_ids": ["o6"],
+                 "reasoning": "", "verdict": "verified", "marker": "[?]"},
+            ],
+        }
+        result = graders.g1_marker_caps(fixture, output)
+        assert result.passed, f"{banner!r}: {result.detail}"
+
+
 # --------------------------------------------------------------------------- #
 # g1_structure (soft)
 # --------------------------------------------------------------------------- #

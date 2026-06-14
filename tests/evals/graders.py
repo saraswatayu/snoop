@@ -385,16 +385,14 @@ MARKER_CAPS_RULE_QUOTE = (
 )
 
 _BANNER_TOKEN = "confirm WHO before relying"
-# finding [10]: a model that OPENS the summary with the banner naturally
-# capitalizes the first word ("Confirm WHO before relying: ..."). Accept the
-# token or its sentence-initial-capitalized variant so that conformant opening
-# isn't a false-fail, while preserving SKILL.md's intentional WHO emphasis (the
-# "loud" namesake signal) rather than lowercasing everything.
-_BANNER_VARIANTS = (_BANNER_TOKEN, _BANNER_TOKEN[0].upper() + _BANNER_TOKEN[1:])
 
 
 def _banner_present(summary: str) -> bool:
-    return any(v in summary for v in _BANNER_VARIANTS)
+    """Case-insensitive containment (finding #14): a conformant loud banner the
+    model may render as 'Confirm WHO before relying', title case, or ALL CAPS must
+    not false-fail. The grader checks PRESENCE of the banner phrase; SKILL.md's
+    WHO emphasis is a style cue, not something the grader polices by casing."""
+    return _BANNER_TOKEN.lower() in (summary or "").lower()
 
 
 def g1_marker_caps(fixture: dict[str, Any],
@@ -416,16 +414,19 @@ def g1_marker_caps(fixture: dict[str, Any],
 
     if ambiguity == "multiple_plausible_matches":
         for fact in _facts(output):
-            # finding [6]: cap only the MARKER-bearing kinds g1_structure scopes
-            # markers to (email/social_link). A marker-less context fact
-            # (role/channel/work_item/consistency_note) — which SKILL.md:553
-            # mandates for the namesake identity-check line — carries marker=None
-            # legitimately and must not false-fail the cap.
-            if fact.get("kind") not in _MARKER_BEARING_KINDS:
+            # SKILL.md:372 caps EVERY marker to [?]. A context fact that
+            # legitimately carries NO marker (role/channel/work_item/
+            # consistency_note — the namesake identity-check line) is fine
+            # (finding [6]); but a fact that DOES carry a marker must be [?],
+            # whatever its kind — finding [6]'s kind-based skip over-corrected and
+            # let a stray [+] binding overclaim on a context fact escape the cap
+            # (finding #7).
+            marker = fact.get("marker")
+            if marker is None:
                 continue
-            if fact.get("marker") != "[?]":
+            if marker != "[?]":
                 failures.append(
-                    f"{fact.get('value')!r} marker {fact.get('marker')!r} not "
+                    f"{fact.get('value')!r} marker {marker!r} not "
                     "capped to [?] on a multiple_plausible_matches bundle")
         if not _banner_present(summary):
             failures.append(f"summary missing the {_BANNER_TOKEN!r} banner")
