@@ -36,6 +36,26 @@ def _profile(facts, *, ambiguity="single_plausible_match",
     )
 
 
+# ---- robustness --------------------------------------------------------------
+
+
+def test_render_tolerates_nonnumeric_identity_confidence():
+    """--ground stdin is untrusted: a model that emits identity_confidence as a
+    string ('high', or '0.8' quoted) must not crash the render with a TypeError
+    on the `ic >= 0.75` comparison — it degrades to 'no host confidence'."""
+    out = render_reasoned_card(_profile([_fact()], identity_confidence="high"))  # type: ignore[arg-type]
+    assert "alice@corp.com" in out  # rendered, did not raise
+
+
+def test_out_of_vocab_fact_kind_is_surfaced_not_dropped():
+    """ground() no longer constrains a fact's kind to a vocabulary, so a
+    grounded fact with an unexpected kind must still render — silently dropping
+    it would lose a cited, grounded fact from the card."""
+    facts = [_fact(kind="affiliation", value="Board member, Acme Foundation")]
+    out = render_reasoned_card(_profile(facts))
+    assert "Board member, Acme Foundation" in out
+
+
 # ---- summary + sections ------------------------------------------------------
 
 

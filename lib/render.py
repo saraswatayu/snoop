@@ -44,6 +44,29 @@ _KIND_SECTION: dict[str, str] = {
 _KIND_ORDER = list(_KIND_SECTION)
 
 
+def _as_optional_float(value: object) -> float | None:
+    """Coerce an untrusted identity_confidence (from --ground stdin) to a float,
+    or None if it isn't numeric — so a model emitting "high" or a quoted "0.8"
+    can't crash the render on a `>=` comparison against a string."""
+    if value is None:
+        return None
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _section_label(kind: str) -> str:
+    """Display label for a fact kind. Known kinds get their curated section
+    name; an out-of-vocab kind (ground() no longer constrains kind) gets a
+    derived label so the fact still renders instead of being dropped."""
+    known = _KIND_SECTION.get(kind)
+    if known:
+        return known
+    derived = kind.replace("_", " ").strip().title()
+    return derived or "Other"
+
+
 def _conf_marker(confidence: float, person: Person) -> str:
     """Confidence band -> compact glyph: ✓ asserted, ~ possibly, · weak.
 
@@ -109,7 +132,7 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None,
     # another way (high identity_confidence) — e.g. a WebFetched public profile
     # snoop can't sense. The banner doesn't enumerate what wasn't found, since the
     # host may have found exactly that.
-    ic = profile.identity_confidence
+    ic = _as_optional_float(profile.identity_confidence)
     host_confident = ic is not None and ic >= 0.75
     if person.ambiguity == "multiple_plausible_matches" or (ic is not None and ic < 0.5):
         lines.append("")
@@ -125,13 +148,17 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None,
     for f in profile.facts:
         by_kind.setdefault(f.kind, []).append(f)
 
-    for kind in _KIND_ORDER:
+    # Known kinds in curated order, then any out-of-vocab kind (ground() doesn't
+    # constrain `kind`) so a grounded fact with an unexpected kind still renders.
+    ordered_kinds = _KIND_ORDER + sorted(
+        k for k in by_kind if k not in _KIND_SECTION)
+    for kind in ordered_kinds:
         facts = sorted(by_kind.get(kind, []),
                        key=lambda f: f.confidence, reverse=True)
         if not facts:
             continue
         lines.append("")
-        lines.append(f"{_KIND_SECTION[kind]}:")
+        lines.append(f"{_section_label(kind)}:")
         for f in facts:
             value = _oneline(f.value)
             label = _oneline(f.label)
