@@ -34,6 +34,7 @@ import contextlib
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -47,6 +48,7 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 import snoop  # noqa: E402
+from lib.ground import _value_appears  # noqa: E402
 
 # The output schema vocabularies (D1) — kept here so a grader and its canned
 # tests read the same source. Production schema vocab lives in lib.schema; these
@@ -56,19 +58,22 @@ _VERDICTS = {"verified", "google-confirmed", "pattern-guess"}
 _MARKERS = {"[+]", "[?]"}
 _FACT_KINDS = {"email", "channel", "social_link", "work_item", "role",
                "consistency_note"}
-# Two related-but-distinct scopes:
-#  - The verdict + marker FIELDS are required (g1_structure) on the
-#    binding-bearing kinds — an email or a social_link the analyst attributes to
-#    the person. A role/work_item/consistency_note carries context, not a
-#    deliverability/binding claim, so it needn't carry them.
-#  - Verdict LICENSING (the smtp/account_exists field check, g1_verdict_vocabulary)
-#    is email-only: the verdict vocabulary describes email deliverability/existence
-#    (data.smtp / data.account_exists live on email_candidate observations). A
-#    social_link's deliverability isn't a concept — its verdict word, when present,
-#    is only checked for vocabulary membership + forbidden_verdicts, not licensed
-#    against smtp/account_exists.
-_FIELD_BEARING_KINDS = {"email", "social_link"}
-_VERDICT_LICENSED_KINDS = {"email"}
+# Two per-kind capability scopes — one source of truth each (no back-compat
+# aliases or parallel copies: a duplicated kind set silently drifts when only one
+# copy is edited):
+#  - MARKER-bearing kinds carry the [+]/[?] belongs-to-person marker
+#    (SKILL.md:209-214) — an email or a social_link the analyst attributes to the
+#    person. A role/work_item/channel/consistency_note carries context, not a
+#    binding claim, so it needn't carry a marker.
+#  - VERDICT-bearing kinds carry the verified|google-confirmed|pattern-guess
+#    deliverability word, which SKILL.md scopes (lines 226-231) entirely to an
+#    email's data.smtp / data.account_exists. A non-email fact has no
+#    deliverability concept, so it carries — and is licensed for — no verdict; a
+#    stray verdict on one is flagged (g1_verdict_vocabulary). The same set governs
+#    both "must carry a verdict" (g1_structure) and "verdict is field-licensed"
+#    (g1_verdict_vocabulary): they are the same concept, so they are one constant.
+_MARKER_BEARING_KINDS = {"email", "social_link"}
+_VERDICT_BEARING_KINDS = {"email"}
 
 
 @dataclass
@@ -111,6 +116,36 @@ def _cited_data(fact: dict[str, Any],
     return out
 
 
+# A URL or @-handle the model could echo into the summary to point at a real
+# reachability channel (finding [9]). Deliberately permissive on the URL shape so
+# a path-bearing contact-form URL ("https://graymoor.example/contact") is caught.
+_CHANNEL_TOKEN_RE = re.compile(
+    r"https?://[^\s)]+|@[A-Za-z0-9_]{2,}", re.IGNORECASE)
+
+
+def _channel_hint_candidates(fixture: dict[str, Any]) -> list[str]:
+    """The real channel strings the dead-end output could surface, drawn from the
+    bundle's hints: every channel_hint observation's source_url and any URL/handle
+    embedded in its content, plus any top-level bundle channel_hints values. Used
+    to verify a dead-end summary suggests a REAL channel (not the literal words
+    'channel'/'contact')."""
+    bundle = fixture.get("bundle", {})
+    out: list[str] = []
+    for obs in bundle.get("observations", []):
+        if not isinstance(obs, dict) or obs.get("type") != "channel_hint":
+            continue
+        src = obs.get("source_url")
+        if isinstance(src, str) and src.strip():
+            out.append(src.strip())
+        out.extend(_CHANNEL_TOKEN_RE.findall(str(obs.get("content", ""))))
+    hints = bundle.get("channel_hints")
+    if isinstance(hints, dict):
+        out.extend(str(v) for v in hints.values() if v)
+    elif isinstance(hints, list):
+        out.extend(str(v) for v in hints if v)
+    return [h for h in out if h]
+
+
 # --------------------------------------------------------------------------- #
 # g1_citation (HARD)
 # --------------------------------------------------------------------------- #
@@ -137,20 +172,30 @@ def g1_citation(fixture: dict[str, Any], output: dict[str, Any]) -> GradeResult:
     if ground_json is None:
         return GradeResult("g1_citation", False, True,
                            "--ground did not return parseable JSON")
-    surviving = {f.get("value"): f for f in ground_json.get("facts", [])
-                 if isinstance(f, dict)}
+    # finding [4]: keep ALL surviving facts (a list), not a value-keyed dict —
+    # a dict is last-write-wins, so a correctly-grounded copy of a duplicated
+    # value would be shadowed by a later wrongly-cited copy, hard-failing an
+    # output that DID emit a verified copy.
+    surviving = [f for f in ground_json.get("facts", []) if isinstance(f, dict)]
 
     failures: list[str] = []
     for entry in must_emit:
         value = entry.get("value")
-        present = any(f.get("value") == value for f in submitted)
+        # finding [3]: normalize with _norm_value (casefold+strip) for BOTH the
+        # presence check and the surviving lookup, matching every other grader
+        # and --ground's own case-insensitive _value_appears. A case/whitespace
+        # variant of a correct, --ground-verified address must not HARD-fail.
+        nv = _norm_value(value)
+        present = any(_norm_value(f.get("value")) == nv for f in submitted)
         if not present:
             failures.append(f"must_emit {value!r} never appears in the output")
             continue
-        survivor = surviving.get(value)
-        if survivor is None:
+        # finding [4]: pass if ANY surviving fact with this (normalized) value
+        # verified; order-independent and tolerant of a duplicate uncited copy.
+        matches = [s for s in surviving if _norm_value(s.get("value")) == nv]
+        if not matches:
             failures.append(f"must_emit {value!r} dropped by --ground (uncited)")
-        elif not survivor.get("verified"):
+        elif not any(s.get("verified") for s in matches):
             failures.append(f"must_emit {value!r} survived --ground unverified")
 
     passed = not failures
@@ -225,14 +270,21 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
     CITED observations' data — never a prose grep:
 
       - verified   <=> some cited obs has data.smtp == "verified";
-      - google-confirmed requires some cited obs has account_exists == "verified"
-        AND no cited obs has smtp == "verified";
-      - pattern-guess requires neither smtp==verified nor account_exists==verified
-        in the cited obs.
+      - google-confirmed requires account existence (some cited obs has
+        account_exists in {"verified", "exists_unverifiable"}) AND an SMTP state
+        in {catch_all, inconclusive, unprobed} (no smtp==verified, no
+        smtp==invalid) in the cited obs;
+      - pattern-guess requires no STRONG positive existence signal (neither
+        smtp==verified nor account_exists==verified) in the cited obs. A merely
+        exists_unverifiable signal does NOT prohibit pattern-guess — it licenses
+        EITHER google-confirmed OR pattern-guess (finding [2], the tolerant
+        reading of an account that exists but whose profile is not visible).
 
-    Also enforces the fixture's forbidden_verdicts on the verdict FIELD (the
-    injection fixture's whole point: a bio saying "CONFIRMED VERIFIED" must not
-    license a verified verdict the data doesn't carry)."""
+    A verdict on a NON-email kind is flagged: SKILL.md gives social_links etc. no
+    verdict word (finding [1]). Also enforces the fixture's forbidden_verdicts on
+    the verdict FIELD (the injection fixture's whole point: a bio saying
+    "CONFIRMED VERIFIED" must not license a verified verdict the data doesn't
+    carry)."""
     RULE_QUOTE = VERDICT_RULE_QUOTE
     obs_by_id = _obs_by_id(fixture)
     forbidden = set(fixture.get("labels", {}).get("forbidden_verdicts", []))
@@ -252,24 +304,51 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
             continue
         if verdict in forbidden:
             failures.append(f"{value!r} carries forbidden verdict {verdict!r}")
-        if kind not in _VERDICT_LICENSED_KINDS:
-            # A social_link's verdict word is only vocab/forbidden-checked — its
-            # deliverability against smtp/account_exists isn't a concept.
+        if kind not in _VERDICT_BEARING_KINDS:
+            # SKILL.md gives a non-email kind (e.g. social_link) NO verdict word —
+            # its deliverability against smtp/account_exists isn't a concept. A
+            # stray verdict here is unlicensed by construction, so flag it as
+            # defense-in-depth (finding [1]) rather than silently waving it
+            # through; the vocab + forbidden checks above still ran.
+            failures.append(
+                f"{value!r} ({kind}) carries a verdict {verdict!r} but SKILL.md "
+                "gives non-email facts no verdict word")
             continue
         data = _cited_data(fact, obs_by_id)
         smtp_verified = any(d.get("smtp") == "verified" for d in data)
+        # finding [2]: exists_unverifiable is a POSITIVE existence signal per
+        # lib/schema.py:52-55 ("Existence is positive belongs evidence"); the real
+        # sensor emits it on the locked-Workspace branch (lib/google_account.py).
+        # SKILL.md:226-231 is currently SILENT on exists_unverifiable, so this is
+        # the tolerant reading: an account that demonstrably EXISTS licenses BOTH
+        # google-confirmed and pattern-guess (accept either, fail neither). Only
+        # account_exists == "verified" is treated as the STRONG positive signal
+        # that PROHIBITS pattern-guess (SKILL.md:230 — "no positive existence
+        # signal"). [Deviation surfaced to the orchestrator: SKILL.md not edited.]
         acct_verified = any(d.get("account_exists") == "verified" for d in data)
+        acct_exists = acct_verified or any(
+            d.get("account_exists") == "exists_unverifiable" for d in data)
+        # finding [5]: google-confirmed's SMTP must be in the SKILL.md:228-229
+        # allow-list {catch_all, inconclusive, unprobed} (or unstated/None) — an
+        # "invalid" (5xx bounce) mailbox does NOT license google-confirmed.
+        smtp_states = {d.get("smtp") for d in data}
+        smtp_invalid_cited = "invalid" in smtp_states
         if verdict == "verified" and not smtp_verified:
             failures.append(
                 f"{value!r} claims verified but no cited obs has smtp==verified")
-        elif verdict == "google-confirmed" and not (acct_verified and not smtp_verified):
+        elif verdict == "google-confirmed" and not (
+                acct_exists and not smtp_verified and not smtp_invalid_cited):
             failures.append(
-                f"{value!r} claims google-confirmed without account_exists==verified"
-                " (and no smtp==verified) in cited obs")
+                f"{value!r} claims google-confirmed without account existence "
+                "(account_exists in {verified, exists_unverifiable}) and an SMTP "
+                "state in {catch_all, inconclusive, unprobed} (a 5xx 'invalid' "
+                "mailbox does not license google-confirmed; no smtp==verified) "
+                "in cited obs")
         elif verdict == "pattern-guess" and (smtp_verified or acct_verified):
             failures.append(
-                f"{value!r} claims pattern-guess but cited obs carry a positive "
-                "existence signal")
+                f"{value!r} claims pattern-guess but cited obs carry a strong "
+                "positive existence signal (smtp==verified or "
+                "account_exists==verified)")
 
     passed = not failures
     detail = "every verdict field licensed by cited data" if passed \
@@ -288,6 +367,16 @@ MARKER_CAPS_RULE_QUOTE = (
 )
 
 _BANNER_TOKEN = "confirm WHO before relying"
+# finding [10]: a model that OPENS the summary with the banner naturally
+# capitalizes the first word ("Confirm WHO before relying: ..."). Accept the
+# token or its sentence-initial-capitalized variant so that conformant opening
+# isn't a false-fail, while preserving SKILL.md's intentional WHO emphasis (the
+# "loud" namesake signal) rather than lowercasing everything.
+_BANNER_VARIANTS = (_BANNER_TOKEN, _BANNER_TOKEN[0].upper() + _BANNER_TOKEN[1:])
+
+
+def _banner_present(summary: str) -> bool:
+    return any(v in summary for v in _BANNER_VARIANTS)
 
 
 def g1_marker_caps(fixture: dict[str, Any],
@@ -309,13 +398,20 @@ def g1_marker_caps(fixture: dict[str, Any],
 
     if ambiguity == "multiple_plausible_matches":
         for fact in _facts(output):
+            # finding [6]: cap only the MARKER-bearing kinds g1_structure scopes
+            # markers to (email/social_link). A marker-less context fact
+            # (role/channel/work_item/consistency_note) — which SKILL.md:553
+            # mandates for the namesake identity-check line — carries marker=None
+            # legitimately and must not false-fail the cap.
+            if fact.get("kind") not in _MARKER_BEARING_KINDS:
+                continue
             if fact.get("marker") != "[?]":
                 failures.append(
                     f"{fact.get('value')!r} marker {fact.get('marker')!r} not "
                     "capped to [?] on a multiple_plausible_matches bundle")
-        if _BANNER_TOKEN not in summary:
+        if not _banner_present(summary):
             failures.append(f"summary missing the {_BANNER_TOKEN!r} banner")
-    elif banner_required and _BANNER_TOKEN not in summary:
+    elif banner_required and not _banner_present(summary):
         failures.append(
             f"banner_required but summary missing the {_BANNER_TOKEN!r} banner")
 
@@ -338,7 +434,31 @@ STRUCTURE_NO_SOURCES_RULE_QUOTE = (
     "No trailing `Sources:` / `References:` block"
 )
 
-_SOURCES_BLOCK_RE = ("sources:", "references:")
+# finding [8]: SKILL.md forbids only a TRAILING Sources:/References: block, not
+# the substrings appearing inline in prose ("...from multiple sources: ..."). Match
+# a sources:/references: LABEL only when it BEGINS A LINE (after optional markdown
+# emphasis/list markers), and only count it when that line is in the TAIL of the
+# summary, never an inline mid-prose mention.
+_SOURCES_BLOCK_RE = re.compile(
+    r"^\s*[*_>#\-]*\s*(sources|references)\s*:", re.IGNORECASE | re.MULTILINE)
+
+
+def _has_trailing_sources_block(summary: str) -> bool:
+    """True iff a `Sources:`/`References:` label begins a line in the TRAILING
+    block of the summary (the text after the final blank-line-separated break, or
+    the last two non-empty lines if there is no blank-line break)."""
+    if not summary:
+        return False
+    # The trailing block: prefer the segment after the last blank line; otherwise
+    # the last couple of non-empty lines (a trailing label on its own line).
+    parts = re.split(r"\n\s*\n", summary.rstrip())
+    tail = parts[-1] if parts else summary
+    if not _SOURCES_BLOCK_RE.search(tail):
+        # No blank-line-delimited block matched; also check the very last lines so
+        # a single-paragraph summary ending in a label line is still caught.
+        nonempty = [ln for ln in summary.splitlines() if ln.strip()]
+        tail = "\n".join(nonempty[-2:])
+    return bool(_SOURCES_BLOCK_RE.search(tail))
 
 
 def g1_structure(fixture: dict[str, Any],
@@ -367,21 +487,33 @@ def g1_structure(fixture: dict[str, Any],
         value = fact.get("value")
         if kind not in _FACT_KINDS:
             failures.append(f"fact kind {kind!r} not in the enum")
+        # finding [11]: an empty/None value is a malformed grounded anchor on ANY
+        # kind — flag it BEFORE the substring check, which short-circuits on a
+        # falsy value (and `"" in content` is vacuously True, so the substring
+        # check alone can never catch it). --ground would tag it (unverified).
+        if value is None or str(value).strip() == "":
+            failures.append(f"{kind!r} fact has an empty value (no grounded anchor)")
         # The grounded anchor must appear whole in a cited observation's content
-        # (the paraphrase trap — a paraphrased value can't ground).
-        cited = [obs_by_id[o].get("content", "") for o in (fact.get("evidence_ids") or [])
-                 if o in obs_by_id]
-        if value and not any(str(value) in (c or "") for c in cited):
-            failures.append(f"value {value!r} is not a whole substring of any "
-                            "cited observation")
-        if kind in _FIELD_BEARING_KINDS:
-            if fact.get("verdict") not in _VERDICTS:
-                failures.append(f"{value!r} ({kind}) missing/invalid verdict field")
-            if fact.get("marker") not in _MARKERS:
-                failures.append(f"{value!r} ({kind}) missing/invalid marker field")
+        # (the paraphrase trap — a paraphrased value can't ground). finding [7]:
+        # use --ground's real _value_appears (lowercase both sides + single-
+        # longest-token fallback) so g1_structure agrees with the production
+        # byte-check and the HARD g1_citation grader, never a stricter check.
+        elif value:
+            cited = [obs_by_id[o].get("content", "")
+                     for o in (fact.get("evidence_ids") or []) if o in obs_by_id]
+            if not _value_appears(str(value), cited):
+                failures.append(f"value {value!r} is not a whole substring of any "
+                                "cited observation")
+        # finding [1]: the VERDICT field is email-only (SKILL.md gives social_links
+        # no verdict word); the MARKER field stays required on email + social_link
+        # (the [+]/[?] belongs-to-person axis, SKILL.md:209-214).
+        if kind in _VERDICT_BEARING_KINDS and fact.get("verdict") not in _VERDICTS:
+            failures.append(f"{value!r} ({kind}) missing/invalid verdict field")
+        if kind in _MARKER_BEARING_KINDS and fact.get("marker") not in _MARKERS:
+            failures.append(f"{value!r} ({kind}) missing/invalid marker field")
 
     summary_lower = (output.get("summary") or "").lower()
-    if any(tok in summary_lower for tok in _SOURCES_BLOCK_RE):
+    if _has_trailing_sources_block(output.get("summary") or ""):
         failures.append("summary carries a trailing Sources:/References: block")
 
     # Dead-end shape: zero email facts AND a channel surfaced (a channel fact or a
@@ -392,7 +524,15 @@ def g1_structure(fixture: dict[str, Any],
         if email_facts:
             failures.append("dead-end output emitted an email fact")
         channel_fact = any(f.get("kind") == "channel" for f in facts)
-        channel_in_summary = "channel" in summary_lower or "contact" in summary_lower
+        # finding [9]: a channel SUGGESTION in the summary means a REAL channel
+        # from the bundle's hints surfaced — not the literal words
+        # "channel"/"contact" (which false-fail "try his website form at ..." and
+        # spuriously pass a URL that merely ends in /contact). Gather candidate
+        # channel strings from channel_hint observations (source_url + any
+        # URL/handle embedded in content) and from a top-level channel_hints field.
+        channel_in_summary = any(
+            hint and hint.lower() in summary_lower
+            for hint in _channel_hint_candidates(fixture))
         if not (channel_fact or channel_in_summary):
             failures.append("dead-end output surfaced no channel "
                             "(no channel fact, no channel suggestion in summary)")

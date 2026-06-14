@@ -19,7 +19,8 @@ from pathlib import Path
 
 from . import graders
 
-_SKILL_MD = Path(__file__).resolve().parents[2] / "SKILL.md"
+_SKILL_ROOT = Path(__file__).resolve().parents[2]
+_SKILL_MD = _SKILL_ROOT / "SKILL.md"
 
 
 def _normalize(text: str) -> str:
@@ -57,3 +58,20 @@ def test_every_rule_quote_still_appears_in_skill_md():
     assert not stale, (
         "RULE_QUOTE constants no longer found in SKILL.md (prose drifted from a "
         f"graded rule): {stale}")
+
+
+def test_fact_kinds_match_production_render_enum():
+    """`graders._FACT_KINDS` is the same fact-kind vocabulary production owns as
+    `lib.render._KIND_SECTION` — but it's a hand-copied literal with no drift
+    protection, unlike the RULE_QUOTE prose above. Pin them equal so adding a kind
+    to the renderer (or the grader enum) without the other fails HERE, loudly,
+    instead of g1_structure silently flagging the new kind as 'not in the enum'."""
+    import sys
+    if str(_SKILL_ROOT) not in sys.path:
+        sys.path.insert(0, str(_SKILL_ROOT))
+    from lib import render  # noqa: E402
+
+    assert graders._FACT_KINDS == set(render._KIND_SECTION), (
+        "graders._FACT_KINDS drifted from lib.render._KIND_SECTION "
+        f"(grader-only: {graders._FACT_KINDS - set(render._KIND_SECTION)}; "
+        f"render-only: {set(render._KIND_SECTION) - graders._FACT_KINDS})")
