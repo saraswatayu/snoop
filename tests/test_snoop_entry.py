@@ -345,15 +345,30 @@ def test_personal_site_on_verified_domain_binds():
     assert snoop._candidate_is_bound(c, person) is True
 
 
-def test_pgp_alone_does_not_bind_but_pgp_plus_employer_does():
-    """ENG-6: PGP is email-control evidence (deliverability axis), never
-    identity-binding by itself — one signal. PGP + employer_match → two → bound."""
+def test_pgp_and_employer_are_corroborating_not_identity_bearing():
+    """PGP (email-control) and employer_match (domain) are both target-AGNOSTIC:
+    neither ties the address to THIS person. Two of them must NOT bind, or a
+    pattern guess on the employer domain that happens to carry a published PGP
+    key opens an SMTP socket to a possible namesake's mailbox — exactly the
+    'no socket to a namesake' invariant. Binding needs >=1 identity-bearing
+    signal (an anchored observation or rel=me ownership)."""
     person = _gh_bound_person(employer=Employer(name="OpenAI", domains=["openai.com"]))
     pgp_only = EmailCandidate(address="pete@proton.me", sources=[src("pgp")])
     assert snoop._candidate_is_bound(pgp_only, person) is False
+    # PGP + employer = two corroborating signals, zero identity-bearing → unbound.
     pgp_employer = EmailCandidate(address="pete@openai.com",
                                   sources=[src("pgp")], employer_match=True)
-    assert snoop._candidate_is_bound(pgp_employer, person) is True
+    assert snoop._candidate_is_bound(pgp_employer, person) is False
+    # A pattern guess that picked up a PGP source is likewise not bound.
+    pattern_pgp = EmailCandidate(address="psteinberger@openai.com",
+                                 sources=[src("pattern"), src("pgp")],
+                                 employer_match=True)
+    assert snoop._candidate_is_bound(pattern_pgp, person) is False
+    # But PGP DOES count as the second signal once an identity-bearing anchor is
+    # present (observed in the bound GitHub account's commits).
+    anchored_pgp = EmailCandidate(address="pete@openai.com",
+                                  sources=[src("git_commit"), src("pgp")])
+    assert snoop._candidate_is_bound(anchored_pgp, person) is True
 
 
 def test_manual_known_short_circuits_to_bound():

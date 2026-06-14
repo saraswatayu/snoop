@@ -873,11 +873,15 @@ def _candidate_is_bound(c: EmailCandidate, person: Person) -> bool:
       4. PGP owner-UID — keys.openpgp.org returned a key whose UID is this address.
 
     A `manual_known` source (the --verify / --known lane: the user supplied the
-    address AS the subject) short-circuits to bound. A pure pattern_gen guess
-    reaches at most one signal — employer_match XOR rel=me ownership, never both —
-    so it never binds: snoop will not open a socket to a namesake's mailbox on the
-    strength of a name×domain template. PGP alone is one signal (email-control
-    evidence, deliverability axis), never identity-binding by itself (ENG-6).
+    address AS the subject) short-circuits to bound. Binding requires ≥2 signals
+    AND at least one IDENTITY-BEARING signal — an anchored observation (1) or
+    rel=me ownership (3) — because those alone tie the address to THIS person.
+    employer_match (2) and PGP owner-UID (4) are CORROBORATING but target-
+    agnostic: a domain belongs to the employer, a key proves someone controls
+    the inbox — neither says it is the target. So two corroborating signals
+    (employer + PGP) never bind, and snoop will not open a socket to a possible
+    namesake's mailbox on the strength of a name×domain template that merely
+    landed on the employer domain and carried a published key.
     """
     if "@" not in c.address:
         return False
@@ -889,20 +893,24 @@ def _candidate_is_bound(c: EmailCandidate, person: Person) -> bool:
     surface_domains = _anchored_surface_domains(person)
     github_bound = _github_identity_bound(person)
 
-    signals = 0
     on_github_surface = github_bound and bool(source_types & _GITHUB_SURFACES)
     on_owned_domain_surface = (
         bool(source_types & _DOMAIN_SURFACES) and domain in surface_domains
     )
-    if on_github_surface or on_owned_domain_surface:
-        signals += 1                                  # 1. anchored observation
+    anchored = on_github_surface or on_owned_domain_surface  # 1. anchored obs
+    rel_me_owned = domain in rel_me_domains                  # 3. rel=me ownership
+    identity_bearing = anchored or rel_me_owned
+
+    signals = 0
+    if anchored:
+        signals += 1
     if c.employer_match:
-        signals += 1                                  # 2. employer
-    if domain in rel_me_domains:
-        signals += 1                                  # 3. rel=me ownership
+        signals += 1                                  # 2. employer (corroborating)
+    if rel_me_owned:
+        signals += 1
     if "pgp" in source_types:
-        signals += 1                                  # 4. PGP owner-UID
-    return signals >= 2
+        signals += 1                                  # 4. PGP UID (corroborating)
+    return signals >= 2 and identity_bearing
 
 
 def _google_account_candidates(
