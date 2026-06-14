@@ -27,7 +27,66 @@ part of the automated suite or fabricated.
 **Effort:** M (human) — data gathering + one supervised run.
 **Blocks:** marketplace packaging (below).
 
+### Register the eval-fixture GitHub accounts
+
+**What:** Create the 5–10 roster accounts (`snoop-fixture-*`) on GitHub and record
+them as owned in `tests/evals/fixtures/personas.md`.
+
+**Why:** Eng review 2026-06-12, issue 4: GitHub usernames can't be RFC-reserved,
+so an unregistered "fictional" handle in a committed eval fixture can collide
+with (or later be claimed by) a real person — a real-identity association in a
+public privacy-focused repo. Registering closes the hole permanently and gives
+the privacy gate a closed allowlist.
+
+**Effort:** S (human, ~15min) — manual signups, not codeable autonomously.
+**Blocks:** the `happy-dev` P0 seed fixture of the analyst-evals workstream (below).
+
 ## Held back (lower priority, available next)
+
+### Analyst-layer evals — corpus, graders, harness
+
+**What:** Eval system for the Step-3 reasoning layer (the host model reading
+SKILL.md): ~24–28 synthetic fixture bundles (incl. injection/forgery cases),
+deterministic G1/G2 graders with SKILL.md quote-anchored drift lint, privacy
+gate with negative self-test, concurrent k-trial runner with provenance stamps
+and a two-axis merge gate (hard misattribution axes strict; soft axes one retry).
+
+**Why:** SKILL.md Step 3 is the product's most important module with zero
+coverage — every prose edit is an untested production change. Sensors have 9k
+lines of tests; the analyst has none.
+
+**Context:** Full reviewed plan in `docs/plans/2026-06-12-analyst-evals.md`
+(local-only — this entry is the committed pointer); task breakdown in
+`~/.gstack/projects/saraswatayu-snoop/tasks-eng-review-20260612-111424.jsonl`
+(T1–T7). Phases: P0 fixtures+graders (no LLM cost) → P1 runner+corpus →
+P2 judge (only if G1/G2 prove insufficient). Eng review 2026-06-12: 9 findings
++ 4 Codex tensions, all folded. The ledger-failure-distillation loop shares the
+4–6-week ledger-data dependency with Ledger phase 2 (below).
+
+**Effort:** M–L (human ~1wk) / M (CC ~1–2d). **Priority:** P1.
+**Depends on:** the human-gated fixture-account registration (above) for the
+`happy-dev` fixture; nothing else.
+
+### Promote the verdict-word check into `--ground` (runtime)
+
+**What:** Once `verdict` is a first-class fact field, `--ground` checks each
+fact's verdict against its cited observations' `data` fields
+(`smtp`/`account_exists`/catch-all) and downgrades + annotates mismatches —
+never upgrades. Separate small PR: `lib/ground.py`, `snoop.py`, SKILL.md docs.
+
+**Why:** Eng review 2026-06-12, tension T4 (the eval design exposed a missing
+production check): verdict↔evidence consistency is a mechanical lookup, the
+same class as the citation byte-check — production users shouldn't rely on
+prose compliance for the highest-stakes word (`verified`).
+
+**Context:** Spec is §9 of the analyst-evals plan; boundary discipline there
+defines what must NOT move into code (abstention, refutation, recall, markers
+stay prose+eval). Evals keep grading pre-ground output so raw analyst behavior
+stays measured.
+
+**Effort:** S (human ~0.5d) / S (CC ~30min). **Priority:** P2.
+**Depends on:** the `verdict` field name agreed with the eval graders
+(analyst-evals plan §4).
 
 ### GitLab sensor — profile + commit emails
 
