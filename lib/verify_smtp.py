@@ -36,7 +36,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import smtplib
 import socket
 import string
@@ -46,11 +45,10 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from .schema import EmailCandidate
-from .normalize import is_personal_provider
+# SYNTAX_RE re-exported from lib.normalize (the single home for the address
+# validator) so existing callers/tests can keep importing verify_smtp.SYNTAX_RE.
+from .normalize import SYNTAX_RE, is_personal_provider  # noqa: F401
 from .fetch import is_public_host
-
-
-SYNTAX_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
 
 # Bound the MX DNS lookup so a blackholing nameserver can't stall a probe past
 # the caller's timeout budget (the smtplib socket below is already bounded, but

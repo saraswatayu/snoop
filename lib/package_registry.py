@@ -40,29 +40,19 @@ the sensors stay decoupled.
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime, timezone
 from email.utils import getaddresses
 from typing import Callable
 
 from .fetch import FetchBlocked, fetch
-from .normalize import normalize_email
+from .normalize import EMAIL_RE, domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 _DEFAULT_TIMEOUT_SEC = 6.0
 
-# Conservative address shape: requires a dotted TLD, no whitespace.
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
-)
-
-# Placeholder / redacted / no-reply addresses to drop. Mirrors the noise
-# filters in git_emails and gh_profile but tuned for registry metadata —
-# npm in particular hands out `npm@npmjs.com` as a redaction sentinel.
-_NOISE_DOMAINS = (
-    "example.com", "example.org", "example.net",
-    "localhost", "local", "test", "invalid",
-)
+# Address shape + reserved-domain set are shared (lib.normalize). The localpart
+# policy below is tuned for registry metadata — npm in particular hands out
+# `npm@npmjs.com` as a redaction sentinel.
 _NOISE_LOCALPART_PREFIXES = ("noreply", "no-reply", "do-not-reply")
 # Exact addresses npm/PyPI emit as redaction or boilerplate sentinels.
 _NOISE_EXACT = (
@@ -86,14 +76,14 @@ def _is_extractable(email: str) -> bool:
         return False
     if "*" in email:
         return False
-    if not _EMAIL_RE.fullmatch(email):
+    if not EMAIL_RE.fullmatch(email):
         return False
     local, _, domain = email.lower().partition("@")
     if not local or not domain:
         return False
     if email.lower() in _NOISE_EXACT:
         return False
-    if any(domain == d or domain.endswith("." + d) for d in _NOISE_DOMAINS):
+    if domain_is_noise(domain):
         return False
     if any(local.startswith(lp) for lp in _NOISE_LOCALPART_PREFIXES):
         return False
@@ -122,7 +112,7 @@ def _parse_addresses(raw: str | None) -> list[str]:
     # Defensive fallback: if getaddresses found nothing (malformed wrapping),
     # sweep the raw text with the email regex.
     if not out:
-        for m in _EMAIL_RE.finditer(raw):
+        for m in EMAIL_RE.finditer(raw):
             norm = normalize_email(m.group(0))
             if norm and norm not in seen:
                 seen.add(norm)

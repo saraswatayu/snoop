@@ -32,22 +32,20 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
 
-from .normalize import normalize_email
+from .normalize import domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 _DEFAULT_TIMEOUT_SEC = 4.0
 _PATHS_TO_TRY = ("/", "/about", "/contact")
 
-# Drop these system-only addresses outright. Generic-but-legitimate
-# localparts (info@, hello@, contact@) are kept; the scorer downranks them.
+# Drop these system-only addresses outright (EXACT localpart match —
+# deliberately stricter than the prefix policy in the profile sensors).
+# Generic-but-legitimate localparts (info@, hello@, contact@) are kept; the
+# scorer downranks them. The reserved-domain set is shared (lib.normalize).
 _SYSTEM_LOCALPARTS = (
     "noreply", "no-reply", "do-not-reply",
     "postmaster", "abuse", "webmaster",
     "mailer-daemon",
-)
-_BAD_DOMAINS = (
-    "example.com", "example.org", "example.net",
-    "test", "invalid", "localhost", "local",
 )
 
 # Match `href="mailto:foo@bar.com"` or `href='mailto:foo@bar.com?subject=...'`.
@@ -81,7 +79,7 @@ def _is_extractable(email: str) -> bool:
         return False
     if local in _SYSTEM_LOCALPARTS:
         return False
-    if any(domain == d or domain.endswith("." + d) for d in _BAD_DOMAINS):
+    if domain_is_noise(domain):
         return False
     return True
 

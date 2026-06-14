@@ -38,22 +38,15 @@ from typing import Any
 
 from . import _gh_api
 from ._gh_api import GhCaller
-from .normalize import normalize_email
+from .normalize import domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 _DEFAULT_LOOKBACK_DAYS = 90
 _DEFAULT_REPO_LIMIT = 30  # per-repo pass cost; cap to keep latency bounded
 
-_NOISE_DOMAINS = (
-    "users.noreply.github.com",
-    "example.com",
-    "example.org",
-    "example.net",
-    "localhost",
-    "local",
-    "invalid",
-    "test",
-)
+# GitHub's privacy-noreply domain is git-specific; the reserved/placeholder set
+# is shared (lib.normalize.RESERVED_NOISE_DOMAINS via domain_is_noise).
+_EXTRA_NOISE_DOMAINS = ("users.noreply.github.com",)
 _NOISE_LOCALPART_PREFIXES = ("noreply", "no-reply")
 _BOT_MARKERS = ("[bot]", "dependabot", "github-actions", "renovate", "snyk-bot")
 
@@ -71,7 +64,7 @@ def _is_noise_email(email: str) -> bool:
     local, _, domain = email.lower().partition("@")
     if not local or not domain:
         return True
-    if any(domain == d or domain.endswith("." + d) for d in _NOISE_DOMAINS):
+    if domain_is_noise(domain, extra=_EXTRA_NOISE_DOMAINS):
         return True
     if any(local.startswith(lp) for lp in _NOISE_LOCALPART_PREFIXES):
         return True

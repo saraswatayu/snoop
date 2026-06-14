@@ -11,7 +11,10 @@ Covers the named failure modes from Subagent F2:
 from __future__ import annotations
 
 from lib.normalize import (
+    EMAIL_RE,
     PERSONAL_PROVIDER_DOMAINS,
+    SYNTAX_RE,
+    domain_is_noise,
     employer_match,
     fold_ascii,
     fold_to_letters,
@@ -23,6 +26,27 @@ from lib.normalize import (
     normalize_email,
     parse_name,
 )
+
+
+# ---- shared email primitives ------------------------------------------------
+
+
+def test_syntax_re_is_anchored_email_re():
+    # SYNTAX_RE is the whole-string validator; EMAIL_RE matches anywhere.
+    assert SYNTAX_RE.match("jane@acme.io")
+    assert not SYNTAX_RE.match("see jane@acme.io now")  # anchored: no surrounding text
+    assert EMAIL_RE.search("see jane@acme.io now")      # finds it inline
+
+
+def test_domain_is_noise_covers_reserved_and_subdomains():
+    assert domain_is_noise("example.com")
+    assert domain_is_noise("mail.example.org")   # subdomain of a reserved domain
+    assert domain_is_noise("localhost")
+    assert not domain_is_noise("acme.io")
+    # sensor-specific extras compose without editing the shared set
+    assert domain_is_noise("users.noreply.github.com",
+                           extra=("users.noreply.github.com",))
+    assert not domain_is_noise("users.noreply.github.com")
 
 
 # ---- fold_ascii / fold_to_letters --------------------------------------------

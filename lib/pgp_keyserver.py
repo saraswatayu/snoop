@@ -30,7 +30,6 @@ keys.openpgp.org".
 
 from __future__ import annotations
 
-import re
 import ssl
 import urllib.parse
 from datetime import datetime, timezone
@@ -38,7 +37,7 @@ from typing import Callable
 
 from .fetch import FetchBlocked, FetchResult
 from .fetch import fetch as _default_fetch
-from .normalize import normalize_email
+from .normalize import SYNTAX_RE, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 # Base of the VKS by-email endpoint. The url-encoded address is appended.
@@ -49,10 +48,8 @@ _VKS_BY_EMAIL_BASE = "https://keys.openpgp.org/vks/v1/by-email/"
 # only care about the status, not the body.
 _ALLOWED_CONTENT_TYPES = frozenset({"application/pgp-keys", "text/plain"})
 
-# Same conservative syntax gate used across the skill (verify_smtp.SYNTAX_RE):
-# a dot in the TLD, no whitespace, reasonable shape. Malformed addresses are
-# skipped before we ever hit the network.
-_SYNTAX_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+# The conservative address validator is shared (lib.normalize.SYNTAX_RE):
+# malformed addresses are skipped before we ever hit the network.
 
 # Bound the number of network queries per batch. Keyserver lookups are cheap but
 # unbounded input shouldn't translate into unbounded I/O. If the caller passes
@@ -76,7 +73,7 @@ def by_email_url(email: str) -> str:
 
 
 def _is_valid_email(email: str) -> bool:
-    return bool(email) and bool(_SYNTAX_RE.match(email))
+    return bool(email) and bool(SYNTAX_RE.match(email))
 
 
 def fetch_pgp_emails(

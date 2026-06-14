@@ -27,34 +27,20 @@ schema.SourceType) so the renderer attributes correctly.
 from __future__ import annotations
 
 import html
-import re
 import urllib.parse
 from datetime import datetime, timezone
 from typing import Callable
 
 from .fetch import fetch
-from .normalize import normalize_email
+from .normalize import EMAIL_RE, MAILTO_RE, domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 _DEFAULT_TIMEOUT_SEC = 6.0
 
 _PROFILE_URL = "https://news.ycombinator.com/user?id={handle}"
 
-# Conservative email regex: requires a dot in the TLD, no whitespace, minimum
-# reasonable length. Matches the shape used by gh_profile._EMAIL_RE.
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
-)
-_MAILTO_RE = re.compile(
-    r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})",
-    re.IGNORECASE,
-)
-
-# Don't extract these — pre-filter at parse time before scoring sees them.
-_BAD_EMAIL_DOMAINS = (
-    "example.com", "example.org", "example.net",
-    "localhost", "local", "test", "invalid",
-)
+# Address shape + reserved-domain set are shared (lib.normalize); the localpart
+# policy is local.
 _BAD_LOCALPARTS = ("noreply", "no-reply", "do-not-reply")
 
 
@@ -73,7 +59,7 @@ def _is_extractable(email: str) -> bool:
     local, _, domain = email.lower().partition("@")
     if not local or not domain:
         return False
-    if any(domain == d or domain.endswith("." + d) for d in _BAD_EMAIL_DOMAINS):
+    if domain_is_noise(domain):
         return False
     if any(local.startswith(lp) for lp in _BAD_LOCALPARTS):
         return False
@@ -91,11 +77,11 @@ def _extract_emails_from_text(text: str) -> list[str]:
         return []
     decoded = html.unescape(text)
     seen: dict[str, None] = {}  # ordered set via dict
-    for match in _MAILTO_RE.finditer(decoded):
+    for match in MAILTO_RE.finditer(decoded):
         email = normalize_email(match.group(1))
         if _is_extractable(email) and email not in seen:
             seen[email] = None
-    for match in _EMAIL_RE.finditer(decoded):
+    for match in EMAIL_RE.finditer(decoded):
         email = normalize_email(match.group(0))
         if _is_extractable(email) and email not in seen:
             seen[email] = None

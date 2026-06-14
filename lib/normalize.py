@@ -35,6 +35,40 @@ import unicodedata
 from dataclasses import dataclass
 
 
+# ---- shared email extraction primitives --------------------------------------
+#
+# The single home for the address shape and the reserved/placeholder-domain set
+# that every HTTP sensor (gh_profile, hn_profile, personal_site, git_emails,
+# package_registry) filters on. Each sensor keeps its OWN localpart policy
+# (git_emails drops bot markers, personal_site drops exact role accounts,
+# package_registry drops npm sentinels) — those are deliberately divergent — but
+# the regex and the reserved-domain set are shared so a new placeholder domain is
+# added in ONE place instead of five.
+
+# Conservative address shape: dotted TLD, no whitespace. EMAIL_RE matches an
+# address anywhere in text; SYNTAX_RE is the anchored validator (whole string),
+# derived from EMAIL_RE so the two can never drift.
+EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+SYNTAX_RE = re.compile(f"^{EMAIL_RE.pattern}$")
+MAILTO_RE = re.compile(
+    r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", re.IGNORECASE)
+
+# RFC 2606 reserved + obviously-fake domains that no real contact uses.
+RESERVED_NOISE_DOMAINS = frozenset({
+    "example.com", "example.org", "example.net",
+    "localhost", "local", "test", "invalid",
+})
+
+
+def domain_is_noise(domain: str, *, extra: tuple[str, ...] = ()) -> bool:
+    """True if `domain` is a reserved/placeholder domain (exact or a subdomain),
+    optionally extended with sensor-specific extras (e.g. git's
+    users.noreply.github.com)."""
+    domain = (domain or "").lower()
+    return any(domain == d or domain.endswith("." + d)
+               for d in (*RESERVED_NOISE_DOMAINS, *extra))
+
+
 # ---- provider classification -------------------------------------------------
 
 # Personal-provider domains — addresses on these are NEVER work addresses, and
