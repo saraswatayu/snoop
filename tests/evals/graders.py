@@ -48,7 +48,6 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 import snoop  # noqa: E402
-from lib.ground import _value_appears  # noqa: E402
 
 # The output schema vocabularies (D1) — kept here so a grader and its canned
 # tests read the same source. Production schema vocab lives in lib.schema; these
@@ -103,6 +102,22 @@ def _obs_by_id(fixture: dict[str, Any]) -> dict[str, dict[str, Any]]:
     bundle = fixture.get("bundle", {})
     return {o.get("id"): o for o in bundle.get("observations", [])
             if isinstance(o, dict)}
+
+
+def _value_grounded_substring(value: Any, contents: list[str]) -> bool:
+    """Case-insensitive WHOLE-substring check: the value (stripped, lowercased)
+    appears verbatim in some cited observation's content. Deliberately STRICTER
+    than --ground's lib.ground._value_appears, which falls back to a single
+    longest-token match — that fallback is right for the production verifier but
+    would let g1_structure pass a paraphrase that merely shares one token
+    ("Brightforge Industries Inc" against cited "Brightforge Labs"). g1_structure
+    IS the paraphrase trap, so it stays whole-substring; case-insensitivity still
+    tolerates a benign re-casing (a lowercased email), and the HARD g1_citation
+    grader still drives the real --ground for the must_emit values."""
+    v = str(value).strip().lower()
+    if not v:
+        return False
+    return any(v in (c or "").lower() for c in contents)
 
 
 def _cited_data(fact: dict[str, Any],
@@ -434,31 +449,37 @@ STRUCTURE_NO_SOURCES_RULE_QUOTE = (
     "No trailing `Sources:` / `References:` block"
 )
 
-# finding [8]: SKILL.md forbids only a TRAILING Sources:/References: block, not
-# the substrings appearing inline in prose ("...from multiple sources: ..."). Match
-# a sources:/references: LABEL only when it BEGINS A LINE (after optional markdown
-# emphasis/list markers), and only count it when that line is in the TAIL of the
-# summary, never an inline mid-prose mention.
-_SOURCES_BLOCK_RE = re.compile(
-    r"^\s*[*_>#\-]*\s*(sources|references)\s*:", re.IGNORECASE | re.MULTILINE)
+# SKILL.md forbids a TRAILING `Sources:`/`References:` block, not the words
+# appearing inline in prose. The discriminator (finding [8] re-fix) is
+# BLOCK-INITIAL: a real block's label starts its own line AND is preceded by
+# nothing, a blank line, or a line that ENDS A SENTENCE. A soft-wrapped
+# "...drawn from several\nsources:" continues an unterminated clause (the prior
+# line has no terminal punctuation), so it is NOT a block. The label class allows
+# markdown emphasis, list bullets, and numbered-list prefixes ("1. Sources:").
+_SOURCES_LABEL_RE = re.compile(
+    r"^\s*[>*_#\-]*\s*\d*[.)]?\s*(sources|references)\s*:", re.IGNORECASE)
 
 
 def _has_trailing_sources_block(summary: str) -> bool:
-    """True iff a `Sources:`/`References:` label begins a line in the TRAILING
-    block of the summary (the text after the final blank-line-separated break, or
-    the last two non-empty lines if there is no blank-line break)."""
+    """True iff a `Sources:`/`References:` label begins a BLOCK — its own line,
+    preceded by nothing / a blank line / a sentence-ending line — anywhere in the
+    summary. Catches a real trailing block (preceded by a finished sentence or a
+    blank line, incl. numbered "1. Sources:" and blocks not in the final
+    paragraph) while NOT flagging a soft-wrapped inline "...several\\nsources:"
+    mention (preceded by an unterminated clause). Both failure modes the old
+    last-paragraph heuristic got wrong."""
     if not summary:
         return False
-    # The trailing block: prefer the segment after the last blank line; otherwise
-    # the last couple of non-empty lines (a trailing label on its own line).
-    parts = re.split(r"\n\s*\n", summary.rstrip())
-    tail = parts[-1] if parts else summary
-    if not _SOURCES_BLOCK_RE.search(tail):
-        # No blank-line-delimited block matched; also check the very last lines so
-        # a single-paragraph summary ending in a label line is still caught.
-        nonempty = [ln for ln in summary.splitlines() if ln.strip()]
-        tail = "\n".join(nonempty[-2:])
-    return bool(_SOURCES_BLOCK_RE.search(tail))
+    lines = summary.splitlines()
+    for i, line in enumerate(lines):
+        if not _SOURCES_LABEL_RE.match(line):
+            continue
+        prev = next((lines[j].rstrip() for j in range(i - 1, -1, -1)
+                     if lines[j].strip()), None)
+        blank_before = i > 0 and not lines[i - 1].strip()
+        if prev is None or blank_before or prev.endswith((".", "!", "?")):
+            return True
+    return False
 
 
 def g1_structure(fixture: dict[str, Any],
@@ -493,15 +514,14 @@ def g1_structure(fixture: dict[str, Any],
         # check alone can never catch it). --ground would tag it (unverified).
         if value is None or str(value).strip() == "":
             failures.append(f"{kind!r} fact has an empty value (no grounded anchor)")
-        # The grounded anchor must appear whole in a cited observation's content
-        # (the paraphrase trap — a paraphrased value can't ground). finding [7]:
-        # use --ground's real _value_appears (lowercase both sides + single-
-        # longest-token fallback) so g1_structure agrees with the production
-        # byte-check and the HARD g1_citation grader, never a stricter check.
+        # The grounded anchor must appear WHOLE in a cited observation's content
+        # (the paraphrase trap — a paraphrased value can't ground). Case-insensitive
+        # whole-substring, deliberately stricter than --ground's longest-token
+        # fallback (finding [7] re-fix — see _value_grounded_substring).
         elif value:
             cited = [obs_by_id[o].get("content", "")
                      for o in (fact.get("evidence_ids") or []) if o in obs_by_id]
-            if not _value_appears(str(value), cited):
+            if not _value_grounded_substring(value, cited):
                 failures.append(f"value {value!r} is not a whole substring of any "
                                 "cited observation")
         # finding [1]: the VERDICT field is email-only (SKILL.md gives social_links
