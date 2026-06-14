@@ -61,6 +61,18 @@ _ADDRESS_RE = re.compile(r"\b([A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,})\b"
 _URL_RE = re.compile(r"https?://[^\s\"'<>)\]]+")
 _NAME_KEYS = {"name", "google_display_name", "gh_name"}
 
+# Names also hide in observation CONTENT prose — not just the structured
+# _NAME_KEYS fields — in the two forms reason.py templates them into: the
+# `name_match = <Name>` identity anchor and a `google_display_name="<Name>"`
+# mirror (finding #10). The content string is exactly what the analyst reads, so
+# a real name would leak there; extract those and roster-check them too. The
+# name_match form requires >=2 capitalized tokens so the boolean `name_match=yes`
+# / `no` and lowercase `snoop-fixture-*` handles are never mistaken for names.
+_CONTENT_NAME_RES = (
+    re.compile(r'google_display_name\s*=\s*"([^"]+)"'),
+    re.compile(r"name_match\s*=\s*([A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*)+)"),
+)
+
 # A bare-domain scan over arbitrary prose would false-positive on dotted code
 # identifiers ("data.smtp", "first.last") whose final label isn't a real TLD.
 # We only treat a dotted token as a domain-to-validate when its last label is a
@@ -175,6 +187,12 @@ def _check_one(fixture_id: str, envelope: dict, roster: Roster) -> list[_Violati
         if key in _NAME_KEYS and val and not val.startswith("http"):
             if val not in roster.names:
                 out.append(_Violation(fixture_id, f"name@{jpath}", val))
+        # Names embedded in CONTENT prose (the templated name_match / display-name
+        # forms), not just the structured _NAME_KEYS fields (finding #10).
+        for rx in _CONTENT_NAME_RES:
+            for nm in rx.findall(val):
+                if nm not in roster.names:
+                    out.append(_Violation(fixture_id, f"content-name@{jpath}", nm))
         # @-addresses: the domain part must pass the domain rule.
         for addr in _ADDRESS_RE.findall(val):
             dom = addr.split("@", 1)[1]
@@ -282,6 +300,40 @@ def test_negative_self_test_a_leaking_fixture_fails_the_gate(tmp_path):
         f"domain leak missed; caught: {violations}"
     assert any(s in slots for s in ("handle", "url-handle")), \
         f"handle leak missed; caught: {violations}"
+
+
+def test_negative_self_test_a_real_name_in_content_prose_fails(tmp_path):
+    """finding #10: names hide in observation content prose (the templated
+    'name_match = <Name>' anchor and 'google_display_name="<Name>"' mirror), not
+    just the _NAME_KEYS fields. A real, unrostered name there must trip the gate —
+    the old checker only validated the three structured name-key fields, so a name
+    living only in content leaked silently. person.name stays rostered (clean) so
+    the content names are the sole signal."""
+    leaking = {
+        "id": "content-name-leak", "suite": "regression",
+        "bundle": {
+            "schema": 2, "warnings": [],
+            "person": {"name": "Zinnia Voss-Calloway",  # rostered: name-key clean
+                       "ambiguity": "single_plausible_match"},
+            "observations": [
+                {"id": "o1", "type": "anchor", "source_url": None,
+                 "content": ("identity anchor validated: "
+                             "github_name_match = Peter Steinberger")},
+                {"id": "o2", "type": "email_candidate", "source_url": None,
+                 "content": ('candidate email: x@brightforge.example '
+                             '(google_display_name="Linus Torvalds", name_match=yes)'),
+                 "data": {"address": "x@brightforge.example"}},
+            ],
+            "sensors": [],
+        },
+        "labels": {"must_emit": [], "must_not_emit": [], "banner_required": False,
+                   "forbidden_verdicts": [], "rubric_notes": "content name leak"},
+    }
+    (tmp_path / "content-name-leak.json").write_text(json.dumps(leaking))
+    roster = parse_roster()
+    leaked = {v.value for v in scan_fixtures(tmp_path, roster)}
+    assert "Peter Steinberger" in leaked, f"anchor-name leak missed: {leaked}"
+    assert "Linus Torvalds" in leaked, f"display-name leak missed: {leaked}"
 
 
 def test_negative_self_test_a_clean_fixture_passes(tmp_path):
