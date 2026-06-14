@@ -1,14 +1,13 @@
 """The v1 Claude-output contract for the analyst evals (brief D1).
 
 The harness gives Claude SKILL.md + a bundle and asks for the Step-3 facts JSON
-PLUS two harness-instructed fields per fact: `verdict`
-(verified|google-confirmed|pattern-guess) and `marker` ([+]|[?]). Today's
-production facts schema carries neither — the verdict word lives in `detail`
-prose, the marker in the rendered card — so field-scoped grading (plan §4) only
-works because the standing instruction below asks for them explicitly. The
-production schema catches up in the separate §9 PR (NOT this branch); v1
-measures "Step 3 prompt compliance under the standing instruction" (plan §10
-Q1).
+PLUS two per-fact fields: `verdict` (verified|google-confirmed|pattern-guess)
+and `marker` ([+]|[?]). These are now first-class GroundedFact fields that
+`--ground` PRESERVES and the renderer surfaces (lib.ground.GroundedFact,
+snoop._format_reasoned_json) — so the machine output the graders read is the
+same shape production emits, not a harness-only invention. The standing
+instruction below still pins the exact shape; field-scoped grading (plan §4)
+grades fields that survive the real --ground round-trip.
 
 This module is I/O-free on purpose: the P1 runner imports `STANDING_INSTRUCTION`
 to build the prompt and the graders import `parse_output` to normalize a model

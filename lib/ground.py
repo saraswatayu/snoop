@@ -46,7 +46,14 @@ class GroundedFact:
 
     `evidence_ids` is filtered to citations that exist. `grounded` is always
     True for a returned fact (ungrounded facts are dropped). `verified` is the
-    substring confirmation against a cited observation."""
+    substring confirmation against a cited observation.
+
+    `verdict` (email deliverability: verified|google-confirmed|pattern-guess)
+    and `marker` ([+]/[?] belonging) are the analyst's per-fact contract fields
+    (SKILL.md Step 3). They are PRESERVED verbatim, not interpreted — the
+    deterministic check has no opinion on them; it only passes them through so
+    the machine output carries what the analyst produced instead of silently
+    dropping it. Optional: a fact without them keeps None."""
     kind: str
     label: str
     value: str
@@ -56,6 +63,8 @@ class GroundedFact:
     evidence_ids: list[str] = field(default_factory=list)
     grounded: bool = True
     verified: bool = False
+    verdict: str | None = None
+    marker: str | None = None
 
 
 # Tokens long enough to be meaningful for the substring check. A 2-char token
@@ -139,8 +148,16 @@ def ground(facts: list[dict], observations: Sequence[_Observation]) -> list[Grou
             evidence_ids=valid,
             grounded=True,
             verified=_value_appears(str(fact.get("value", "")), cited_content),
+            verdict=_opt_str(fact.get("verdict")),
+            marker=_opt_str(fact.get("marker")),
         ))
     return kept
+
+
+def _opt_str(value: object) -> str | None:
+    """Pass a verdict/marker through as a string, or None if absent. No
+    validation — the analyst's contract fields are preserved verbatim."""
+    return str(value) if value is not None else None
 
 
 def _clamp01(value: object) -> float:

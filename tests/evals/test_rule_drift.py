@@ -61,17 +61,19 @@ def test_every_rule_quote_still_appears_in_skill_md():
 
 
 def test_fact_kinds_match_production_render_enum():
-    """`graders._FACT_KINDS` is the same fact-kind vocabulary production owns as
-    `lib.render._KIND_SECTION` — but it's a hand-copied literal with no drift
-    protection, unlike the RULE_QUOTE prose above. Pin them equal so adding a kind
-    to the renderer (or the grader enum) without the other fails HERE, loudly,
-    instead of g1_structure silently flagging the new kind as 'not in the enum'."""
+    """The fact-kind vocabulary now has ONE home — lib.schema.FACT_KINDS — that
+    the graders import and the renderer's section map must match. Pin the
+    renderer's kinds to the schema source so adding a kind in one place without
+    the other fails HERE, loudly, instead of g1_structure silently flagging the
+    new kind as 'not in the enum'."""
     import sys
     if str(_SKILL_ROOT) not in sys.path:
         sys.path.insert(0, str(_SKILL_ROOT))
     from lib import render  # noqa: E402
+    from lib.schema import FACT_KINDS  # noqa: E402
 
-    assert graders._FACT_KINDS == set(render._KIND_SECTION), (
-        "graders._FACT_KINDS drifted from lib.render._KIND_SECTION "
-        f"(grader-only: {graders._FACT_KINDS - set(render._KIND_SECTION)}; "
-        f"render-only: {set(render._KIND_SECTION) - graders._FACT_KINDS})")
+    assert graders._FACT_KINDS is FACT_KINDS  # graders read the schema source
+    assert FACT_KINDS == set(render._KIND_SECTION), (
+        "lib.render._KIND_SECTION drifted from lib.schema.FACT_KINDS "
+        f"(schema-only: {FACT_KINDS - set(render._KIND_SECTION)}; "
+        f"render-only: {set(render._KIND_SECTION) - FACT_KINDS})")

@@ -81,6 +81,21 @@ SmtpVerdict = Literal[
 ]
 
 
+# ---- analyst output-contract vocabulary --------------------------------------
+#
+# The single home for the Step-3 output vocabularies (SKILL.md), so the graders,
+# the renderer, and the standing instruction don't each carry a hand-copied
+# literal that drifts. A fact's `kind` is one of FACT_KINDS; an EMAIL fact also
+# carries a deliverability `verdict` (EMAIL_VERDICTS) and a belonging `marker`
+# (BELONGS_MARKERS) — see lib.ground.GroundedFact, which preserves verdict/marker
+# through --ground.
+FACT_KINDS = frozenset({
+    "email", "channel", "social_link", "work_item", "role", "consistency_note",
+})
+EMAIL_VERDICTS = frozenset({"verified", "google-confirmed", "pattern-guess"})
+BELONGS_MARKERS = frozenset({"[+]", "[?]"})
+
+
 @dataclass(frozen=True)
 class Source:
     """One observation of an email address from a single resolver."""

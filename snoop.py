@@ -1108,7 +1108,11 @@ def _format_reasoned_json(profile: reason.ReasonedProfile, *,
         "facts": [
             {"kind": f.kind, "label": f.label, "value": f.value, "detail": f.detail,
              "confidence": f.confidence, "verified": f.verified,
-             "evidence_ids": f.evidence_ids, "reasoning": f.reasoning}
+             "evidence_ids": f.evidence_ids, "reasoning": f.reasoning,
+             # The analyst's contract fields, preserved through --ground (only
+             # emitted when present, so a fact without them stays clean).
+             **({"verdict": f.verdict} if f.verdict is not None else {}),
+             **({"marker": f.marker} if f.marker is not None else {})}
             for f in profile.facts
         ],
         "usage": profile.usage,

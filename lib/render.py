@@ -166,8 +166,13 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None,
             # when the value is the linkedin URL) — keep the line scannable.
             head = value if not label or label.lower() in value.lower() else f"{label}: {value}"
             detail = f" — {_oneline(f.detail)}" if f.detail else ""
+            # The analyst's deliverability verdict (email facts), surfaced now
+            # that --ground preserves it instead of leaving it buried in detail.
+            verdict = getattr(f, "verdict", None)
+            verdict_tag = f" [{_oneline(verdict)}]" if verdict else ""
             tag = "" if f.verified else " (unverified)"
-            lines.append(f"  {_conf_marker(f.confidence, person)} {head}{detail}{tag}")
+            lines.append(
+                f"  {_conf_marker(f.confidence, person)} {head}{verdict_tag}{detail}{tag}")
 
     if not profile.facts:
         lines.append("")

@@ -83,6 +83,27 @@ def test_url_value_verified_when_distinctive_segment_present():
     assert out[0].verified is True
 
 
+def test_ground_preserves_verdict_and_marker():
+    """The analyst emits a per-fact verdict (email deliverability) and marker
+    ([+]/[?] belonging) per SKILL.md; --ground must PRESERVE them, not strip
+    them — otherwise the machine output the evals grade omits fields production
+    was told to produce."""
+    facts = [{
+        "kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+        "confidence": 0.9, "evidence_ids": ["o1"], "reasoning": "",
+        "verdict": "verified", "marker": "[+]",
+    }]
+    out = ground(facts, OBS)
+    assert out[0].verdict == "verified"
+    assert out[0].marker == "[+]"
+
+
+def test_ground_defaults_verdict_marker_to_none():
+    out = ground([_fact(value="alice@corp.com", ids=["o1"])], OBS)
+    assert out[0].verdict is None
+    assert out[0].marker is None
+
+
 def test_confidence_is_clamped():
     out = ground([_fact(confidence=5.0, ids=["o1"], value="alice@corp.com")], OBS)
     assert out[0].confidence == 1.0

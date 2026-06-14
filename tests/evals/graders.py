@@ -48,15 +48,14 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 import snoop  # noqa: E402
+from lib.schema import BELONGS_MARKERS, EMAIL_VERDICTS, FACT_KINDS  # noqa: E402
 
-# The output schema vocabularies (D1) — kept here so a grader and its canned
-# tests read the same source. Production schema vocab lives in lib.schema; these
-# are the harness-instructed OUTPUT fields, distinct by design (§9 PR aligns
-# them later).
-_VERDICTS = {"verified", "google-confirmed", "pattern-guess"}
-_MARKERS = {"[+]", "[?]"}
-_FACT_KINDS = {"email", "channel", "social_link", "work_item", "role",
-               "consistency_note"}
+# The output-contract vocabularies live in lib.schema (the single source the
+# graders, the renderer, and the standing instruction all read), so editing the
+# vocabulary in one place can't silently drift from another.
+_VERDICTS = EMAIL_VERDICTS
+_MARKERS = BELONGS_MARKERS
+_FACT_KINDS = FACT_KINDS
 # Two per-kind capability scopes — one source of truth each (no back-compat
 # aliases or parallel copies: a duplicated kind set silently drifts when only one
 # copy is edited):

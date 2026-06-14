@@ -1910,6 +1910,54 @@ def test_ground_drops_uncited_facts_and_renders(monkeypatch, capsys):
     assert "ghost talk" not in out      # cited o404 (nonexistent) -> dropped
 
 
+def test_ground_json_preserves_verdict_and_marker(monkeypatch, capsys):
+    """The analyst emits a per-fact verdict + marker (SKILL.md Step 3); --ground
+    --json must round-trip them so the machine output carries what the analyst
+    produced (the contract the evals grade), not a stripped fact."""
+    payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith, engineer.",
+        "observations": [
+            {"id": "o1", "type": "email_candidate",
+             "content": "candidate email: alice@corp.com (smtp verified)"},
+        ],
+        "facts": [
+            {"kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+             "confidence": 0.9, "evidence_ids": ["o1"], "reasoning": "profile",
+             "verdict": "verified", "marker": "[+]"},
+        ],
+        "json": True,
+    }
+    import json as _json
+    _ground_stdin(monkeypatch, payload)
+    rc = snoop.main(["--ground"])
+    assert rc == 0
+    out = _json.loads(capsys.readouterr().out)
+    fact = out["facts"][0]
+    assert fact["verdict"] == "verified"
+    assert fact["marker"] == "[+]"
+
+
+def test_ground_card_surfaces_the_verdict_word(monkeypatch, capsys):
+    payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith, engineer.",
+        "observations": [
+            {"id": "o1", "type": "email_candidate",
+             "content": "candidate email: alice@corp.com (smtp verified)"},
+        ],
+        "facts": [
+            {"kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+             "confidence": 0.9, "evidence_ids": ["o1"], "reasoning": "p",
+             "verdict": "verified", "marker": "[+]"},
+        ],
+    }
+    _ground_stdin(monkeypatch, payload)
+    assert snoop.main(["--ground"]) == 0
+    out = capsys.readouterr().out
+    assert "[verified]" in out  # the deliverability verdict is surfaced, not buried
+
+
 def test_ground_invalid_json_returns_error(monkeypatch, capsys):
     import io
     monkeypatch.setattr("sys.stdin", io.StringIO("{not json"))
