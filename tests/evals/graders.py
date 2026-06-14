@@ -99,9 +99,20 @@ def _facts(output: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _obs_by_id(fixture: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Map observation id -> observation. Id-less observations are SKIPPED (so a
+    fact citing null can't resolve to one), and a duplicate id keeps the FIRST
+    occurrence (no silent last-wins shadowing). A clean fixture has unique string
+    ids; this just fails closed on a malformed one."""
     bundle = fixture.get("bundle", {})
-    return {o.get("id"): o for o in bundle.get("observations", [])
-            if isinstance(o, dict)}
+    out: dict[str, dict[str, Any]] = {}
+    for o in bundle.get("observations", []):
+        if not isinstance(o, dict):
+            continue
+        oid = o.get("id")
+        if not isinstance(oid, str) or not oid:
+            continue
+        out.setdefault(oid, o)
+    return out
 
 
 def _value_grounded_substring(value: Any, contents: list[str]) -> bool:
@@ -131,6 +142,21 @@ def _cited_data(fact: dict[str, Any],
     return out
 
 
+def _flag_true(value: Any) -> bool:
+    """Interpret a bundle flag (e.g. name_match) as a boolean, failing CLOSED on
+    a stringy value: bool('no') is truthy, so a plain bool() would let a
+    name-mismatch rival ('name_match': 'no') license google-confirmed. Only a
+    real True, a nonzero number, or an affirmative string counts as true; 'no' /
+    'false' / '0' / '' / None are false."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "y", "t", "1"}
+    return False
+
+
 def _obs_licenses_google_confirmed(d: dict[str, Any]) -> bool:
     """Whether ONE cited observation's own data licenses `google-confirmed`
     (SKILL.md:228-231 + :350/:378): account_exists=="verified" AND a text
@@ -141,7 +167,7 @@ def _obs_licenses_google_confirmed(d: dict[str, Any]) -> bool:
     — none license google-confirmed. Read per-obs so the existence and SMTP
     signals must come from the SAME observation, never a mix (finding #6)."""
     return (d.get("account_exists") == "verified"
-            and bool(d.get("name_match"))
+            and _flag_true(d.get("name_match"))
             and d.get("smtp") not in {"verified", "invalid"})
 
 

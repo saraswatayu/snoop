@@ -689,3 +689,45 @@ def test_happy_dev_output_passes_all_four_g1_graders():
     results = [g(fixture, output) for g in graders.G1_GRADERS]
     failed = [(r.grader, r.detail) for r in results if not r.passed]
     assert not failed, f"a clean happy-dev output failed: {failed}"
+
+
+# --------------------------------------------------------------------------- #
+# fail-open guards: _obs_by_id id handling + name_match truthiness
+# --------------------------------------------------------------------------- #
+
+
+def test_obs_by_id_skips_idless_observations():
+    """An observation with no `id` must not become a None-keyed entry — a fact
+    citing null would otherwise resolve to it and license a verdict off an
+    observation it never legitimately cited."""
+    fixture = {"bundle": {"observations": [
+        {"id": "o1", "content": "real", "data": {"smtp": "verified"}},
+        {"content": "no id", "data": {"account_exists": "verified",
+                                      "name_match": True}},
+    ]}}
+    by_id = graders._obs_by_id(fixture)
+    assert "o1" in by_id
+    assert None not in by_id
+
+
+def test_obs_by_id_does_not_let_duplicate_id_shadow():
+    """Two observations sharing an id must not silently last-wins-shadow each
+    other; the grader keeps the first so a fact grades against a stable obs."""
+    fixture = {"bundle": {"observations": [
+        {"id": "o1", "content": "first", "data": {"smtp": "verified"}},
+        {"id": "o1", "content": "second", "data": {}},
+    ]}}
+    by_id = graders._obs_by_id(fixture)
+    assert by_id["o1"]["content"] == "first"
+
+
+def test_google_confirmed_not_licensed_by_stringy_name_match_no():
+    """name_match read as bool('no') is truthy — a string 'no' must NOT license
+    a google-confirmed verdict (a name-mismatch rival is a DIFFERENT person)."""
+    d_no = {"account_exists": "verified", "name_match": "no", "smtp": "catch_all"}
+    assert graders._obs_licenses_google_confirmed(d_no) is False
+    d_false = {"account_exists": "verified", "name_match": False, "smtp": "catch_all"}
+    assert graders._obs_licenses_google_confirmed(d_false) is False
+    # a genuine match still licenses it
+    d_yes = {"account_exists": "verified", "name_match": True, "smtp": "catch_all"}
+    assert graders._obs_licenses_google_confirmed(d_yes) is True
