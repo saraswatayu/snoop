@@ -859,7 +859,18 @@ def _anchored_surface_domains(person: Person) -> set[str]:
     return doms
 
 
-def _candidate_is_bound(c: EmailCandidate, person: Person) -> bool:
+def _bind_context(person: Person) -> tuple[set[str], set[str], bool]:
+    """The three person-level invariants _candidate_is_bound reads — the rel=me
+    domains, the anchored-surface domains, and whether the GitHub identity is
+    bound. Computed once and reused across a batch of candidates (each scans
+    person.bound_anchors, which doesn't change per candidate)."""
+    return (_verified_personal_domains(person),
+            _anchored_surface_domains(person),
+            _github_identity_bound(person))
+
+
+def _candidate_is_bound(c: EmailCandidate, person: Person,
+                        *, ctx: tuple[set[str], set[str], bool] | None = None) -> bool:
     """ENG-8 Phase-1: does THIS ADDRESS belong to the target? (Distinct from
     Person.bound_anchors, which only says 'we found the right person at all.')
 
@@ -889,9 +900,10 @@ def _candidate_is_bound(c: EmailCandidate, person: Person) -> bool:
     if "manual_known" in source_types:
         return True
     domain = c.address.rsplit("@", 1)[1].lower()
-    rel_me_domains = _verified_personal_domains(person)
-    surface_domains = _anchored_surface_domains(person)
-    github_bound = _github_identity_bound(person)
+    # Person-level invariants don't vary across candidates; when binding a whole
+    # batch the caller hoists them once via _bind_context and passes them in so
+    # they aren't rescanned per candidate.
+    rel_me_domains, surface_domains, github_bound = ctx or _bind_context(person)
 
     on_github_surface = github_bound and bool(source_types & _GITHUB_SURFACES)
     on_owned_domain_surface = (
@@ -1365,7 +1377,8 @@ def _probe_candidates(
     its own copies, which we discard — its verdicts are never merged (the generation
     guarantee), and the probe phase reports a `deadline-exceeded` degradation.
     Returns that degraded RunRecord on abandonment, else None."""
-    bound = [c for c in candidates if _candidate_is_bound(c, person)]
+    _ctx = _bind_context(person)  # hoist the person-level invariants once
+    bound = [c for c in candidates if _candidate_is_bound(c, person, ctx=_ctx)]
     bound_addrs = {c.address for c in bound}
 
     # ENG-9 speculative set: unbound Workspace candidates eligible for the Google
