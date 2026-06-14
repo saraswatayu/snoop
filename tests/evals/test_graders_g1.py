@@ -564,6 +564,44 @@ def test_g1_structure_fails_when_dead_end_emits_an_email_fact():
     assert "dead-end output emitted an email fact" in result.detail
 
 
+def test_channel_hint_candidates_strip_punct_and_skip_email_locals():
+    """finding #13: channel extraction must yield a CLEAN url (trailing sentence
+    punctuation stripped) and must NOT mint a bogus '@handle' from an email local
+    part. Both broke the dead-end channel-in-summary check."""
+    fixture = {"bundle": {"observations": [
+        {"id": "o1", "type": "channel_hint", "source_url": None,
+         "content": "reach the form at https://graymoor.example/contact."},
+        {"id": "o2", "type": "channel_hint", "source_url": None,
+         "content": "or email contact@graymoor.example directly"},
+    ]}}
+    cands = graders._channel_hint_candidates(fixture)
+    assert "https://graymoor.example/contact" in cands  # trailing '.' stripped
+    assert not any(c == "@graymoor" for c in cands)     # email local is not a handle
+
+
+def test_g1_structure_dead_end_accepts_clean_url_when_content_has_trailing_punct():
+    """finding #13: a dead-end whose channel hint carries a period-terminated URL
+    only in content prose still recognizes the clean URL a model surfaces in the
+    summary — the trailing '.' would otherwise break the substring match."""
+    fixture = {
+        "bundle": {
+            "person": {"name": "D", "ambiguity": "insufficient_identity_evidence"},
+            "observations": [
+                {"id": "o1", "type": "channel_hint", "source_url": None,
+                 "content": "declared contact form: https://graymoor.example/contact."},
+            ],
+        },
+        "labels": {"dead_end": True},
+    }
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": "No mailbox; try the form at https://graymoor.example/contact",
+        "facts": [],
+    }
+    result = graders.g1_structure(fixture, output)
+    assert result.passed, result.detail
+
+
 def test_g1_structure_fails_a_longest_token_paraphrase():
     """finding #2: g1_structure is the paraphrase trap, so it must NOT inherit
     --ground's single-longest-token fallback. A role value sharing only its

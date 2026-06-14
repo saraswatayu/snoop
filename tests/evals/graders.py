@@ -145,19 +145,26 @@ def _obs_licenses_google_confirmed(d: dict[str, Any]) -> bool:
             and d.get("smtp") not in {"verified", "invalid"})
 
 
-# A URL or @-handle the model could echo into the summary to point at a real
-# reachability channel (finding [9]). Deliberately permissive on the URL shape so
-# a path-bearing contact-form URL ("https://graymoor.example/contact") is caught.
+# A URL or @-handle a model could echo into the summary to point at a REAL
+# reachability channel (finding [9]). The STRUCTURED source_url is the primary,
+# clean signal; this regex is a fallback for a channel mentioned only in prose,
+# hardened against two extraction bugs (finding #13):
+#  - URLs: trailing sentence punctuation is stripped off the match (so a
+#    period-terminated "...contact." still equals the clean URL in the summary).
+#  - Handles: a negative lookbehind keeps an email local part
+#    ("contact@graymoor.example") from yielding a bogus "@graymoor" handle.
 _CHANNEL_TOKEN_RE = re.compile(
-    r"https?://[^\s)]+|@[A-Za-z0-9_]{2,}", re.IGNORECASE)
+    r"https?://[^\s)]+|(?<![\w.@])@[A-Za-z0-9_]{2,}", re.IGNORECASE)
+_URL_TRAILING_PUNCT = ".,;:!?)]}>\"'"
 
 
 def _channel_hint_candidates(fixture: dict[str, Any]) -> list[str]:
-    """The real channel strings the dead-end output could surface, drawn from the
-    bundle's hints: every channel_hint observation's source_url and any URL/handle
-    embedded in its content, plus any top-level bundle channel_hints values. Used
-    to verify a dead-end summary suggests a REAL channel (not the literal words
-    'channel'/'contact')."""
+    """The real channel strings a dead-end output could surface, drawn from the
+    bundle's STRUCTURED hints first — every channel_hint observation's source_url
+    and any top-level bundle channel_hints value — plus, as a fallback, any
+    URL/handle embedded in a hint's content prose (trailing punctuation stripped
+    off URLs, email locals excluded from handles). Used to verify a dead-end
+    summary suggests a REAL channel, not the literal words 'channel'/'contact'."""
     bundle = fixture.get("bundle", {})
     out: list[str] = []
     for obs in bundle.get("observations", []):
@@ -166,7 +173,9 @@ def _channel_hint_candidates(fixture: dict[str, Any]) -> list[str]:
         src = obs.get("source_url")
         if isinstance(src, str) and src.strip():
             out.append(src.strip())
-        out.extend(_CHANNEL_TOKEN_RE.findall(str(obs.get("content", ""))))
+        for tok in _CHANNEL_TOKEN_RE.findall(str(obs.get("content", ""))):
+            out.append(tok if tok.startswith("@")
+                       else tok.rstrip(_URL_TRAILING_PUNCT))
     hints = bundle.get("channel_hints")
     if isinstance(hints, dict):
         out.extend(str(v) for v in hints.values() if v)
