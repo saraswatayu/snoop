@@ -65,6 +65,24 @@ def test_verified_matches_on_longest_token_when_whole_value_normalized():
     assert out[0].verified is True
 
 
+def test_url_value_not_verified_by_shared_host_token():
+    """A profile URL must NOT verify against a DIFFERENT profile on the same
+    host: 'github.com/janedoe' shares only the generic host token 'github.com'
+    with 'github.com/someoneelse', so the longest-token fallback used to stamp
+    it verified — laundering a namesake URL as source-confirmed."""
+    obs = [_obs("o1", "see https://github.com/someoneelse for code")]
+    out = ground([_fact(value="https://github.com/janedoe", ids=["o1"],
+                        kind="social_link")], obs)
+    assert out[0].verified is False
+
+
+def test_url_value_verified_when_distinctive_segment_present():
+    obs = [_obs("o1", "their account is github.com/janedoe (confirmed)")]
+    out = ground([_fact(value="https://github.com/janedoe", ids=["o1"],
+                        kind="social_link")], obs)
+    assert out[0].verified is True
+
+
 def test_confidence_is_clamped():
     out = ground([_fact(confidence=5.0, ids=["o1"], value="alice@corp.com")], OBS)
     assert out[0].confidence == 1.0

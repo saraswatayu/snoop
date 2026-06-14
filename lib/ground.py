@@ -28,6 +28,7 @@ the existence check is cheap and keeps the [+]/[?] markers honest.)
 from __future__ import annotations
 
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from typing import Iterable, Protocol, Sequence
 
@@ -66,17 +67,44 @@ def _significant_tokens(value: str) -> list[str]:
     return [m.group(0).lower() for m in _TOKEN.finditer(value or "")]
 
 
+def _distinctive_url_token(value: str) -> str | None:
+    """For a URL value, the last non-empty path segment — the username / repo /
+    slug that actually identifies it. Returns None when the value isn't a URL
+    with a path. The host (github.com, x.com) is deliberately NOT used: it is
+    generic and shared across every profile on the platform, so matching on it
+    would verify a DIFFERENT profile's URL."""
+    s = (value or "").strip()
+    if "://" not in s:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(s)
+    except ValueError:
+        return None
+    if not parsed.netloc:
+        return None
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    return segments[-1].lower() if segments else None
+
+
 def _value_appears(value: str, haystacks: Iterable[str]) -> bool:
     """True when the value (or its most significant token) shows up verbatim in
     any cited observation. Whole-value match first; else fall back to the
     longest token so a normalized form (lowercased email, trimmed title) still
-    verifies without a brittle exact match."""
+    verifies without a brittle exact match.
+
+    A URL value is matched on its DISTINCTIVE path segment, not the longest
+    token: the longest token of `https://github.com/janedoe` is the generic host
+    `github.com`, which would spuriously verify against any other github URL. The
+    last path segment (`janedoe`) is the identity that must actually appear."""
     v = (value or "").strip().lower()
     if not v:
         return False
     blob = "\n".join(h.lower() for h in haystacks)
     if v in blob:
         return True
+    url_token = _distinctive_url_token(value)
+    if url_token is not None:
+        return url_token in blob
     toks = sorted(_significant_tokens(value), key=len, reverse=True)
     return any(t in blob for t in toks[:1])  # the single longest token
 
