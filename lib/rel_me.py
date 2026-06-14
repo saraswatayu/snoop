@@ -53,15 +53,21 @@ class RelMeLink:
     url:            the absolute https profile URL
     bidirectional:  True when the profile links back to the site (or the
                     Bluesky well-known handle is self-attested)
-    tier:           "asserted" when bidirectional, "possibly" otherwise
     detail:         optional human-readable note on how it was classified
+
+    tier ("asserted" when bidirectional, else "possibly") is DERIVED from
+    `bidirectional` — a property, not a stored field, so the two can't drift out
+    of lockstep.
     """
 
     platform: str
     url: str
     bidirectional: bool
-    tier: str
     detail: str = ""
+
+    @property
+    def tier(self) -> str:
+        return "asserted" if self.bidirectional else "possibly"
 
 
 def _rel_has_me(rel_value: str) -> bool:
@@ -119,7 +125,8 @@ def _classify_platform(host: str) -> str:
         return "github"
     if host == "bsky.app" or host == "bsky.social" or host.endswith(".bsky.social"):
         return "bluesky"
-    if host == "mastodon.social" or host.startswith("mastodon.") or ".mastodon." in host:
+    # "mastodon.social" is already covered by the startswith("mastodon.") clause.
+    if host.startswith("mastodon.") or ".mastodon." in host:
         return "mastodon"
     return "other"
 
@@ -186,7 +193,6 @@ def _check_bluesky_handle(fetch_fn, domain: str) -> RelMeLink | None:
         platform="bluesky",
         url=f"https://bsky.app/profile/{domain}",
         bidirectional=True,
-        tier="asserted",
         detail="domain is a Bluesky handle (/.well-known/atproto-did)",
     )
 
@@ -253,7 +259,6 @@ def verify_rel_me(
                 platform=platform,
                 url=url,
                 bidirectional=True,
-                tier="asserted",
                 detail="bidirectional rel=me (site and profile link to each other)",
             ))
         else:
@@ -261,7 +266,6 @@ def verify_rel_me(
                 platform=platform,
                 url=url,
                 bidirectional=False,
-                tier="possibly",
                 detail="site links to profile; no back-reference found",
             ))
 

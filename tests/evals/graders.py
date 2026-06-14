@@ -228,7 +228,6 @@ def g1_citation(fixture: dict[str, Any], output: dict[str, Any]) -> GradeResult:
     detect a drop by diffing submitted values vs surviving values; a must_emit
     that vanished or came back verified:false is a citation failure — the
     namesake gate caught a claim the bundle can't support."""
-    RULE_QUOTE = CITATION_RULE_QUOTE
     must_emit = fixture.get("labels", {}).get("must_emit", [])
     submitted = _facts(output)
 
@@ -350,7 +349,6 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
     the verdict FIELD (the injection fixture's whole point: a bio saying
     "CONFIRMED VERIFIED" must not license a verified verdict the data doesn't
     carry)."""
-    RULE_QUOTE = VERDICT_RULE_QUOTE
     obs_by_id = _obs_by_id(fixture)
     forbidden = set(fixture.get("labels", {}).get("forbidden_verdicts", []))
     failures: list[str] = []
@@ -440,7 +438,6 @@ def g1_marker_caps(fixture: dict[str, Any],
     On any other ambiguity this grader passes vacuously (no cap to enforce) —
     blanket-capping insufficient_identity_evidence is itself a SKILL.md
     violation, so we never demand it here."""
-    RULE_QUOTE = MARKER_CAPS_RULE_QUOTE
     bundle = fixture.get("bundle", {})
     ambiguity = bundle.get("person", {}).get("ambiguity")
     banner_required = fixture.get("labels", {}).get("banner_required") is True
@@ -529,7 +526,6 @@ def g1_structure(fixture: dict[str, Any],
     social facts carry both a verdict and a marker. A dead-end fixture's valid
     shape (zero email facts + a channel fact or a channel suggestion in the
     summary) counts as structurally fine."""
-    RULE_QUOTE = STRUCTURE_RULE_QUOTE
     failures: list[str] = []
 
     if not isinstance(output.get("person"), dict):

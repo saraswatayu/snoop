@@ -43,6 +43,7 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 from lib.schema import (  # noqa: E402
+    BUNDLE_SCHEMA_VERSION,
     AccountExistsVerdict,
     AmbiguityState,
     SmtpVerdict,
@@ -96,8 +97,9 @@ def _lint_bundle(fid: str, bundle: dict[str, Any]) -> list[str]:
     def fail(msg: str) -> None:
         out.append(f"[{fid}] {msg}")
 
-    if bundle.get("schema") != 2:
-        fail(f"schema {bundle.get('schema')!r} != 2 (--ground rejects stale v1)")
+    if bundle.get("schema") != BUNDLE_SCHEMA_VERSION:
+        fail(f"schema {bundle.get('schema')!r} != {BUNDLE_SCHEMA_VERSION} "
+             "(--ground rejects a stale bundle)")
 
     person = bundle.get("person", {})
     if set(person) != {"name", "ambiguity"}:

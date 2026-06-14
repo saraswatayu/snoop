@@ -35,7 +35,6 @@ import json
 import subprocess
 import urllib.error
 import urllib.parse
-from typing import Any
 
 from . import _gh_api
 from ._gh_api import GhCaller
@@ -124,19 +123,3 @@ def find_github_handle(
     if len(matches) != 1:
         return None
     return matches[0]
-
-
-def _safe_find_github_handle(
-    name: str,
-    employer_name: str | None = None,
-    *,
-    gh_caller: Any = None,
-) -> str | None:
-    """find_github_handle wrapped in a try/except — when called from inside
-    person_resolve, any unexpected error must not break the rest of the
-    pipeline. Returns None on anything unexpected, including programmer
-    errors elsewhere in the call chain."""
-    try:
-        return find_github_handle(name, employer_name, gh_caller=gh_caller)
-    except Exception:  # noqa: BLE001
-        return None

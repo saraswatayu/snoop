@@ -352,14 +352,15 @@ def test_relmelink_dataclass_fields():
     """Contract check: the dataclass exposes the agreed fields."""
     link = RelMeLink(
         platform="github", url="https://github.com/jane",
-        bidirectional=True, tier="asserted", detail="x",
+        bidirectional=True, detail="x",
     )
     assert link.platform == "github"
     assert link.url == "https://github.com/jane"
     assert link.bidirectional is True
-    assert link.tier == "asserted"
+    assert link.tier == "asserted"  # derived from bidirectional
     assert link.detail == "x"
-    # detail is optional
+    # detail is optional; tier follows bidirectional
     link2 = RelMeLink(platform="other", url="https://x.example/",
-                      bidirectional=False, tier="possibly")
+                      bidirectional=False)
     assert link2.detail == ""
+    assert link2.tier == "possibly"

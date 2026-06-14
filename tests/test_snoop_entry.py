@@ -1539,7 +1539,7 @@ def test_rel_me_emits_observation_and_anchor(monkeypatch, capsys):
     monkeypatch.setattr(snoop, "fetch_recent_repos", lambda *a, **kw: [])
     monkeypatch.setattr(snoop, "verify_rel_me", lambda domain, **kw: [
         RelMeLink(platform="github", url="https://github.com/alice",
-                  bidirectional=True, tier="asserted"),
+                  bidirectional=True),
     ])
     snoop.main(["Alice", "--no-smtp", "--no-pgp", "--observations"])
     bundle = _json.loads(capsys.readouterr().out)
