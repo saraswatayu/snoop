@@ -66,12 +66,27 @@ _NAME_KEYS = {"name", "google_display_name", "gh_name"}
 # `name_match = <Name>` identity anchor and a `google_display_name="<Name>"`
 # mirror (finding #10). The content string is exactly what the analyst reads, so
 # a real name would leak there; extract those and roster-check them too. The
-# name_match form requires >=2 capitalized tokens so the boolean `name_match=yes`
-# / `no` and lowercase `snoop-fixture-*` handles are never mistaken for names.
+# name_match form requires the FIRST and LAST tokens to be capitalized (so the
+# boolean `name_match=yes`/`no` and lowercase `snoop-fixture-*` handles are never
+# mistaken for names) but tolerates a lowercase nobiliary particle in between
+# (van/de/von/der) so 'Ludwig van Beethoven' doesn't slip through.
 _CONTENT_NAME_RES = (
     re.compile(r'google_display_name\s*=\s*"([^"]+)"'),
-    re.compile(r"name_match\s*=\s*([A-Z][\w.'-]*(?:\s+[A-Z][\w.'-]*)+)"),
+    re.compile(r"name_match\s*=\s*"
+               r"([A-Z][\w.'’-]*(?:\s+(?:[a-z]{1,5}|[A-Z][\w.'’-]*))*"
+               r"\s+[A-Z][\w.'’-]*)"),
 )
+
+# Generic role-account localparts (not names) exempt from the localpart name
+# check — a closed-world fixture localpart should otherwise derive from a roster
+# persona's own name tokens.
+_GENERIC_LOCALPARTS = frozenset({
+    "info", "hello", "hi", "hey", "contact", "sales", "admin", "support",
+    "team", "press", "jobs", "careers", "noreply", "donotreply", "mail",
+    "email", "webmaster", "abuse", "postmaster", "security", "help", "billing",
+    "accounts", "office", "ceo", "cto", "cfo", "coo", "founder", "founders",
+    "dev", "root", "user", "test",
+})
 
 # A bare-domain scan over arbitrary prose would false-positive on dotted code
 # identifiers ("data.smtp", "first.last") whose final label isn't a real TLD.
@@ -139,6 +154,19 @@ def _split_cell(cell: str) -> list[str]:
     return [part.strip() for part in cell.split(",") if part.strip()]
 
 
+def _roster_name_tokens(roster: Roster) -> frozenset[str]:
+    """Every lowercased word inside a roster name (split on whitespace, hyphens,
+    apostrophes, dots), len>=2 — the legitimate building blocks of a fixture
+    localpart (bram, zinnia, voss, calloway). A localpart alpha-token outside
+    this set (and not a generic role word) is a real-name leak."""
+    toks: set[str] = set()
+    for name in roster.names:
+        for t in re.split(r"[\s\-'’.]+", name.lower()):
+            if len(t) >= 2:
+                toks.add(t)
+    return frozenset(toks)
+
+
 def _domain_ok(domain: str, roster: Roster) -> bool:
     """A domain passes if it's RFC 2606 reserved, roster-declared, or
     explicitly allowlisted."""
@@ -182,6 +210,7 @@ def _check_one(fixture_id: str, envelope: dict, roster: Roster) -> list[_Violati
     """Extract every identity-bearing string from one fixture envelope and
     return the violations (empty list = clean)."""
     out: list[_Violation] = []
+    name_tokens = _roster_name_tokens(roster)
     for jpath, key, val in _strings(envelope):
         # Name-bearing fields must be roster members verbatim.
         if key in _NAME_KEYS and val and not val.startswith("http"):
@@ -193,11 +222,19 @@ def _check_one(fixture_id: str, envelope: dict, roster: Roster) -> list[_Violati
             for nm in rx.findall(val):
                 if nm not in roster.names:
                     out.append(_Violation(fixture_id, f"content-name@{jpath}", nm))
-        # @-addresses: the domain part must pass the domain rule.
+        # @-addresses: the domain part must pass the domain rule AND the
+        # localpart must not encode a real name (finding: only the domain half
+        # was checked, so 'peter.steinberger@example.com' leaked a real name).
         for addr in _ADDRESS_RE.findall(val):
-            dom = addr.split("@", 1)[1]
+            local, _, dom = addr.partition("@")
             if not _domain_ok(dom, roster):
                 out.append(_Violation(fixture_id, f"address@{jpath}", addr))
+            for tok in re.split(r"[^a-z]+", local.lower()):
+                if (len(tok) >= 3 and tok not in name_tokens
+                        and tok not in _GENERIC_LOCALPARTS):
+                    out.append(_Violation(
+                        fixture_id, f"address-localpart@{jpath}", addr))
+                    break
         # URLs: github.com/<roster-handle> or a passing-domain host.
         for url in _URL_RE.findall(val):
             host = re.sub(r"^https?://", "", url).split("/", 1)[0].split(":", 1)[0]
@@ -334,6 +371,60 @@ def test_negative_self_test_a_real_name_in_content_prose_fails(tmp_path):
     leaked = {v.value for v in scan_fixtures(tmp_path, roster)}
     assert "Peter Steinberger" in leaked, f"anchor-name leak missed: {leaked}"
     assert "Linus Torvalds" in leaked, f"display-name leak missed: {leaked}"
+
+
+def test_negative_self_test_localpart_name_in_address_fails(tmp_path):
+    """A real name in the LOCALPART of an @-address leaks even when the domain is
+    reserved: 'peter.steinberger@example.com' splits to a real name the old gate
+    never roster-checked (it validated only the domain half)."""
+    leaking = {
+        "id": "localpart-leak", "suite": "regression",
+        "bundle": {
+            "schema": 2, "warnings": [],
+            "person": {"name": "Zinnia Voss-Calloway",  # rostered: name-key clean
+                       "ambiguity": "single_plausible_match"},
+            "observations": [
+                {"id": "o1", "type": "email_candidate", "source_url": None,
+                 "content": "candidate email: peter.steinberger@example.com",
+                 "data": {"address": "peter.steinberger@example.com"}},
+            ],
+            "sensors": [],
+        },
+        "labels": {"must_emit": [], "must_not_emit": [], "banner_required": False,
+                   "forbidden_verdicts": [], "rubric_notes": "localpart leak"},
+    }
+    (tmp_path / "localpart-leak.json").write_text(json.dumps(leaking))
+    roster = parse_roster()
+    leaked = {v.value for v in scan_fixtures(tmp_path, roster)}
+    assert any("steinberger" in v.lower() for v in leaked), \
+        f"localpart name leak missed: {leaked}"
+
+
+def test_negative_self_test_lowercase_particle_name_in_content_fails(tmp_path):
+    """A real name with a lowercase nobiliary particle (van/de/von) must trip the
+    content-name gate. The old regex required EVERY token capitalized, so 'van'
+    broke the chain and 'Ludwig van Beethoven' slipped through."""
+    leaking = {
+        "id": "particle-name-leak", "suite": "regression",
+        "bundle": {
+            "schema": 2, "warnings": [],
+            "person": {"name": "Cassius Webb-Olander",  # rostered: name-key clean
+                       "ambiguity": "single_plausible_match"},
+            "observations": [
+                {"id": "o1", "type": "anchor", "source_url": None,
+                 "content": ("identity anchor validated: "
+                             "github_name_match = Ludwig van Beethoven")},
+            ],
+            "sensors": [],
+        },
+        "labels": {"must_emit": [], "must_not_emit": [], "banner_required": False,
+                   "forbidden_verdicts": [], "rubric_notes": "particle name leak"},
+    }
+    (tmp_path / "particle-name-leak.json").write_text(json.dumps(leaking))
+    roster = parse_roster()
+    leaked = {v.value for v in scan_fixtures(tmp_path, roster)}
+    assert any("Beethoven" in v for v in leaked), \
+        f"lowercase-particle name leak missed: {leaked}"
 
 
 def test_negative_self_test_a_clean_fixture_passes(tmp_path):
