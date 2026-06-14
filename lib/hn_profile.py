@@ -28,12 +28,11 @@ from __future__ import annotations
 
 import html
 import re
-import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
 
+from .fetch import fetch
 from .normalize import normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
@@ -104,15 +103,14 @@ def _extract_emails_from_text(text: str) -> list[str]:
 
 
 def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str | None:
-    """Fetch URL body as text. Returns None on 404; raises on other errors."""
-    req = urllib.request.Request(url, headers={"User-Agent": "snoop-skill"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code in (404, 410):
-            return None
-        raise
+    """Fetch URL body as text through the SSRF-hardened lib.fetch (https-only,
+    public-IP-pinned, redirect-revalidated, body-capped). Returns None on
+    404/410; lets FetchBlocked / network (OSError) propagate so the caller marks
+    the sensor degraded."""
+    res = fetch(url, timeout=timeout)
+    if res.status in (404, 410):
+        return None
+    return res.text
 
 
 def fetch_hn_profile(handle: str, *, http_get: HttpGet | None = None) -> ResolverResult:

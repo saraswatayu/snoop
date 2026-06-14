@@ -134,3 +134,45 @@ def test_decompressed_size_cap_truncates():
                  body=big)
     r = fetch("https://example.com/big", opener=op, resolve=_PUB, max_bytes=1000)
     assert len(r.text) == 1000
+
+
+def test_raw_deflate_body_is_decoded():
+    # Some servers send headerless (raw) DEFLATE for Content-Encoding: deflate.
+    # zlib.decompressobj() (zlib-wrapped) raises zlib.error on it; the decoder
+    # must fall back to raw deflate, not crash the sensor with an uncaught
+    # zlib.error (which is neither FetchBlocked nor OSError).
+    import zlib
+    co = zlib.compressobj(9, zlib.DEFLATED, -15)  # wbits<0 → raw deflate
+    raw = co.compress(b"hello raw deflate") + co.flush()
+    op = _opener(headers={"Content-Type": "text/plain", "Content-Encoding": "deflate"},
+                 body=raw)
+    r = fetch("https://example.com/d", opener=op, resolve=_PUB)
+    assert "hello raw deflate" in r.text
+
+
+def test_undecodable_deflate_raises_fetchblocked_not_zliberror():
+    # A garbage deflate body must surface as FetchBlocked (which sensors catch),
+    # never an uncaught zlib.error.
+    op = _opener(headers={"Content-Type": "text/plain", "Content-Encoding": "deflate"},
+                 body=b"this is plainly not a deflate stream")
+    with pytest.raises(FetchBlocked):
+        fetch("https://example.com/d", opener=op, resolve=_PUB)
+
+
+def test_default_resolve_is_time_bounded(monkeypatch):
+    # The default DNS resolver must not hang indefinitely on a slow/blackholing
+    # nameserver — getaddrinfo has no timeout of its own, so the helper bounds it.
+    import socket
+    import threading
+    import time as _time
+    from lib import fetch as fetchmod
+
+    def hang(*a, **k):
+        _time.sleep(30)
+    monkeypatch.setattr(socket, "getaddrinfo", hang)
+    monkeypatch.setattr(fetchmod, "_RESOLVE_TIMEOUT_SEC", 0.2)
+
+    start = _time.monotonic()
+    with pytest.raises(OSError):
+        fetchmod._default_resolve("slow.example")
+    assert _time.monotonic() - start < 5  # returned promptly, didn't hang

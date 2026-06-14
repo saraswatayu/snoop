@@ -218,3 +218,37 @@ def test_fetch_source_type_and_url_point_at_profile_page():
     src = result.candidates[0].sources[0]
     assert src.type == "hn_profile"
     assert src.url == "https://news.ycombinator.com/user?id=pg"
+
+
+# ---- default fetcher routes through the SSRF-hardened lib.fetch --------------
+
+
+def test_default_http_get_routes_through_lib_fetch(monkeypatch):
+    """The production fetcher must go through lib.fetch.fetch (https-only,
+    public-IP-pinned, redirect-revalidated, body-capped), not a raw urlopen."""
+    from lib import hn_profile
+    from lib.fetch import FetchResult
+
+    calls = []
+
+    def fake_fetch(url, *, timeout=None, **kwargs):
+        calls.append(url)
+        return FetchResult(url=url, status=200, content_type="text/html",
+                           text="<html>hi</html>")
+
+    monkeypatch.setattr(hn_profile, "fetch", fake_fetch)
+    body = hn_profile._default_http_get("https://news.ycombinator.com/user?id=pg")
+    assert calls == ["https://news.ycombinator.com/user?id=pg"]
+    assert body == "<html>hi</html>"
+
+
+def test_default_http_get_returns_none_on_404(monkeypatch):
+    from lib import hn_profile
+    from lib.fetch import FetchResult
+
+    monkeypatch.setattr(hn_profile, "fetch",
+                        lambda url, **k: FetchResult(url=url, status=404,
+                                                     content_type="text/html",
+                                                     text="No such user."))
+    assert hn_profile._default_http_get(
+        "https://news.ycombinator.com/user?id=ghost") is None

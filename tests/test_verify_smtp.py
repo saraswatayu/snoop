@@ -340,6 +340,48 @@ def test_budget_exhausted_domains_left_unprobed():
         assert cands[1].smtp_verdict == "unprobed"
 
 
+# ---- SSRF guard: never dial a private/internal MX ---------------------------
+
+
+def test_smtp_refuses_private_mx(monkeypatch):
+    """A candidate domain whose MX resolves to a private/loopback/link-local
+    address must NOT trigger an SMTP connection — that would be an internal
+    port-probe (SSRF). The probe fails closed to 'unprobed' and never opens
+    a socket."""
+    from lib import verify_smtp
+
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d, **k: ("internal.mx.local", None))
+    monkeypatch.setattr(verify_smtp, "is_public_host", lambda h, **k: False)
+    opened: list[str] = []
+    monkeypatch.setattr(verify_smtp.DomainProbe, "_open",
+                        lambda self: opened.append(self.mx or ""))
+
+    probe = verify_smtp.DomainProbe("evil.example", "verify@example.com", 5)
+    verdict, _provider, _code = probe.test("victim@evil.example")
+
+    assert verdict == "unprobed"
+    assert opened == []  # the guard blocked the connection attempt entirely
+    assert probe.error and "public" in probe.error.lower()
+
+
+def test_smtp_allows_public_mx(monkeypatch):
+    """A public MX still gets probed (the guard only blocks private targets)."""
+    from lib import verify_smtp
+
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d, **k: ("aspmx.l.google.com", None))
+    monkeypatch.setattr(verify_smtp, "is_public_host", lambda h, **k: True)
+    opened: list[str] = []
+    monkeypatch.setattr(verify_smtp.DomainProbe, "_open",
+                        lambda self: opened.append(self.mx or ""))
+
+    probe = verify_smtp.DomainProbe("openai.com", "verify@example.com", 5)
+    probe.test("pete@openai.com")
+
+    assert opened == ["aspmx.l.google.com"]
+
+
 # ---- mx_provider exposure for renderer hints --------------------------------
 
 

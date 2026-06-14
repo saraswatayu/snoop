@@ -29,6 +29,7 @@ import io
 import ipaddress
 import socket
 import ssl
+import threading
 import urllib.parse
 import zlib
 from dataclasses import dataclass
@@ -37,6 +38,10 @@ from typing import Callable
 _DEFAULT_TIMEOUT_SEC = 6.0
 _DEFAULT_MAX_BYTES = 2_000_000
 _DEFAULT_MAX_REDIRECTS = 3
+# Bound DNS resolution: socket.getaddrinfo takes no timeout of its own, so a
+# slow/blackholing nameserver could hang a sensor past the shared deadline.
+# Resolution runs in a worker thread joined with this budget.
+_RESOLVE_TIMEOUT_SEC = 5.0
 _DEFAULT_CONTENT_TYPES = frozenset({
     "text/html", "application/xhtml+xml",
     "text/plain", "application/json",
@@ -77,9 +82,32 @@ def is_public_host(host: str | None,
     return bool(addrs) and all(_safe_ip_is_public(a) for a in addrs)
 
 
+def _getaddrinfo_bounded(*args, timeout: float = _RESOLVE_TIMEOUT_SEC, **kwargs):
+    """socket.getaddrinfo run in a worker thread joined with `timeout`. Raises
+    TimeoutError (an OSError subclass, so sensors' `except OSError` catch it) if
+    resolution doesn't finish in time, instead of blocking indefinitely."""
+    box: dict = {}
+
+    def _run() -> None:
+        try:
+            box["ok"] = socket.getaddrinfo(*args, **kwargs)
+        except BaseException as exc:  # propagate the real resolver error
+            box["err"] = exc
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"DNS resolution timed out after {timeout}s")
+    if "err" in box:
+        raise box["err"]
+    return box["ok"]
+
+
 def _default_resolve(host: str) -> list[str]:
-    return [str(info[4][0]) for info in socket.getaddrinfo(host, None,
-                                                           proto=socket.IPPROTO_TCP)]
+    return [str(info[4][0]) for info in
+            _getaddrinfo_bounded(host, None, proto=socket.IPPROTO_TCP,
+                                 timeout=_RESOLVE_TIMEOUT_SEC)]
 
 
 def _ip_is_public(ip: str) -> bool:
@@ -164,12 +192,28 @@ def _decode_capped(body: bytes, encoding: str | None, max_bytes: int) -> str:
     if enc in ("gzip", "x-gzip"):
         raw = _gunzip_capped(body, max_bytes)
     elif enc == "deflate":
-        raw = zlib.decompressobj().decompress(body, max_bytes + 1)
+        raw = _inflate_capped(body, max_bytes)
     else:
         raw = body
     if len(raw) > max_bytes:
         raw = raw[:max_bytes]
     return raw.decode("utf-8", errors="replace")
+
+
+def _inflate_capped(body: bytes, max_bytes: int) -> bytes:
+    """Decompress a Content-Encoding: deflate body with a hard output cap.
+
+    HTTP "deflate" is ambiguous: RFC-compliant servers send a zlib-wrapped
+    stream, but many send a headerless (raw) DEFLATE stream. Try zlib-wrapped
+    first (wbits 15), then raw (wbits -15). A body that decodes as neither is a
+    guard refusal (FetchBlocked) — NOT an uncaught zlib.error that would escape a
+    sensor's `except (FetchBlocked, OSError)` and crash it."""
+    for wbits in (15, -15):
+        try:
+            return zlib.decompressobj(wbits).decompress(body, max_bytes + 1)
+        except zlib.error:
+            continue
+    raise FetchBlocked("undecodable deflate body")
 
 
 def _gunzip_capped(body: bytes, max_bytes: int) -> bytes:
@@ -190,8 +234,10 @@ def _pinned_https_open(host: str, port: int, path: str,
     bounded number of bytes off the socket (the precise cap is enforced after
     decompression in _decode_capped)."""
     # Re-resolve and pin a public IP (is_public_host already vetted the name;
-    # pin the same address we connect to).
-    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    # pin the same address we connect to). Bounded so a slow resolver can't hang
+    # past the connect timeout.
+    infos = _getaddrinfo_bounded(host, port, proto=socket.IPPROTO_TCP,
+                                 timeout=timeout)
     pinned = next((i for i in infos if _safe_ip_is_public(str(i[4][0]))), None)
     if pinned is None:
         raise FetchBlocked(f"host not a public address: {host}")

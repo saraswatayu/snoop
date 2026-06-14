@@ -47,9 +47,15 @@ from typing import Iterable, Literal
 
 from .schema import EmailCandidate
 from .normalize import is_personal_provider
+from .fetch import is_public_host
 
 
 SYNTAX_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+
+# Bound the MX DNS lookup so a blackholing nameserver can't stall a probe past
+# the caller's timeout budget (the smtplib socket below is already bounded, but
+# resolution was not).
+_DNS_TIMEOUT_SEC = 5.0
 
 
 def detect_provider(mx_host: str) -> str:
@@ -70,14 +76,18 @@ def detect_provider(mx_host: str) -> str:
     return "other"
 
 
-def get_mx(domain: str) -> tuple[str | None, str | None]:
-    """Return (mx_host, None) on success or (None, error_string)."""
+def get_mx(domain: str, *,
+           lifetime: float = _DNS_TIMEOUT_SEC) -> tuple[str | None, str | None]:
+    """Return (mx_host, None) on success or (None, error_string).
+
+    `lifetime` bounds the total DNS time so a slow/blackholing nameserver
+    can't stall the probe indefinitely."""
     try:
         import dns.resolver  # type: ignore
     except ImportError:
         return None, "dnspython not installed (pip install dnspython)"
     try:
-        records = dns.resolver.resolve(domain, "MX")
+        records = dns.resolver.resolve(domain, "MX", lifetime=lifetime)
         if not records:
             return None, "no MX records"
         best = min(records, key=lambda r: r.preference)
@@ -193,6 +203,14 @@ class DomainProbe:
             self.error = f"no usable MX for {self.domain}: {err}"
             return False
         self.provider = detect_provider(self.mx)
+        # SSRF guard: the MX host comes from the candidate domain's own DNS
+        # (target-influenced). Refuse to open a socket to a private / loopback /
+        # link-local / reserved address — that would be an internal port-probe,
+        # not a deliverability check. lib.fetch hardens HTTP the same way; SMTP
+        # must not be a hole around it.
+        if not is_public_host(self.mx):
+            self.error = f"MX host not a public address: {self.mx}"
+            return False
         try:
             self._open()
         except (smtplib.SMTPException, socket.error, OSError) as e:

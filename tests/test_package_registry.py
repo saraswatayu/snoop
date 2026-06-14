@@ -299,3 +299,38 @@ def test_source_type_is_package_registry():
         s.type == "package_registry"
         for c in result.candidates for s in c.sources
     )
+
+
+# ---- default fetcher routes through the SSRF-hardened lib.fetch --------------
+
+
+def test_default_http_get_json_routes_through_lib_fetch(monkeypatch):
+    """The production fetcher must go through lib.fetch.fetch, not a raw
+    urlopen that follows redirects to internal hosts and reads an unbounded
+    body."""
+    from lib import package_registry
+    from lib.fetch import FetchResult
+
+    calls = []
+
+    def fake_fetch(url, *, timeout=None, **kwargs):
+        calls.append(url)
+        return FetchResult(url=url, status=200, content_type="application/json",
+                           text='{"ok": true}')
+
+    monkeypatch.setattr(package_registry, "fetch", fake_fetch)
+    data = package_registry._default_http_get_json("https://registry.npmjs.org/x")
+    assert calls == ["https://registry.npmjs.org/x"]
+    assert data == {"ok": True}
+
+
+def test_default_http_get_json_returns_empty_on_block(monkeypatch):
+    from lib import package_registry
+    from lib.fetch import FetchBlocked
+
+    def boom(url, **kwargs):
+        raise FetchBlocked("refused")
+
+    monkeypatch.setattr(package_registry, "fetch", boom)
+    assert package_registry._default_http_get_json(
+        "https://registry.npmjs.org/x") == {}

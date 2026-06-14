@@ -41,12 +41,11 @@ from __future__ import annotations
 
 import json
 import re
-import urllib.error
-import urllib.request
 from datetime import datetime, timezone
 from email.utils import getaddresses
 from typing import Callable
 
+from .fetch import FetchBlocked, fetch
 from .normalize import normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
@@ -132,17 +131,20 @@ def _parse_addresses(raw: str | None) -> list[str]:
 
 
 def _default_http_get_json(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> dict:
-    """Fetch and JSON-parse a URL body. Returns {} on any error (404, network,
-    decode) so a single bad package never bubbles an exception into the batch."""
-    req = urllib.request.Request(url, headers={"User-Agent": "snoop-skill"})
+    """Fetch and JSON-parse a URL body through the SSRF-hardened lib.fetch
+    (https-only, public-IP-pinned, redirect-revalidated, body-capped). Returns
+    {} on any error (guard refusal, network, 4xx, decode) so a single bad
+    package never bubbles an exception into the batch — and never reads an
+    unbounded body or follows a redirect to an internal host."""
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", errors="replace")
-        parsed = json.loads(body)
-        return parsed if isinstance(parsed, dict) else {}
-    except (urllib.error.URLError, urllib.error.HTTPError, OSError,
-            json.JSONDecodeError, ValueError):
+        res = fetch(url, timeout=timeout)
+    except (FetchBlocked, OSError):
         return {}
+    try:
+        parsed = json.loads(res.text)
+    except (json.JSONDecodeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def _collect_npm(name: str, data: dict, observed_at: datetime,
