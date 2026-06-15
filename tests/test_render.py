@@ -71,6 +71,20 @@ def test_email_fact_renders_with_section_and_marker():
     assert "alice@corp.com" in out
 
 
+def test_belonging_marker_is_surfaced_on_the_card():
+    """The analyst's belonging marker ([+]/[?]) is preserved through --ground and
+    must appear on the human card, not only in the machine JSON (the renderer used
+    to drop it, conveying belonging via the confidence glyph alone)."""
+    f = GroundedFact(
+        kind="email", label="", value="alice@corp.com", detail="",
+        confidence=0.9, reasoning="", evidence_ids=["o1"],
+        grounded=True, verified=True, verdict="verified", marker="[+]",
+    )
+    out = render_reasoned_card(_profile([f]))
+    assert "[+]" in out
+    assert "[verified]" in out  # verdict still rendered alongside the marker
+
+
 def test_sections_render_in_kind_order():
     facts = [
         _fact(kind="role", value="Engineer at Corp", label="Corp"),

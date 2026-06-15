@@ -170,9 +170,14 @@ def render_reasoned_card(profile, *, warnings: list[str] | None = None,
             # that --ground preserves it instead of leaving it buried in detail.
             verdict = getattr(f, "verdict", None)
             verdict_tag = f" [{_oneline(verdict)}]" if verdict else ""
+            # The analyst's belonging marker ([+]/[?]) — surfaced too, so the human
+            # card carries the same belonging signal the machine JSON does instead
+            # of conveying it through the confidence glyph alone.
+            marker = getattr(f, "marker", None)
+            marker_tag = f"{_oneline(marker)} " if marker else ""
             tag = "" if f.verified else " (unverified)"
             lines.append(
-                f"  {_conf_marker(f.confidence, person)} {head}{verdict_tag}{detail}{tag}")
+                f"  {_conf_marker(f.confidence, person)} {marker_tag}{head}{verdict_tag}{detail}{tag}")
 
     if not profile.facts:
         lines.append("")
