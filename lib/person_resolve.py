@@ -229,7 +229,7 @@ def resolve_person(
     profile: dict | None = None
     if github_handle and caller is not None:
         try:
-            result = caller(f"/users/{github_handle}")
+            result = caller(f"/users/{urllib.parse.quote(github_handle, safe='')}")
             if isinstance(result, dict) and result.get("login"):
                 profile = result
             elif result is None:

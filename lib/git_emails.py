@@ -33,6 +33,7 @@ from __future__ import annotations
 import json
 import subprocess
 import urllib.error
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -166,7 +167,7 @@ def _harvest_from_repos(
             continue
         try:
             commits = caller(
-                f"/repos/{owner}/{name}/commits?author={handle}&per_page=1"
+                f"/repos/{owner}/{name}/commits?author={urllib.parse.quote(handle, safe='')}&per_page=1"
             )
         except (subprocess.SubprocessError, urllib.error.URLError,
                 json.JSONDecodeError, OSError):
@@ -241,10 +242,10 @@ def fetch_git_emails(
     by_addr: dict[str, list[Source]] = {}
 
     try:
-        events = caller(f"/users/{handle}/events?per_page=100")
+        events = caller(f"/users/{urllib.parse.quote(handle, safe='')}/events?per_page=100")
         _harvest_from_events(events, cutoff, by_addr)
 
-        repos = caller(f"/users/{handle}/repos?per_page=100&type=owner")
+        repos = caller(f"/users/{urllib.parse.quote(handle, safe='')}/repos?per_page=100&type=owner")
         _harvest_from_repos(repos, cutoff, handle, caller, by_addr, repo_limit)
     except subprocess.TimeoutExpired as e:
         elapsed = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)

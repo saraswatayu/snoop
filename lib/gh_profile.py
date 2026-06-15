@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import subprocess
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
@@ -149,7 +150,7 @@ def fetch_gh_profile(
 
     # --- Surface 1: GET /users/{handle} ---
     try:
-        profile = caller(f"/users/{handle}")
+        profile = caller(f"/users/{urllib.parse.quote(handle, safe='')}")
     except subprocess.TimeoutExpired:
         return ResolverResult(
             resolver="gh_profile", candidates=[], status="timeout",
@@ -261,7 +262,7 @@ def fetch_recent_repos(
         # after filtering forks/archived.
         per_page = min(100, max(n * 2, n))
         result = caller(
-            f"/users/{handle}/repos?sort=pushed&direction=desc&per_page={per_page}&type=owner"
+            f"/users/{urllib.parse.quote(handle, safe='')}/repos?sort=pushed&direction=desc&per_page={per_page}&type=owner"
         )
     except (subprocess.SubprocessError, urllib.error.URLError,
             json.JSONDecodeError, OSError):
