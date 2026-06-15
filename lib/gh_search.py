@@ -101,7 +101,7 @@ def find_github_handle(
         # Fetch the profile to get the name/company fields the search
         # response doesn't include
         try:
-            profile = caller(f"/users/{login}")
+            profile = caller(f"/users/{_gh_api.quote_handle(login)}")
         except (subprocess.SubprocessError, urllib.error.URLError,
                 json.JSONDecodeError, OSError):
             continue

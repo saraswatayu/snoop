@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.parse
 import urllib.request
 from shutil import which
 from typing import Any, Callable
@@ -34,6 +35,14 @@ DEFAULT_TIMEOUT_SEC = 6.0
 _MAX_RESPONSE_BYTES = 10_000_000
 
 GhCaller = Callable[[str], Any]
+
+
+def quote_handle(handle: str) -> str:
+    """Percent-encode a GitHub handle/login for safe interpolation into an API
+    path segment. `safe=''` so a separator in a hostile handle can't escape its
+    segment. Query-string values are quoted at their own call sites — the caller
+    receives a fully-built path+query string and can't tell the two apart."""
+    return urllib.parse.quote(handle, safe="")
 
 
 def gh_via_cli(path: str, *, timeout: float = DEFAULT_TIMEOUT_SEC) -> Any:
