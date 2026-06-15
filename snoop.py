@@ -589,38 +589,51 @@ def _sensor_skips(
     return skips
 
 
-def _pgp_corroborate(candidates: list[EmailCandidate]) -> RunRecord:
+def _pgp_corroborate(
+    candidates: list[EmailCandidate],
+) -> tuple[RunRecord, list[tuple[str, Source]]]:
     """Corroborate discovered addresses against keys.openpgp.org (E3). A hit is an
     OWNER-VERIFIED positive by construction (the keyserver only publishes a UID
     after the owner confirmed it) — especially valuable on M365-inconclusive
-    addresses. Merges a `pgp` Source onto each matching candidate. Best-effort:
-    never raises, never blocks the run on a failure."""
+    addresses. Returns the RunRecord and the `pgp` Source merges to apply (address
+    lowercased -> Source); the caller commits them so an abandoned slow probe
+    leaks nothing. Best-effort: never raises, never blocks the run on a failure."""
     addrs = [c.address for c in candidates if "@" in c.address]
     if not addrs:
-        return RunRecord(sensor="pgp", status="skipped",
-                         reason="no candidate addresses to check")
+        return (RunRecord(sensor="pgp", status="skipped",
+                          reason="no candidate addresses to check"), [])
     t0 = time.monotonic()
     result = fetch_pgp_emails(addrs)
     result.elapsed_ms = int((time.monotonic() - t0) * 1000)
+    merges = [(pc.address.lower(), s) for pc in result.candidates for s in pc.sources]
+    return RunRecord.from_resolver(result), merges
+
+
+def _apply_pgp_merges(candidates: list[EmailCandidate],
+                      merges: list[tuple[str, Source]]) -> None:
+    """Merge the pgp Sources from _pgp_corroborate onto the matching candidates,
+    deduping on (type, url) so a re-run never doubles a source."""
     by_addr = {c.address.lower(): c for c in candidates}
-    for pc in result.candidates:
-        c = by_addr.get(pc.address.lower())
+    for addr, s in merges:
+        c = by_addr.get(addr)
         if c is None:
             continue
-        existing = {(s.type, s.url) for s in c.sources}
-        for s in pc.sources:
-            if (s.type, s.url) not in existing:
-                c.sources.append(s)
-    return RunRecord.from_resolver(result)
+        if (s.type, s.url) not in {(x.type, x.url) for x in c.sources}:
+            c.sources.append(s)
 
 
-def _rel_me_collect(person: Person) -> tuple[list, RunRecord]:
+def _rel_me_collect(
+    person: Person,
+) -> tuple[list, RunRecord, list[tuple[str, str]]]:
     """Run the rel=me / Bluesky identity sensor (E2) over the personal domains.
     A bidirectional rel="me" is self-attested identity binding (the IndieAuth
-    model) — record asserted ones as bound_anchors the host can weigh (it binds
-    domain↔profile; the host still judges it's the target). Returns the links +
-    a RunRecord. Best-effort; never raises."""
+    model) — asserted ones become bound_anchors the host can weigh (it binds
+    domain↔profile; the host still judges it's the target). Returns (links,
+    RunRecord, anchors-to-add). Does NOT mutate person.bound_anchors itself — the
+    caller commits the anchors so an abandoned slow probe leaks nothing.
+    Best-effort; never raises."""
     links: list = []
+    anchors: list[tuple[str, str]] = []
     t0 = time.monotonic()
     for dom in person.personal_domains[:3]:
         try:
@@ -634,17 +647,75 @@ def _rel_me_collect(person: Person) -> tuple[list, RunRecord]:
         # owned, not just that some profile cross-linked.
         if any(getattr(link, "bidirectional", False) for link in dom_links):
             anchor = ("personal_domain_verified", dom.lower())
-            if anchor not in person.bound_anchors:
-                person.bound_anchors.append(anchor)
+            if anchor not in anchors:
+                anchors.append(anchor)
     for link in links:
         if getattr(link, "bidirectional", False):
             anchor = ("rel_me_verified", link.url)
-            if anchor not in person.bound_anchors:
-                person.bound_anchors.append(anchor)
+            if anchor not in anchors:
+                anchors.append(anchor)
     rec = RunRecord(sensor="rel_me", status="ran",
                     elapsed_ms=int((time.monotonic() - t0) * 1000),
                     outcome=f"{len(links)} link(s)")
-    return links, rec
+    return links, rec, anchors
+
+
+def _run_slow_probes(
+    person: Person, candidates: list[EmailCandidate], run_records: list[RunRecord],
+    *, budget_sec: float, no_pgp: bool, floor_sec: float = _PER_SENSOR_FLOOR_SEC,
+) -> list:
+    """Run the rel=me (E2) and PGP (E3) network probes under the SHARED wall-clock
+    deadline. A daemon thread does the fetches and ACCUMULATES its results; if it
+    finishes within the budget we commit them (rel=me anchors, pgp source merges),
+    if it is abandoned at the deadline we commit nothing — the straggler keeps
+    running against its own returns, never against person/candidates, so the
+    bundle can't race a partial mutation — and append a deadline-exceeded
+    RunRecord. Returns the rel=me links (empty when nothing ran or it was
+    abandoned). This keeps the documented ≤deadline promise over the slow probes,
+    which previously ran unbounded before phase2_budget was even measured."""
+    want_rel_me = bool(person.personal_domains)
+    want_pgp = bool(candidates) and not no_pgp
+    if not (want_rel_me or want_pgp):
+        return []
+
+    box: dict = {}
+    done = threading.Event()
+
+    def _worker() -> None:
+        try:
+            if want_rel_me:
+                box["rel_me"] = _rel_me_collect(person)
+            if want_pgp:
+                box["pgp"] = _pgp_corroborate(candidates)
+        finally:
+            done.set()
+
+    t0 = time.monotonic()
+    th = threading.Thread(target=_worker, name="snoop:slow-probes", daemon=True)
+    th.start()
+    budget = max(budget_sec, floor_sec)
+    th.join(timeout=budget)
+    if not done.is_set():
+        run_records.append(RunRecord(
+            sensor="rel_me/pgp", status="degraded",
+            elapsed_ms=int((time.monotonic() - t0) * 1000),
+            outcome="timeout",
+            reason=(f"deadline-exceeded: slow probes abandoned after "
+                    f"{budget:g}s shared budget")))
+        return []
+
+    rel_me_links: list = []
+    if "rel_me" in box:
+        rel_me_links, rel_me_rec, rel_me_anchors = box["rel_me"]
+        for anchor in rel_me_anchors:
+            if anchor not in person.bound_anchors:
+                person.bound_anchors.append(anchor)
+        run_records.append(rel_me_rec)
+    if "pgp" in box:
+        pgp_rec, pgp_merges = box["pgp"]
+        _apply_pgp_merges(candidates, pgp_merges)
+        run_records.append(pgp_rec)
+    return rel_me_links
 
 
 def _rel_me_observations(links: list) -> list[reason.Observation]:
@@ -1610,15 +1681,15 @@ def main(argv: list[str] | None = None) -> int:
     candidates = cluster_candidates(results)
     candidates.sort(key=_probe_rank)  # observed addresses lead the bundle
 
-    # rel=me identity cross-links (E2) over the personal domains.
-    rel_me_links: list = []
-    if person.personal_domains:
-        rel_me_links, rel_me_rec = _rel_me_collect(person)
-        run_records.append(rel_me_rec)
-
-    # PGP corroboration (E3) of discovered addresses, then existence probes.
-    if candidates and not args.no_pgp:
-        run_records.append(_pgp_corroborate(candidates))
+    # rel=me identity cross-links (E2) + PGP corroboration (E3) are network-bound
+    # slow probes. Run them under the SAME shared wall-clock budget as Phase 1, so
+    # the ≤deadline promise actually covers them (they previously ran unbounded,
+    # before phase2_budget was even measured). Abandoned probes commit nothing.
+    rel_me_links = _run_slow_probes(
+        person, candidates, run_records,
+        budget_sec=args.deadline - (time.monotonic() - run_start),
+        no_pgp=args.no_pgp,
+    )
     phase2_budget = args.deadline - (time.monotonic() - run_start)
     probe_rec = _probe_candidates(person, candidates, args,
                                   google_ready=_google_ready(capabilities),

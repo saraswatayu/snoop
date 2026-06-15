@@ -2120,3 +2120,67 @@ def test_ground_stdin_full_bundle_rejects_stale_schema(monkeypatch, capsys):
     assert rc == 2
     err = capsys.readouterr().err
     assert "schema" in err and "re-run --observations" in err
+
+
+# ---- slow-probe phase shares the wall-clock deadline (E2/E3, finding #6) -----
+
+
+class _FakeRelLink:
+    def __init__(self, url, bidirectional):
+        self.url = url
+        self.bidirectional = bidirectional
+
+
+def test_rel_me_collect_returns_anchors_without_mutating_person(monkeypatch):
+    """_rel_me_collect must NOT mutate person.bound_anchors; it returns the anchors
+    so the caller commits them only when the probe finished in time — an abandoned
+    probe must leak nothing into the bundle."""
+    monkeypatch.setattr(snoop, "verify_rel_me",
+                        lambda dom, **k: [_FakeRelLink("https://me.example/@x", True)])
+    person = Person(name="T", personal_domains=["me.example"])
+    links, rec, anchors = snoop._rel_me_collect(person)
+    assert person.bound_anchors == []  # not mutated by the collector
+    assert ("personal_domain_verified", "me.example") in anchors
+    assert ("rel_me_verified", "https://me.example/@x") in anchors
+    assert rec.sensor == "rel_me"
+
+
+def test_run_slow_probes_commits_when_within_budget(monkeypatch):
+    """A probe that finishes within the budget has its rel=me anchors committed to
+    person.bound_anchors and its links returned."""
+    monkeypatch.setattr(
+        snoop, "_rel_me_collect",
+        lambda person: (["link"], snoop.RunRecord(sensor="rel_me", status="ran"),
+                        [("personal_domain_verified", "me.example")]))
+    person = Person(name="T", personal_domains=["me.example"])
+    records: list = []
+    links = snoop._run_slow_probes(person, [], records, budget_sec=5.0,
+                                   no_pgp=True, floor_sec=2.0)
+    assert links == ["link"]
+    assert ("personal_domain_verified", "me.example") in person.bound_anchors
+    assert any(r.sensor == "rel_me" for r in records)
+
+
+def test_run_slow_probes_abandons_a_probe_past_the_budget(monkeypatch):
+    """A slow probe that exceeds the shared budget is abandoned: the call returns
+    at the floor (not the full hang), commits nothing, and records
+    deadline-exceeded — so the documented <=deadline promise holds over the slow
+    probes that previously ran unbounded."""
+    import time as _t
+
+    def _slow(person):
+        _t.sleep(3.0)
+        return (["leaked"], snoop.RunRecord(sensor="rel_me", status="ran"),
+                [("personal_domain_verified", "me.example")])
+
+    monkeypatch.setattr(snoop, "_rel_me_collect", _slow)
+    person = Person(name="T", personal_domains=["me.example"])
+    records: list = []
+    t0 = _t.monotonic()
+    links = snoop._run_slow_probes(person, [], records, budget_sec=0.0,
+                                   no_pgp=True, floor_sec=0.05)
+    elapsed = _t.monotonic() - t0
+    assert elapsed < 1.5             # abandoned at the 0.05s floor, not the 3s hang
+    assert links == []              # no partial links committed
+    assert person.bound_anchors == []  # no partial anchors committed
+    assert any(r.outcome == "timeout" for r in records)
