@@ -88,6 +88,7 @@ from lib.pipeline.probes import (
     smtp_candidates as _smtp_candidates,
     speculative_google_candidates as _speculative_google_candidates,
 )
+from lib.sensors import DISCOVERY_SENSORS, SensorContext
 
 
 # Shared wall-clock budget for the whole sensor fan-out (E6). Sensors run
@@ -488,28 +489,26 @@ def run_pipeline(
     packages = packages or []
     gh_handle = _gh_handle(person)
 
-    tasks: list[tuple[str, Callable[[], ResolverResult]]] = []
-    if gh_handle:
-        tasks.append(("git_emails", lambda: fetch_git_emails(gh_handle)))
-        tasks.append(("gh_profile", lambda: fetch_gh_profile(gh_handle)))
-    # HN handle is an untrusted hint (not anchor-validated like github), so an
-    # address found here is weakly bound — the host marks it [?]. One fetch.
-    hn_handle = person.handles.get("hn")
-    if hn_handle:
-        tasks.append(("hn_profile", lambda: fetch_hn_profile(hn_handle)))
-    if person.personal_domains:
-        tasks.append((
-            "personal_site",
-            lambda: fetch_personal_site(person.personal_domains),
-        ))
-    # Package-registry publisher emails when the host supplied known packages.
-    if packages:
-        tasks.append(("package_registry", lambda: fetch_package_emails(packages)))
-    # pattern_gen runs even with no other inputs (it's the explicit fallback)
-    tasks.append((
-        "pattern_gen",
-        lambda: fetch_pattern_candidates(person, manual_known=manual_known),
-    ))
+    # The registry (lib/sensors.py) owns which discovery sensors run, in what
+    # order, and the skip reason when one is gated off — declared ONCE so the
+    # run-list and the skip-list can't drift. The task builders below stay here
+    # because they call the fetch_* functions through the snoop module namespace,
+    # which the test suite stubs via monkeypatch.setattr(snoop, "fetch_*", ...).
+    # (HN handle is an untrusted hint, not anchor-validated like github, so an
+    # address found there is weakly bound — the host marks it [?].)
+    ctx = SensorContext(person=person, packages=packages, gh_handle=gh_handle)
+    builders: dict[str, Callable[[], ResolverResult]] = {
+        "git_emails": lambda: fetch_git_emails(gh_handle),
+        "gh_profile": lambda: fetch_gh_profile(gh_handle),
+        "hn_profile": lambda: fetch_hn_profile(person.handles["hn"]),  # gated on "hn" present
+        "personal_site": lambda: fetch_personal_site(person.personal_domains),
+        "package_registry": lambda: fetch_package_emails(packages),
+        "pattern_gen": lambda: fetch_pattern_candidates(person, manual_known=manual_known),
+    }
+    tasks: list[tuple[str, Callable[[], ResolverResult]]] = [
+        (spec.name, builders[spec.name])
+        for spec in DISCOVERY_SENSORS if spec.gate(ctx)
+    ]
 
     results_by_name: dict[str, ResolverResult] = {}
     lock = threading.Lock()
@@ -563,16 +562,16 @@ def _sensor_skips(
     def skip(name: str, reason: str) -> None:
         skips.append(RunRecord(sensor=name, status="skipped", reason=reason))
 
-    if not _gh_handle(person):
-        skip("git_emails", "no bound github handle")
-        skip("gh_profile", "no bound github handle")
-    if not person.handles.get("hn"):
-        skip("hn_profile", "no hn handle in plan")
+    # Discovery sensors: the registry owns the gate + reason (the same source the
+    # fan-out reads), so the skip-list can't drift from the run-list.
+    ctx = SensorContext(person=person, packages=packages, gh_handle=_gh_handle(person))
+    for spec in DISCOVERY_SENSORS:
+        if not spec.gate(ctx):
+            skip(spec.name, spec.skip_reason)
+    # rel=me is a slow probe (not a fan-out sensor), gated on the same input as
+    # personal_site; the Phase-2 enrichers below are gated on their own flags.
     if not person.personal_domains:
-        skip("personal_site", "no personal_domains in plan")
         skip("rel_me", "no personal_domains in plan")
-    if not packages:
-        skip("package_registry", "no packages in plan")
     if not allow_google_account:
         skip("google_account", "--allow-google-account not set")
     if no_smtp:
