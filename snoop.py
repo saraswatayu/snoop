@@ -1633,7 +1633,9 @@ def main(argv: list[str] | None = None) -> int:
         # Carry the Phase-2 degradation record (e.g. deadline-exceeded) into the
         # bundle just like the main path does — otherwise a probe timeout in
         # --verify mode is indistinguishable from "ran and found nothing."
-        verify_records = [probe_rec] if probe_rec is not None else []
+        verify_records: list[RunRecord] = []
+        if probe_rec is not None:
+            verify_records.append(probe_rec)
         _reassess_identity(person, candidates)
         _emit_observations(person, candidates, {}, warnings, out_path=args.out,
                            run_records=verify_records)
