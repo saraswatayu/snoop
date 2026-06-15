@@ -119,6 +119,39 @@ and is unit-tested in `tests/pipeline/test_binding.py` (the truth table, includi
 the load-bearing case that employer-match + a PGP key — two corroborating but
 target-agnostic signals — must NOT bind).
 
+### The Google People API exception
+
+The bind gate keeps SMTP off unbound candidates because `RCPT` opens a socket. The
+Google People API existence check is deliberately *not* bind-gated: it's an authed
+call through the operator's own Chrome cookies (no socket), and on a catch-all
+Workspace domain it's the only thing that tells two same-named addresses apart. So
+it also runs on unbound pattern guesses on Google-hosted domains, collapsing a
+column of plausible guesses to the one account that exists. SMTP opens a socket and
+stays bind-gated; the existence check doesn't, so it doesn't have to.
+
+When several addresses verify, snoop clusters them by Google account (Gaia) id:
+same id means aliases of one person (collapse them, no namesake), different ids
+mean distinct accounts (a real collision to split). That answers *same person?*
+even on a locked tenant that returns no display name — but never *the right
+person?* on its own. Locked tenants return the id only intermittently, so when it's
+absent snoop falls to a rare-name prior or abstains. It never guesses.
+
+## SMTP verification
+
+Per domain: **one** MX lookup, **one** catch-all sentinel probe (`RCPT` a random
+non-existent localpart), and **one** reused SMTP connection for all candidates. A
+catch-all result or an unreachable MX short-circuits the rest of that domain's
+probes; a verified hit doesn't — there may be more candidates left to check.
+
+The pipeline skips personal-provider domains (Gmail, iCloud, Outlook, Proton) by
+default — they either block `RCPT` or 451-throttle unrecognized senders, and
+probing them tips spam filters. Google Workspace and Microsoft 365 commonly return
+`inconclusive` on `RCPT` — reported honestly, never as `verified`; for Workspace,
+`--allow-google-account` adds the People API check that discriminates where SMTP
+can't. A per-domain daily probe budget (default 5/day, `~/.snoop/probe-budget.json`,
+`0600`) caps probes. The check uses `RCPT` + catch-all detection, deliberately *not*
+the unreliable and widely disabled `VRFY`.
+
 ## Why the harness stays in `snoop.py`
 
 The pure decision logic (binding, clustering, ranking, probe-eligibility) lives in
