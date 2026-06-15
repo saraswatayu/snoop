@@ -1239,9 +1239,12 @@ def _run_ground(observations_file: str | None = None) -> int:
         sys.stderr.write(f"--ground: invalid JSON on stdin: {exc}\n")
         return 2
 
-    # Observations come from --observations-file (as written by --out) when
-    # given, so stdin only needs {person, summary, facts}. Anything stdin also
-    # carries under "observations" is merged in (file first, then stdin extras).
+    # In --observations-file mode the FILE is the authoritative observation set
+    # (as written by --out); stdin supplies only {person, summary, facts}. Without
+    # a file, the whole bundle (incl. observations) arrives on stdin. The two are
+    # NEVER merged: merging would let stdin inject or shadow an observation id that
+    # ground() then accepts, defeating the guarantee that a fact can only cite
+    # evidence the sensors actually produced.
     obs_dicts: list[dict] = []
     if observations_file:
         try:
@@ -1267,7 +1270,18 @@ def _run_ground(observations_file: str | None = None) -> int:
         # honest blank (checked / not-checked / why) from what the sensors did.
         if "sensors" not in payload and isinstance(file_bundle.get("sensors"), list):
             payload["sensors"] = file_bundle["sensors"]
-    obs_dicts.extend(o for o in payload.get("observations", []) if isinstance(o, dict))
+    else:
+        # Pure-stdin bundle. If it is a FULL bundle (carries a schema version),
+        # gate it exactly like a file bundle so a stale v1 can't ground silently
+        # just because it was piped instead of passed as --observations-file.
+        stdin_schema = payload.get("schema")
+        if stdin_schema is not None and stdin_schema != BUNDLE_SCHEMA_VERSION:
+            sys.stderr.write(
+                f"--ground: bundle is schema {stdin_schema!r} (expected "
+                f"{BUNDLE_SCHEMA_VERSION}); re-run --observations to regenerate it.\n"
+            )
+            return 2
+        obs_dicts.extend(o for o in payload.get("observations", []) if isinstance(o, dict))
 
     observations = [
         reason.Observation(

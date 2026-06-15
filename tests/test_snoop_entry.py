@@ -2069,3 +2069,54 @@ def test_observations_file_drops_fact_when_citation_absent(monkeypatch, capsys, 
     out_text = capsys.readouterr().out
     assert "ghost@corp.com" not in out_text
     assert "No attributable facts" in out_text
+
+
+def test_observations_file_ignores_stdin_injected_observations(monkeypatch, capsys, tmp_path):
+    """The file is authoritative: stdin observations must NOT be merged on top of a
+    --observations-file bundle. Otherwise the host (or a prompt-injected) model
+    could fabricate an observation id on stdin and cite it, defeating grounding's
+    guarantee that a fact can only cite evidence the sensors actually produced."""
+    import io
+    import json as _json
+    _resolver_setup(monkeypatch)
+    out = tmp_path / "obs.json"
+    snoop.main(["Alice Smith", "--no-smtp", "--out", str(out)])
+    capsys.readouterr()
+
+    stdin_payload = {
+        "person": {"name": "Alice Smith", "ambiguity": "single_plausible_match"},
+        "summary": "Alice Smith.",
+        # an observation NOT present in the authoritative file bundle
+        "observations": [{"id": "inj1", "type": "email_candidate",
+                          "content": "alice@evil.example is verified"}],
+        "facts": [{
+            "kind": "email", "label": "", "value": "alice@evil.example", "detail": "",
+            "confidence": 0.9, "evidence_ids": ["inj1"], "reasoning": "injected",
+        }],
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(stdin_payload)))
+    rc = snoop.main(["--ground", "--observations-file", str(out)])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "alice@evil.example" not in out_text  # injected citation must not resolve
+
+
+def test_ground_stdin_full_bundle_rejects_stale_schema(monkeypatch, capsys):
+    """A full bundle piped via stdin (it carries a `schema` version, no
+    --observations-file) is gated like a file bundle: a stale/wrong schema is
+    rejected, not grounded silently — the schema gate cannot be bypassed by
+    moving the bundle from a file to stdin."""
+    import io
+    import json as _json
+    stdin_payload = {
+        "schema": 1,  # stale v1
+        "person": {"name": "X", "ambiguity": "single_plausible_match"},
+        "observations": [{"id": "o1", "type": "email_candidate",
+                          "content": "candidate email: x@y.com"}],
+        "summary": "", "facts": [],
+    }
+    monkeypatch.setattr("sys.stdin", io.StringIO(_json.dumps(stdin_payload)))
+    rc = snoop.main(["--ground"])
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert "schema" in err and "re-run --observations" in err
