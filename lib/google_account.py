@@ -35,9 +35,9 @@ Four account_exists outcomes per candidate:
   "unprobed"          : never asked (cookies missing, budget exhausted,
                         candidate domain not Google-hosted)
 
-For "verified" responses with name matching the target, the Source
-type="google_account" is the strongest belongs_to_person signal we have
-(0.65 base weight, comparable to manual_known).
+A "verified" response whose display name matches the target is the strongest
+ownership signal a sensor can produce — the host model weighs it accordingly
+(comparable to a user-supplied manual_known).
 """
 
 from __future__ import annotations
@@ -459,7 +459,7 @@ def fetch_google_account(
         # so a confirmed Gaia binding answers the question — additional
         # probes burn the daily budget and risk Google flagging the account.
         # Subsequent candidates are left as `unprobed` rather than `not_found`
-        # so the scorer knows we abstained, not negated.
+        # so the host model knows we abstained, not negated.
         if rate_limited_seen or verified_seen:
             c.account_exists = "unprobed"
             continue
@@ -511,6 +511,11 @@ def fetch_google_account(
                 c.account_display_name = real_name
             if result.get("photo_url"):
                 c.account_photo_url = result["photo_url"]
+            # Stable Gaia (account) id: two verified addresses with the same id are
+            # aliases of one account; different ids are distinct people. The
+            # disambiguator on a locked tenant that returns no display name.
+            if result.get("gaia_id"):
+                c.gaia_id = result["gaia_id"]
             # Short-circuit ONLY when we can confirm this is the target
             # (name match) OR the caller didn't pass a target name and so
             # opted into the legacy "any verified short-circuits" behavior.

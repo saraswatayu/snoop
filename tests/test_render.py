@@ -1,664 +1,304 @@
-"""Tests for lib/render.py — the contact decision card.
+"""Tests for lib/render.py — render_reasoned_card (the --ground renderer).
 
-After the 2026-05-28 redesign, the card is verdict-bucket-driven:
-  - verified         (SMTP RCPT 250)
-  - google-confirmed (Google People API existence + catch-all/inconclusive SMTP)
-  - pattern-guess    (no positive verification, just a guess)
-  - dead-end         (nothing usable)
-
-Default output is compact: name → employer, address · verdict, dossier
-(About block + recent repos), Why provenance, optional Note for name
-disambiguation, asymmetric fallback list.
-
-The old per-section tables and identity-anchor jargon live behind
-verbose=True. Tests below split by mode.
+The host model produces a ReasonedProfile (summary + grounded facts); this
+renderer formats and sanitizes it. Tests pin: the confidence-marker bands, the
+namesake cap (no [+] when identity isn't a single confident match), the
+(unverified) tag, control-char sanitization (no forged marked lines), section
+ordering, and the empty-facts message.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
-from lib.render import render_decision_card
-from lib.schema import EmailCandidate, Employer, GitHubRepo, Person, Source
-
-
-NOW = datetime(2026, 5, 27, 12, 0, tzinfo=timezone.utc)
+from lib.ground import GroundedFact
+from lib.reason import ReasonedProfile
+from lib.render import render_reasoned_card
+from lib.schema import Person
 
 
-def candidate(
-    addr,
-    *,
-    belongs=None,
-    work=None,
-    deliv=None,
-    smtp="unprobed",
-    provider=None,
-    account_exists="unprobed",
-    account_display_name=None,
-    employer_match=False,
-    personal_provider=False,
-    former_match=False,
-    sources=None,
-):
-    return EmailCandidate(
-        address=addr,
-        sources=sources or [
-            Source(type="git_commit", url=None, observed_at=NOW - timedelta(days=10),
-                   detail="commit in repo")
-        ],
-        smtp_verdict=smtp,
-        mx_provider=provider,
-        account_exists=account_exists,
-        account_display_name=account_display_name,
-        employer_match=employer_match,
-        is_personal_provider=personal_provider,
-        employer_former_match=former_match,
-        belongs_to_person=belongs,
-        current_work_address=work,
-        deliverable=deliv,
+def _person(ambiguity="single_plausible_match"):
+    return Person(name="Alice Smith", ambiguity=ambiguity)
+
+
+def _fact(kind="email", value="alice@corp.com", *, confidence=0.9,
+          label="", detail="", verified=True):
+    return GroundedFact(
+        kind=kind, label=label, value=value, detail=detail,
+        confidence=confidence, reasoning="", evidence_ids=["o1"],
+        grounded=True, verified=verified,
     )
 
 
-def make_person(**overrides):
-    defaults = dict(
-        name="Peter Steinberger",
-        handles={"github": "steipete"},
-        personal_domains=["steipete.com"],
-        employer=Employer(name="OpenAI", domains=["openai.com"]),
-        ambiguity="single_plausible_match",
-        bound_anchors=[
-            ("github_name_match", "Peter Steinberger"),
-            ("github_employer_match", "OpenAI"),
-            ("github_handle_exists", "steipete"),
-        ],
-    )
-    defaults.update(overrides)
-    return Person(**defaults)
-
-
-# ---- warnings (capability degradations) -------------------------------------
-
-
-def test_warnings_render_at_top_with_warning_glyph():
-    p = make_person()
-    out = render_decision_card(
-        p, [], warnings=["gh CLI not authenticated — run `gh auth login`"],
-    )
-    # First non-empty line is the warning
-    first_line = out.split("\n")[0]
-    assert first_line.startswith("⚠ ")
-    assert "gh CLI" in first_line
-
-
-def test_warnings_appear_before_name_header():
-    p = make_person()
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(
-        p, [c], warnings=["dnspython not installed"],
-    )
-    warning_idx = out.find("⚠")
-    name_idx = out.find("Peter Steinberger")
-    assert warning_idx < name_idx
-
-
-def test_multiple_warnings_each_get_a_line():
-    p = make_person()
-    out = render_decision_card(
-        p, [], warnings=[
-            "gh CLI not authenticated — run `gh auth login`",
-            "dnspython not installed — pip install --user dnspython",
-        ],
-    )
-    warning_lines = [line for line in out.splitlines() if line.startswith("⚠ ")]
-    assert len(warning_lines) == 2
-
-
-def test_no_warnings_means_no_warning_block():
-    p = make_person()
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], warnings=None)
-    assert "⚠" not in out.split("Peter Steinberger")[0]
-
-
-def test_empty_warnings_list_means_no_warning_block():
-    p = make_person()
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], warnings=[])
-    assert "⚠" not in out.split("Peter Steinberger")[0]
-
-
-# ---- header (default mode) --------------------------------------------------
-
-
-def test_header_renders_name_arrow_employer():
-    out = render_decision_card(make_person(), [])
-    # Default header is "Name → Employer"; no markdown H1
-    assert "Peter Steinberger → OpenAI" in out
-    assert "# Peter Steinberger" not in out  # H1 only in verbose
-
-
-def test_header_falls_back_to_just_name_without_employer():
-    p = make_person(employer=None)
-    out = render_decision_card(p, [])
-    assert "Peter Steinberger" in out
-    assert "→" not in out.split("\n")[0]
-
-
-def test_header_identity_jargon_hidden_in_default():
-    """The 'X identity anchors bound' line is internal jargon — hidden by
-    default, surfaced only with verbose=True."""
-    p = make_person(bound_anchors=[])
-    out = render_decision_card(p, [])
-    assert "identity anchor" not in out
-    assert "insufficient identity evidence" not in out
-
-
-def test_header_resolver_notes_hidden_in_default():
-    p = make_person(notes=["only 1 identity anchor bound — handle is plausibly..."])
-    out = render_decision_card(p, [])
-    assert "Resolver notes" not in out
-    assert "only 1 identity anchor" not in out
-
-
-# ---- verdict buckets --------------------------------------------------------
-
-
-def test_verdict_verified_when_smtp_rcpt_clean():
-    p = make_person()
-    c = candidate(
-        "peter@steipete.com", belongs=0.95, work=0.0, deliv=0.95,
-        smtp="verified",
-    )
-    out = render_decision_card(p, [c], intent="either")
-    assert "verified" in out
-    assert "google-confirmed" not in out
-    assert "pattern-guess" not in out
-
-
-def test_verdict_google_confirmed_when_gaia_id_catch_all():
-    """The Dan Neil case: Google says the account exists, but the domain is
-    catch-all so SMTP can't double-check. NOT downgraded to pattern-guess."""
-    p = make_person(
-        name="Daniel Neil",
-        employer=Employer(name="Formation Bio", domains=["formation.bio"]),
-    )
-    c = candidate(
-        "daniel@formation.bio", belongs=0.40, work=0.50, deliv=0.85,
-        smtp="catch_all", account_exists="verified",
-        account_display_name="Daniel Neil",
-        employer_match=True,
-    )
-    out = render_decision_card(p, [c], intent="work")
-    assert "google-confirmed" in out
-    assert "catch-all" in out  # The caveat shows up adjacent
-    assert "pattern-guess" not in out
-
-
-def test_verdict_google_confirmed_when_inconclusive_smtp():
-    p = make_person()
-    c = candidate(
-        "pete@openai.com", belongs=0.85, work=0.95, deliv=0.85,
-        smtp="inconclusive", provider="microsoft",
-        account_exists="verified",
-        employer_match=True,
-    )
-    out = render_decision_card(p, [c], intent="work")
-    assert "google-confirmed" in out
-
-
-def test_verdict_pattern_guess_when_no_existence_signal():
-    p = make_person()
-    c = candidate(
-        "peter@openai.com", belongs=0.20, work=0.30, deliv=None,
-        smtp="inconclusive", provider="microsoft",
-        employer_match=True,
-        sources=[Source(type="pattern", url=None, observed_at=NOW,
-                        detail="generic template 'first'")],
-    )
-    out = render_decision_card(p, [c], intent="work")
-    assert "pattern-guess" in out
-
-
-def test_verdict_dead_end_when_no_candidates():
-    p = make_person()
-    out = render_decision_card(p, [], intent="work")
-    assert "No deliverable address found" in out
-
-
-# ---- About block (dossier) --------------------------------------------------
-
-
-def test_about_block_renders_when_dossier_fields_present():
-    p = make_person(
-        gh_bio="Building stuff",
-        gh_blog="https://steipete.com/blog",
-        gh_twitter="steipete",
-        gh_location="Vienna",
-    )
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    assert "About:" in out
-    assert "github.com/steipete" in out
-    assert "Building stuff" in out
-    # Web entry strips the https:// prefix for display compactness
-    assert "steipete.com/blog" in out
-    assert "@steipete" in out
-    assert "Vienna" in out
-
-
-def test_about_block_skipped_when_no_fields():
-    """If nothing in the dossier, don't render an empty About: header."""
-    p = make_person(handles={})
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    assert "About:" not in out
-
-
-def test_about_block_collapses_bio_whitespace():
-    """Multi-line bios from real profiles (e.g., 'Building things.\\n\\nPreviously
-    at X') must collapse to a single line so the dossier stays scannable."""
-    p = make_person(gh_bio="Building things.\n\nPreviously at OpenAI.\n\tNow exploring.")
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    # The bio should appear on a single line with single spaces between words
-    assert "Building things. Previously at OpenAI. Now exploring." in out
-    # No literal newlines or tabs inside the bio section
-    about_start = out.find("About:")
-    next_section = out.find("\n\n", about_start + 1)
-    about_block = out[about_start:next_section if next_section >= 0 else len(out)]
-    # The About block itself has line breaks between rows; the bio row
-    # specifically should not contain stray \n or \t
-    bio_line = next(line for line in about_block.splitlines() if "Building things" in line)
-    assert "\n" not in bio_line and "\t" not in bio_line
-
-
-def test_about_block_includes_linkedin_from_channel_hints():
-    p = make_person(channel_hints={"linkedin": "https://www.linkedin.com/in/steipete"})
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    assert "LinkedIn" in out
-    assert "linkedin.com/in/steipete" in out
-
-
-def test_about_block_surfaces_gh_company_only_when_differs_from_employer():
-    """When GitHub's company text matches the canonical employer name,
-    it's redundant. When it differs, it's worth seeing."""
-    p_match = make_person(gh_company="OpenAI")
-    p_diff = make_person(gh_company="Anthropic")
-    c = candidate("peter@openai.com", belongs=0.95, smtp="verified",
-                  employer_match=True)
-    out_match = render_decision_card(p_match, [c], intent="work")
-    out_diff = render_decision_card(p_diff, [c], intent="work")
-    assert "GH company" not in out_match  # redundant with header
-    assert "GH company" in out_diff
-    assert "Anthropic" in out_diff
-
-
-# ---- Google identity cross-check (name + photo) -----------------------------
-
-
-def _google_verified_candidate(addr, display_name, *, photo_url=None):
-    return EmailCandidate(
-        address=addr,
-        sources=[Source(type="google_account", url=None, observed_at=NOW,
-                        detail="Google account confirmed")],
-        smtp_verdict="catch_all",
-        account_exists="verified",
-        account_display_name=display_name,
-        account_photo_url=photo_url,
-        belongs_to_person=0.85,
+def _profile(facts, *, ambiguity="single_plausible_match",
+             summary="Alice Smith, engineer.", identity_confidence: float | None = 0.9):
+    return ReasonedProfile(
+        identity=_person(ambiguity), summary=summary, facts=facts,
+        identity_confidence=identity_confidence,
     )
 
 
-def test_render_surfaces_google_name_match():
-    p = make_person()
-    c = _google_verified_candidate("peter@openai.com", "Peter Steinberger")
-    out = render_decision_card(p, [c], intent="work")
-    assert 'Google name: "Peter Steinberger" matches "Peter Steinberger"' in out
+# ---- robustness --------------------------------------------------------------
 
 
-def test_render_flags_google_name_mismatch():
-    """Common-name namesake: the account exists but the display name is a
-    different person — surfaced as a text mismatch, not a face comparison."""
-    p = make_person()
-    c = _google_verified_candidate("peter@openai.com", "Peter Nowak")
-    out = render_decision_card(p, [c], intent="work")
-    assert "differs from" in out
-    assert "Peter Nowak" in out
+def test_render_tolerates_nonnumeric_identity_confidence():
+    """--ground stdin is untrusted: a model that emits identity_confidence as a
+    string ('high', or '0.8' quoted) must not crash the render with a TypeError
+    on the `ic >= 0.75` comparison — it degrades to 'no host confidence'."""
+    out = render_reasoned_card(_profile([_fact()], identity_confidence="high"))  # type: ignore[arg-type]
+    assert "alice@corp.com" in out  # rendered, did not raise
 
 
-def test_render_photo_is_labelled_human_review_only():
-    p = make_person()
-    c = _google_verified_candidate(
-        "peter@openai.com", "Peter Steinberger",
-        photo_url="https://lh3.googleusercontent.com/a/pete=s96",
+def test_out_of_vocab_fact_kind_is_surfaced_not_dropped():
+    """ground() no longer constrains a fact's kind to a vocabulary, so a
+    grounded fact with an unexpected kind must still render — silently dropping
+    it would lose a cited, grounded fact from the card."""
+    facts = [_fact(kind="affiliation", value="Board member, Acme Foundation")]
+    out = render_reasoned_card(_profile(facts))
+    assert "Board member, Acme Foundation" in out
+
+
+# ---- summary + sections ------------------------------------------------------
+
+
+def test_summary_leads_the_card():
+    out = render_reasoned_card(_profile([_fact()]))
+    assert out.splitlines()[0] == "Alice Smith, engineer."
+
+
+def test_email_fact_renders_with_section_and_marker():
+    out = render_reasoned_card(_profile([_fact(confidence=0.9)]))
+    assert "Email:" in out
+    assert "✓" in out
+    assert "alice@corp.com" in out
+
+
+def test_belonging_marker_is_surfaced_on_the_card():
+    """The analyst's belonging marker ([+]/[?]) is preserved through --ground and
+    must appear on the human card, not only in the machine JSON (the renderer used
+    to drop it, conveying belonging via the confidence glyph alone)."""
+    f = GroundedFact(
+        kind="email", label="", value="alice@corp.com", detail="",
+        confidence=0.9, reasoning="", evidence_ids=["o1"],
+        grounded=True, verified=True, verdict="verified", marker="[+]",
     )
-    out = render_decision_card(p, [c], intent="work")
-    assert "https://lh3.googleusercontent.com/a/pete=s96" in out
-    assert "for human review, not an automated match" in out
+    out = render_reasoned_card(_profile([f]))
+    assert "[+]" in out
+    assert "[verified]" in out  # verdict still rendered alongside the marker
 
 
-def test_render_omits_photo_line_when_absent():
-    p = make_person()
-    c = _google_verified_candidate("peter@openai.com", "Peter Steinberger")
-    out = render_decision_card(p, [c], intent="work")
-    assert "Google photo" not in out
-
-
-# ---- recent repos block -----------------------------------------------------
-
-
-def test_recent_repos_block_renders():
-    repos = [
-        GitHubRepo(name="steipete/InterposeKit", description="Method swizzling for Swift",
-                   html_url="https://github.com/steipete/InterposeKit",
-                   pushed_at="2026-05-20T10:00:00Z"),
-        GitHubRepo(name="steipete/dotfiles", description=None,
-                   html_url="https://github.com/steipete/dotfiles",
-                   pushed_at="2026-05-15T10:00:00Z"),
+def test_sections_render_in_kind_order():
+    facts = [
+        _fact(kind="role", value="Engineer at Corp", label="Corp"),
+        _fact(kind="email", value="alice@corp.com"),
     ]
-    p = make_person(gh_recent_repos=repos)
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    assert "Recent on GitHub:" in out
-    assert "steipete/InterposeKit" in out
-    assert "Method swizzling for Swift" in out
-    assert "steipete/dotfiles" in out
+    out = render_reasoned_card(_profile(facts))
+    assert out.index("Email:") < out.index("Roles:")
 
 
-def test_recent_repos_block_skipped_when_empty():
-    p = make_person()  # no recent repos
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    assert "Recent on GitHub" not in out
+def test_label_kept_when_not_redundant():
+    """A label that adds info (not already in the value) is shown."""
+    f = _fact(kind="role", value="Founding team", label="Simile", detail="current")
+    out = render_reasoned_card(_profile([f]))
+    assert "Simile: Founding team — current" in out
 
 
-def test_recent_repos_block_caps_at_three_by_default():
-    repos = [
-        GitHubRepo(name=f"steipete/repo{i}", description=f"desc {i}",
-                   html_url=f"https://github.com/steipete/repo{i}",
-                   pushed_at="2026-05-20T10:00:00Z")
-        for i in range(10)
-    ]
-    p = make_person(gh_recent_repos=repos)
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    # Top 3 shown; #4+ omitted
-    assert "steipete/repo0" in out
-    assert "steipete/repo2" in out
-    assert "steipete/repo3" not in out
+def test_redundant_label_is_dropped():
+    """A label that just repeats the value (e.g. 'linkedin' when the value is the
+    linkedin URL) is dropped to keep the line scannable."""
+    f = _fact(kind="social_link", value="linkedin.com/in/alice", label="linkedin")
+    out = render_reasoned_card(_profile([f]))
+    assert "✓ linkedin.com/in/alice" in out
+    assert "linkedin: linkedin.com" not in out
 
 
-# ---- name disambiguation ----------------------------------------------------
+# ---- confidence markers ------------------------------------------------------
 
 
-def test_name_disambiguation_note_when_diminutive_used():
-    """Target 'Dan Neil', GitHub profile says 'Daniel Neil'. Surface that."""
-    p = make_person(name="Dan Neil", gh_name="Daniel Neil")
-    c = candidate("daniel@formation.bio", belongs=0.40, smtp="catch_all",
-                  account_exists="verified")
-    out = render_decision_card(p, [c], intent="either")
-    assert "Note:" in out
-    assert "Dan" in out and "Daniel" in out
+def test_high_confidence_is_asserted_marker():
+    out = render_reasoned_card(_profile([_fact(confidence=0.8)]))
+    assert "✓" in out
 
 
-def test_no_disambiguation_note_when_names_match():
-    p = make_person(gh_name="Peter Steinberger")
-    c = candidate("peter@steipete.com", belongs=0.95, smtp="verified")
-    out = render_decision_card(p, [c], intent="either")
-    # No name-disambiguation note (Why line still uses Note: in some scenarios
-    # but the disambiguation-specific one is absent)
-    assert "differs" not in out
-    assert 'you said' not in out
+def test_mid_confidence_is_possibly_marker():
+    out = render_reasoned_card(_profile([_fact(confidence=0.5)]))
+    assert "~" in out and "✓" not in out.split("Email:")[1]
 
 
-# ---- caveats ----------------------------------------------------------------
+def test_low_confidence_is_weak_marker():
+    out = render_reasoned_card(_profile([_fact(confidence=0.1)]))
+    assert "·" in out
 
 
-def test_inconclusive_smtp_caveat_suppressed_when_google_confirmed():
-    """Don't duplicate caveats already in the verdict label."""
-    p = make_person()
-    c = candidate(
-        "pete@openai.com", belongs=0.85, work=0.95, deliv=0.85,
-        smtp="inconclusive", provider="microsoft",
-        account_exists="verified",
-        employer_match=True,
+def test_multiple_matches_caps_marker_and_warns_loudly():
+    """The genuine namesake case: even a high-confidence fact shows [?] when more
+    than one person may fit, and the banner warns loudly."""
+    out = render_reasoned_card(
+        _profile([_fact(confidence=0.95)], ambiguity="multiple_plausible_matches")
     )
-    out = render_decision_card(p, [c], intent="work")
-    # Verdict label says SMTP blocked, no need for a separate ⚠ row
-    assert out.count("blocks RCPT") <= 1
+    assert "✓" not in out
+    assert "NOT a single confident match" in out
 
 
-def test_smtp_invalid_caveat_shows():
-    p = make_person()
-    c = candidate("wrong@openai.com", belongs=0.30, smtp="invalid",
-                  employer_match=True)
-    out = render_decision_card(p, [c], intent="work")
-    assert "rejected" in out.lower() or "bad" in out.lower()
-
-
-def test_former_employer_caveat_shows():
-    p = make_person()
-    c = candidate("pete@oldcorp.com", belongs=0.50, smtp="unprobed",
-                  former_match=True)
-    out = render_decision_card(p, [c], intent="work")
-    assert "former-employer" in out.lower() or "inactive" in out.lower()
-
-
-# ---- fallback list (D1-C asymmetry) -----------------------------------------
-
-
-def test_fallback_list_hidden_when_verified():
-    """SMTP-verified pick means no bounce expected — fallbacks would be noise."""
-    p = make_person()
-    pick = candidate("peter@openai.com", belongs=0.95, smtp="verified",
-                     employer_match=True)
-    other = candidate("p@openai.com", belongs=0.30, employer_match=True,
-                      sources=[Source(type="pattern", url=None, observed_at=NOW,
-                                      detail="pattern")])
-    out = render_decision_card(p, [pick, other], intent="work")
-    assert "If it bounces" not in out
-
-
-def test_fallback_list_shown_when_google_confirmed():
-    """Real-but-not-double-verified: show backup order cheaply."""
-    p = make_person()
-    pick = candidate("pete@openai.com", belongs=0.85, smtp="catch_all",
-                     account_exists="verified", employer_match=True)
-    backup = candidate("p.steinberger@openai.com", belongs=0.30,
-                       employer_match=True,
-                       sources=[Source(type="pattern", url=None, observed_at=NOW,
-                                       detail="pattern")])
-    out = render_decision_card(p, [pick, backup], intent="work")
-    assert "If it bounces" in out
-    assert "p.steinberger@openai.com" in out
-
-
-def test_fallback_list_shown_when_pattern_guess():
-    p = make_person()
-    pick = candidate("peter@openai.com", belongs=0.30, smtp="inconclusive",
-                     employer_match=True,
-                     sources=[Source(type="pattern", url=None, observed_at=NOW,
-                                     detail="pattern")])
-    backup = candidate("p@openai.com", belongs=0.20, smtp="inconclusive",
-                       employer_match=True,
-                       sources=[Source(type="pattern", url=None, observed_at=NOW,
-                                       detail="pattern")])
-    out = render_decision_card(p, [pick, backup], intent="work")
-    assert "If it bounces" in out
-
-
-def test_fallback_list_excludes_pick():
-    p = make_person()
-    pick = candidate("pete@openai.com", belongs=0.85, smtp="catch_all",
-                     account_exists="verified", employer_match=True)
-    backup = candidate("p@openai.com", belongs=0.30, employer_match=True,
-                       sources=[Source(type="pattern", url=None, observed_at=NOW,
-                                       detail="pattern")])
-    out = render_decision_card(p, [pick, backup], intent="work")
-    # Pick appears once in the lead (with backticks). Fallback list shows others.
-    fallback_section = out.split("If it bounces")[1] if "If it bounces" in out else ""
-    assert "pete@openai.com" not in fallback_section
-
-
-# ---- intent handling --------------------------------------------------------
-
-
-def test_intent_personal_picks_personal_address():
-    p = make_person()
-    work = candidate("pete@openai.com", belongs=0.85, employer_match=True,
-                     smtp="verified")
-    pers = candidate("steipete@gmail.com", belongs=0.92, personal_provider=True,
-                     smtp="verified")
-    out = render_decision_card(p, [work, pers], intent="personal")
-    # The lead address line should be the personal one
-    first_lines = "\n".join(out.split("\n")[:3])
-    assert "steipete@gmail.com" in first_lines
-    assert "pete@openai.com" not in first_lines
-
-
-def test_intent_personal_warns_when_for_cold_business():
-    p = make_person()
-    pers = candidate("steipete@gmail.com", belongs=0.92, personal_provider=True,
-                     smtp="verified")
-    out = render_decision_card(p, [pers], intent="personal")
-    assert "warm outreach" in out or "not cold business" in out
-
-
-def test_work_intent_falls_back_to_personal_with_warning():
-    p = make_person()
-    pers = candidate("steipete@gmail.com", belongs=0.92, personal_provider=True,
-                     smtp="verified")
-    out = render_decision_card(p, [pers], intent="work")
-    assert "no current-employer" in out.lower() or "fallback" in out.lower()
-
-
-# ---- dead-end ---------------------------------------------------------------
-
-
-def test_dead_end_explains_what_was_tried():
-    p = make_person()
-    out = render_decision_card(p, [], intent="work")
-    assert "No deliverable address found" in out
-
-
-def test_dead_end_suggests_channel_hints():
-    p = make_person(channel_hints={"linkedin": "linkedin.com/in/steipete",
-                                    "x_dms_open": True})
-    out = render_decision_card(p, [], intent="work")
-    assert "Try:" in out
-    assert "linkedin" in out.lower()
-
-
-# ---- verbose mode -----------------------------------------------------------
-
-
-def test_verbose_surfaces_identity_block():
-    p = make_person()
-    out = render_decision_card(p, [], verbose=True)
-    assert "identity anchors bound" in out
-    assert "single plausible match" in out
-
-
-def test_verbose_surfaces_resolver_notes():
-    p = make_person(notes=[
-        "plan claimed employer='OpenAI'; github profile company='Anthropic' — differs",
-    ])
-    out = render_decision_card(p, [], verbose=True)
-    assert "Resolver notes" in out
-    assert "Anthropic" in out
-
-
-def test_verbose_includes_per_section_tables():
-    p = make_person()
-    work = candidate("pete@openai.com", belongs=0.85, employer_match=True)
-    pers = candidate("steipete@gmail.com", belongs=0.92, personal_provider=True)
-    out = render_decision_card(p, [work, pers], intent="work", verbose=True)
-    assert "## Work" in out
-    assert "## Personal" in out
-
-
-def test_verbose_intent_either_uses_combined_table():
-    p = make_person()
-    cands = [
-        candidate("pete@openai.com", belongs=0.85, employer_match=True),
-        candidate("steipete@gmail.com", belongs=0.92, personal_provider=True),
-    ]
-    out = render_decision_card(p, cands, intent="either", verbose=True)
-    assert "## All candidates" in out
-
-
-def test_verbose_intent_personal_reorders_sections():
-    p = make_person()
-    work = candidate("pete@openai.com", belongs=0.85, employer_match=True)
-    pers = candidate("steipete@gmail.com", belongs=0.92, personal_provider=True)
-    out = render_decision_card(p, [work, pers], intent="personal", verbose=True)
-    work_idx = out.find("## Work")
-    pers_idx = out.find("## Personal")
-    assert 0 < pers_idx < work_idx
-
-
-def test_verbose_table_renders_three_axis_scores():
-    p = make_person()
-    c = candidate("x@openai.com", belongs=0.847, work=0.522, deliv=0.123,
-                  employer_match=True)
-    out = render_decision_card(p, [c], intent="work", verbose=True)
-    assert "0.85" in out
-    assert "0.52" in out
-    assert "0.12" in out
-
-
-def test_verbose_table_renders_none_score_as_em_dash():
-    p = make_person()
-    c = candidate("x@openai.com", belongs=None, work=None, deliv=None,
-                  employer_match=True)
-    out = render_decision_card(p, [c], intent="work", verbose=True)
-    assert "—" in out
-
-
-def test_verbose_max_per_section_respected():
-    """max_per_section caps rows in the verbose table only. The default-mode
-    fallback list has its own bound. Count addresses inside the '## Work'
-    table block specifically."""
-    p = make_person()
-    cands = [
-        candidate(f"p{i}@openai.com", belongs=0.5 - i * 0.05, employer_match=True)
-        for i in range(10)
-    ]
-    out = render_decision_card(p, cands, intent="work", verbose=True,
-                                max_per_section=3)
-    # Slice out the verbose ## Work section
-    assert "## Work" in out
-    work_start = out.find("## Work")
-    after_work = out[work_start:]
-    work_end = after_work.find("\n##", 5)  # next section header
-    work_section = after_work if work_end < 0 else after_work[:work_end]
-    # Count table rows (lines that start with "| `")
-    table_rows = sum(1 for line in work_section.splitlines()
-                     if line.startswith("| `"))
-    assert table_rows == 3
-
-
-def test_verbose_ambiguity_states_render():
-    for state, label in [
-        ("single_plausible_match", "single plausible match"),
-        ("multiple_plausible_matches", "multiple plausible matches"),
-        ("insufficient_identity_evidence", "insufficient identity evidence"),
-    ]:
-        p = make_person(ambiguity=state)
-        out = render_decision_card(p, [], verbose=True)
-        assert label in out
-
-
-def test_verbose_counts_only_validating_anchors():
-    """github_handle_exists is the trivial 'we found the user' anchor; it
-    doesn't independently bind identity, so it's excluded from the count."""
-    p = make_person(
-        bound_anchors=[
-            ("github_name_match", "Peter Steinberger"),
-            ("github_employer_match", "OpenAI"),
-            ("github_handle_exists", "steipete"),
-        ]
+def test_insufficient_evidence_does_not_cap_verified_fact():
+    """The fixed bug: 'no anchor bound' (insufficient_identity_evidence) is NOT a
+    namesake — a high-confidence verified fact keeps its [+] marker, and the
+    banner is the softer 'not anchored' note, not the loud one."""
+    out = render_reasoned_card(
+        _profile([_fact(confidence=0.9)], ambiguity="insufficient_identity_evidence",
+                 identity_confidence=None)
     )
-    out = render_decision_card(p, [], verbose=True)
-    assert "2 identity anchors bound" in out
+    assert "✓" in out                               # NOT capped to [?]
+    assert "not independently anchored" in out         # the soft caveat
+    assert "more than one person may fit" not in out   # not the loud namesake banner
+
+
+def test_high_host_confidence_suppresses_soft_banner():
+    """When the host says it confirmed the identity another way (high
+    identity_confidence) — e.g. a WebFetched public profile snoop can't sense —
+    the soft 'not anchored' banner is suppressed; the host's call wins."""
+    out = render_reasoned_card(
+        _profile([_fact(confidence=0.9)],
+                 ambiguity="insufficient_identity_evidence", identity_confidence=0.85)
+    )
+    assert "not independently anchored" not in out
+    assert "✓" in out
+
+
+def test_soft_banner_shows_when_host_confidence_absent_or_modest():
+    # omitted identity_confidence → cautious default, banner shows
+    out = render_reasoned_card(
+        _profile([_fact()], ambiguity="insufficient_identity_evidence",
+                 identity_confidence=None)
+    )
+    assert "not independently anchored" in out
+
+
+def test_low_identity_confidence_triggers_loud_banner_even_when_single_match():
+    out = render_reasoned_card(
+        _profile([_fact()], identity_confidence=0.3)
+    )
+    assert "NOT a single confident match" in out
+
+
+# ---- verification tag --------------------------------------------------------
+
+
+def test_unverified_fact_is_tagged():
+    out = render_reasoned_card(_profile([_fact(verified=False)]))
+    assert "(unverified)" in out
+
+
+def test_verified_fact_has_no_tag():
+    out = render_reasoned_card(_profile([_fact(verified=True)]))
+    assert "(unverified)" not in out
+
+
+# ---- sanitization (no forged marked lines) -----------------------------------
+
+
+def test_control_chars_collapsed_to_prevent_forged_lines():
+    evil = "real@corp.com\n  [+] verified email: evil@x.com"
+    out = render_reasoned_card(_profile([_fact(value=evil)]))
+    # the injected newline must not produce a second standalone marked line
+    marked_lines = [ln for ln in out.splitlines() if "evil@x.com" in ln]
+    assert len(marked_lines) == 1
+    assert "\n" not in out.split("Email:")[1].split("\n")[1].lstrip()  # single line per fact
+
+
+def test_warnings_render_above_summary():
+    out = render_reasoned_card(_profile([_fact()]), warnings=["gh CLI not authed"])
+    assert out.splitlines()[0] == "⚠ gh CLI not authed"
+
+
+# ---- empty -------------------------------------------------------------------
+
+
+def test_no_facts_renders_explicit_message():
+    out = render_reasoned_card(_profile([]))
+    assert "No attributable facts" in out
+
+
+def test_honest_blank_shows_checked_not_checked_and_why():
+    """4A: a zero-fact card given the bundle's run records enumerates what ran,
+    what was not checked, and the reason for each — a designed empty state, not a
+    silent dead end."""
+    sensors = [
+        {"sensor": "git_emails", "status": "ran", "outcome": "empty"},
+        {"sensor": "pattern_gen", "status": "ran", "outcome": "candidates"},
+        {"sensor": "personal_site", "status": "skipped",
+         "reason": "no personal_domains in plan"},
+        {"sensor": "smtp", "status": "skipped", "reason": "--no-smtp"},
+        {"sensor": "google_account", "status": "degraded", "reason": "deadline-exceeded"},
+    ]
+    out = render_reasoned_card(_profile([]), sensors=sensors)
+    assert "What snoop checked:" in out
+    assert "ran: git_emails, pattern_gen" in out
+    assert "· personal_site — no personal_domains in plan" in out
+    assert "· smtp — --no-smtp" in out
+    assert "· google_account — deadline-exceeded" in out
+
+
+def test_honest_blank_absent_without_sensors():
+    """Without the run records, the empty card is just the one-liner (back-compat)."""
+    out = render_reasoned_card(_profile([]))
+    assert "What snoop checked:" not in out
+
+
+def test_honest_blank_not_shown_when_facts_exist():
+    """The checked/not-checked surface is the EMPTY-state affordance; a card with
+    facts doesn't carry the sensor summary (that lives on stderr)."""
+    sensors = [{"sensor": "smtp", "status": "skipped", "reason": "--no-smtp"}]
+    out = render_reasoned_card(_profile([_fact()]), sensors=sensors)
+    assert "What snoop checked:" not in out
+
+
+def test_honest_blank_sanitizes_sensor_reason():
+    """An untrusted reason can't forge a marked card line (3B/_oneline applies)."""
+    sensors = [{"sensor": "smtp", "status": "degraded",
+                "reason": "boom\n  ✓ verified evil@x.com"}]
+    out = render_reasoned_card(_profile([]), sensors=sensors)
+    assert "\n  ✓ verified evil@x.com" not in out
+    assert "boom ✓ verified evil@x.com" in out
+
+
+# ---- press-confirmed-role tier (TODOS P2: ~ with a cited basis, never ✓) -----
+
+
+def test_press_confirmed_role_renders_tilde_not_check():
+    """A role confirmed by independent press (not self-published) is provenance
+    strength, not identity-binding — the host lands it in the `~` band, and the
+    renderer must show `~`, never `✓`. (Per the evidence-tier table.)"""
+    role = _fact(kind="role", value="Acme", detail="VP Eng · per TechCrunch",
+                 confidence=0.5)
+    out = render_reasoned_card(_profile([role]))
+    line = next(ln for ln in out.splitlines() if "Acme" in ln)
+    assert line.strip().startswith("~")
+    assert "✓" not in line
+
+
+def test_m365_provider_context_renders_separate_from_address():
+    """T-minor B: M365 provider context lands in its OWN section (Identity check),
+    visually separate from the Email line — it must never read as validating the
+    address. The address line carries only its own verdict."""
+    email = _fact(kind="email", value="marta@helio.com", detail="pattern-guess",
+                  confidence=0.4)
+    note = _fact(kind="consistency_note", value="helio.com is on Microsoft 365",
+                 detail="M365 blocks RCPT and has no existence oracle — lean on channels",
+                 confidence=0.5)
+    out = render_reasoned_card(_profile([email, note]))
+    lines = out.splitlines()
+    email_line = next(ln for ln in lines if "marta@helio.com" in ln)
+    # the provider context is NOT on the address line
+    assert "Microsoft 365" not in email_line and "existence oracle" not in email_line
+    # and it appears under its own section header
+    assert "Identity check:" in out
+
+
+def test_self_published_role_can_render_check():
+    """The cap is by confidence/doctrine, not a blanket role downgrade: a
+    self-published or probe-verified role the host scores in the ✓ band renders
+    `✓` — so the press-confirmed `~` is a deliberate tier, not an accident."""
+    role = _fact(kind="role", value="Simile", detail="founding team · current",
+                 confidence=0.9)
+    out = render_reasoned_card(_profile([role]))
+    line = next(ln for ln in out.splitlines() if "Simile" in ln)
+    assert line.strip().startswith("✓")

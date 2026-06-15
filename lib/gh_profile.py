@@ -27,7 +27,6 @@ this module accepts a separate http_get callable for testability.
 from __future__ import annotations
 
 import json
-import re
 import subprocess
 import urllib.error
 import urllib.request
@@ -36,26 +35,16 @@ from typing import Callable
 
 from . import _gh_api
 from ._gh_api import GhCaller
-from .normalize import normalize_email
+from .fetch import USER_AGENT
+from .normalize import EMAIL_RE, MAILTO_RE, domain_is_noise, normalize_email
 from .schema import EmailCandidate, GitHubRepo, ResolverResult, Source
 
 _DEFAULT_TIMEOUT_SEC = 6.0
 
-# Used both for README extraction and bio regex. Conservative: requires a
-# dot in the TLD, no whitespace, minimum reasonable length.
-_EMAIL_RE = re.compile(
-    r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}"
-)
-_MAILTO_RE = re.compile(
-    r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})",
-    re.IGNORECASE,
-)
-
-# Don't extract from these — pre-filter at parse time before scoring sees them.
-_BAD_EMAIL_DOMAINS = (
-    "example.com", "example.org", "example.net",
-    "localhost", "local", "test", "invalid",
-)
+# Address shape + reserved-domain set are shared (lib.normalize); the localpart
+# policy is local. Aliased to keep the in-module names stable.
+_EMAIL_RE = EMAIL_RE
+_MAILTO_RE = MAILTO_RE
 _BAD_LOCALPARTS = ("noreply", "no-reply", "do-not-reply")
 
 # Caller signatures match git_emails.py for consistency.
@@ -70,7 +59,7 @@ def _is_extractable(email: str) -> bool:
     local, _, domain = email.lower().partition("@")
     if not local or not domain:
         return False
-    if any(domain == d or domain.endswith("." + d) for d in _BAD_EMAIL_DOMAINS):
+    if domain_is_noise(domain):
         return False
     if any(local.startswith(lp) for lp in _BAD_LOCALPARTS):
         return False
@@ -85,7 +74,7 @@ def _default_gh_caller() -> GhCaller | None:
 
 def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str | None:
     """Fetch URL body as text. Returns None on 404; raises on other errors."""
-    req = urllib.request.Request(url, headers={"User-Agent": "snoop-skill"})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace")
@@ -98,8 +87,8 @@ def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str
 def _extract_emails_from_text(text: str) -> list[tuple[str, str]]:
     """Return a list of (email, extraction_method) tuples from a block of text.
 
-    `extraction_method` is "mailto" or "regex". Mailto-tagged hits get a
-    higher trust weight at the scorer; raw-regex hits sometimes are
+    `extraction_method` is "mailto" or "regex". Mailto-tagged hits carry
+    higher trust for the host model; raw-regex hits sometimes are
     obfuscated or false-positives.
 
     Deduplication is by normalized address (not by method), keeping the
@@ -160,7 +149,7 @@ def fetch_gh_profile(
 
     # --- Surface 1: GET /users/{handle} ---
     try:
-        profile = caller(f"/users/{handle}")
+        profile = caller(f"/users/{_gh_api.quote_handle(handle)}")
     except subprocess.TimeoutExpired:
         return ResolverResult(
             resolver="gh_profile", candidates=[], status="timeout",
@@ -272,7 +261,7 @@ def fetch_recent_repos(
         # after filtering forks/archived.
         per_page = min(100, max(n * 2, n))
         result = caller(
-            f"/users/{handle}/repos?sort=pushed&direction=desc&per_page={per_page}&type=owner"
+            f"/users/{_gh_api.quote_handle(handle)}/repos?sort=pushed&direction=desc&per_page={per_page}&type=owner"
         )
     except (subprocess.SubprocessError, urllib.error.URLError,
             json.JSONDecodeError, OSError):

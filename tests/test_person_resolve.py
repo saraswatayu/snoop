@@ -277,6 +277,22 @@ def test_resolve_keeps_former_employers():
     assert p.former_employers[0].until == "2023"
 
 
+def test_resolve_passes_employer_source_url_through():
+    """employer.source_url (where the host confirmed the employer) survives
+    resolution so build_evidence can emit it as citable corroboration."""
+    plan = {
+        "employer": {"name": "Simile", "domains": ["simile.ai"],
+                     "source_url": "https://www.bloomberg.com/news/simile"},
+        "former_employers": [
+            {"name": "Figma", "domains": ["figma.com"], "until": "2026",
+             "source_url": "https://lennys/figma"},
+        ],
+    }
+    p = resolve_person("Mihika Kapoor", plan=plan, gh_caller=make_gh({}))
+    assert p.employer.source_url == "https://www.bloomberg.com/news/simile"
+    assert p.former_employers[0].source_url == "https://lennys/figma"
+
+
 def test_employer_match_rejects_partial_word_substring():
     """Defense against substring false-positives. plan='Apple' vs profile
     company='Applesauce Corp' previously bound github_employer_match by

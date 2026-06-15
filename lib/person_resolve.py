@@ -32,7 +32,8 @@ What v1 DOES NOT (deferred to v2):
 
 The contract: v1 either binds anchors with confidence, OR sets
 ambiguity to `insufficient_identity_evidence` and lets the rest of
-the pipeline run with weaker downstream-scorer confidence.
+the pipeline run, leaving the host model to judge with lower identity
+confidence.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ from . import _gh_api
 from ._gh_api import GhCaller
 from .gh_search import find_github_handle
 from .normalize import (
-    fold_ascii,
+    employer_match,
     name_match,
     name_variants,
     normalize_domain,
@@ -82,39 +83,9 @@ def _default_gh_caller() -> GhCaller | None:
 # ---- name/string comparison helpers ----------------------------------------
 
 
-_ORG_SUFFIX_TOKENS = frozenset({
-    "inc", "llc", "ltd", "corp", "co", "company",
-    "gmbh", "ag", "sa", "bv", "kg", "ltda", "srl", "spa",
-    "lp", "llp", "plc",
-})
-
-
-def _employer_match(observed_company: str | None, target_employer_name: str) -> bool:
-    """Tolerant company-name match. Companies often have variants
-    ('OpenAI' vs '@openai' vs 'OpenAI, Inc.'). Compare as token sets —
-    one must be a subset of the other after stripping common org suffixes.
-
-    Token-set was chosen over the earlier substring containment because
-    `tgt in obs or obs in tgt` false-positives in two real ways:
-      - plan='Apple' vs observed='Applesauce' → 'apple' in 'applesauce' = True
-      - plan='A' vs observed='OpenAI'         → 'a' in 'openai' = True
-    Both would falsely bind the github_employer_match anchor, which (combined
-    with one other correct anchor) flips ambiguity to single_plausible_match
-    and shows the user a misleading "identity confirmed" framing.
-    """
-    if not observed_company or not target_employer_name:
-        return False
-    def _tokens(s: str) -> set[str]:
-        folded = fold_ascii(s).lstrip("@")
-        # Split on whitespace AND common separators
-        raw = [t.strip(",.()[]{}\"'") for t in folded.split()]
-        out = {t for t in raw if t and t not in _ORG_SUFFIX_TOKENS}
-        return out
-    obs_tokens = _tokens(observed_company)
-    tgt_tokens = _tokens(target_employer_name)
-    if not obs_tokens or not tgt_tokens:
-        return False
-    return obs_tokens.issubset(tgt_tokens) or tgt_tokens.issubset(obs_tokens)
+# Company matching lives in lib.normalize (shared with gh_search). Aliased here
+# so the existing internal call sites read unchanged.
+_employer_match = employer_match
 
 
 def _blog_matches_personal_domain(blog: str | None, domains: list[str]) -> str | None:
@@ -165,6 +136,7 @@ def _employer_from_plan_dict(d: Any) -> Employer | None:
         domains=norm_domains,
         since=d.get("since") if isinstance(d.get("since"), str) else None,
         until=d.get("until") if isinstance(d.get("until"), str) else None,
+        source_url=d.get("source_url") if isinstance(d.get("source_url"), str) else None,
     )
 
 
@@ -258,7 +230,7 @@ def resolve_person(
     profile: dict | None = None
     if github_handle and caller is not None:
         try:
-            result = caller(f"/users/{github_handle}")
+            result = caller(f"/users/{_gh_api.quote_handle(github_handle)}")
             if isinstance(result, dict) and result.get("login"):
                 profile = result
             elif result is None:

@@ -19,14 +19,30 @@ from __future__ import annotations
 
 import json
 import subprocess
+import urllib.parse
 import urllib.request
 from shutil import which
 from typing import Any, Callable
 
+from .fetch import USER_AGENT
+
 _API_BASE = "https://api.github.com"
 DEFAULT_TIMEOUT_SEC = 6.0
+# Bound the anonymous-HTTP read so this path keeps the same bounded-body
+# discipline lib.fetch enforces everywhere else. api.github.com is trusted, but a
+# pathological/compromised response shouldn't read unbounded into memory. Real
+# API pages (events/repos at per_page=100) are well under this.
+_MAX_RESPONSE_BYTES = 10_000_000
 
 GhCaller = Callable[[str], Any]
+
+
+def quote_handle(handle: str) -> str:
+    """Percent-encode a GitHub handle/login for safe interpolation into an API
+    path segment. `safe=''` so a separator in a hostile handle can't escape its
+    segment. Query-string values are quoted at their own call sites — the caller
+    receives a fully-built path+query string and can't tell the two apart."""
+    return urllib.parse.quote(handle, safe="")
 
 
 def gh_via_cli(path: str, *, timeout: float = DEFAULT_TIMEOUT_SEC) -> Any:
@@ -57,12 +73,15 @@ def gh_via_http(path: str, *, timeout: float = DEFAULT_TIMEOUT_SEC) -> Any:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "snoop-skill",
+            "User-Agent": USER_AGENT,
             "Accept": "application/vnd.github+json",
         },
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read())
+        body = resp.read(_MAX_RESPONSE_BYTES + 1)
+        if len(body) > _MAX_RESPONSE_BYTES:
+            raise OSError(f"GitHub API response exceeded {_MAX_RESPONSE_BYTES} bytes")
+        return json.loads(body)
 
 
 def default_gh_caller() -> GhCaller:

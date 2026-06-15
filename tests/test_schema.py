@@ -13,18 +13,11 @@ from datetime import datetime, timezone
 import pytest
 
 from lib.schema import (
-    Channel,
-    ConsistencyNote,
     EmailCandidate,
     Employer,
-    Identity,
     Person,
-    Profile,
     ResolverResult,
-    RoleFact,
-    SocialLink,
     Source,
-    WorkItem,
 )
 
 
@@ -40,31 +33,27 @@ def test_source_is_frozen():
         s.url = "https://example.com"  # type: ignore[misc]
 
 
-def test_email_candidate_defaults_to_full_abstention():
-    """All three score fields default to None — abstain until evidence arrives.
-
-    This is the contract: an EmailCandidate with no sources and no SMTP probe
-    must produce None on every field, NOT 0.0. Zero would imply 'measured
-    and known to be bad' which is different from 'never evaluated.'"""
+def test_email_candidate_defaults_to_unprobed_no_sources():
+    """A bare EmailCandidate is a raw slot: unprobed verdicts, no sources. The
+    host model scores it; snoop carries only the readings."""
     c = EmailCandidate(address="x@example.com")
-    assert c.belongs_to_person is None
-    assert c.current_work_address is None
-    assert c.deliverable is None
     assert c.smtp_verdict == "unprobed"
+    assert c.account_exists == "unprobed"
     assert c.sources == []
-    assert c.score_reasons == []
 
 
-def test_email_candidate_holds_three_fields_independently():
+def test_email_candidate_carries_verdicts_and_domain_facts():
     c = EmailCandidate(
         address="pete@openai.com",
-        belongs_to_person=0.85,
-        current_work_address=0.70,
-        deliverable=None,  # SMTP inconclusive on M365 → abstain
+        smtp_verdict="verified",
+        account_exists="verified",
+        account_display_name="Pete S",
+        employer_match=True,
     )
-    assert c.belongs_to_person == 0.85
-    assert c.current_work_address == 0.70
-    assert c.deliverable is None
+    assert c.smtp_verdict == "verified"
+    assert c.account_exists == "verified"
+    assert c.account_display_name == "Pete S"
+    assert c.employer_match is True
 
 
 def test_person_default_ambiguity_is_insufficient_evidence():
@@ -128,79 +117,67 @@ def test_resolver_result_ok_with_candidates():
     assert len(r.candidates) == 1
 
 
-# ---- profile expansion (2026-06-01) ----------------------------------------
-
-
-def test_email_candidate_is_a_contribution():
-    """EmailCandidate is the original Contribution; kind discriminates it."""
-    c = EmailCandidate(address="x@example.com")
-    assert c.kind == "email"
-
-
-def test_new_contribution_kinds_and_defaults():
-    """Every new fact type carries its kind and defaults to unbound — a fact
-    with no binding evidence must not render as 'theirs' until lib.binding
-    classifies it."""
-    w = WorkItem(title="My talk on X")
-    ch = Channel(channel_type="x_dm", value="@dan")
-    sl = SocialLink(platform="x", url="https://x.com/dan")
-    role = RoleFact(employer="OpenAI")
-    note = ConsistencyNote(note="github name matches plan")
-    assert (w.kind, ch.kind, sl.kind, role.kind, note.kind) == (
-        "work_item", "channel", "social_link", "role", "consistency_note",
-    )
-    for fact in (w, ch, sl, role, note):
-        assert fact.bind_tier == "unbound"
-        assert fact.sources == []
-        assert fact.bind_reasons == []
-
-
-def test_consistency_note_severity_defaults_to_info():
-    """A consistency note is neutral evidence by default, never an accusation."""
-    assert ConsistencyNote(note="ok").severity == "info"
-    assert ConsistencyNote(note="company differs", severity="mismatch").severity == "mismatch"
-
-
-def test_identity_is_person_for_now():
-    """Identity aliases Person during the migration; new code references Identity."""
-    assert Identity is Person
-
-
-def test_resolver_result_contributions_defaults_empty():
-    """Additive field: email resolvers that only set `candidates` still work."""
+def test_resolver_result_defaults():
+    """A resolver result with only the required fields defaults cleanly."""
     r = ResolverResult(resolver="gh_profile", candidates=[], status="empty")
-    assert r.contributions == []
+    assert r.elapsed_ms is None
+    assert r.error_detail is None
 
 
-def test_profile_add_dispatches_by_kind():
-    """Profile.add is the merge primitive — it routes each contribution into
-    its section by .kind. This is the dispatch-on-kind contract (D2)."""
-    p = Profile(identity=Person(name="Dan Neil"))
-    p.add(EmailCandidate(address="dan@acme.com"))
-    p.add(WorkItem(title="Conference talk"))
-    p.add(Channel(channel_type="linkedin", value="in/danneil"))
-    p.add(SocialLink(platform="github", url="https://github.com/danneil"))
-    p.add(RoleFact(employer="Acme"))
-    p.add(ConsistencyNote(note="name consistent"))
-    assert len(p.emails) == 1
-    assert len(p.work_items) == 1
-    assert len(p.channels) == 1
-    assert len(p.social_links) == 1
-    assert len(p.roles) == 1
-    assert len(p.consistency_notes) == 1
+# ---- RunRecord / sensor status -----------------------------------------------
 
 
-def test_profile_contributions_flattens_in_section_order():
-    p = Profile(identity=Person(name="Dan Neil"))
-    p.add(WorkItem(title="t"))
-    p.add(EmailCandidate(address="a@b.com"))
-    flat = p.contributions()
-    # emails come first in the stable section order regardless of insert order
-    assert flat[0].kind == "email"
-    assert {c.kind for c in flat} == {"email", "work_item"}
+def test_sensor_status_mapping():
+    from lib.schema import sensor_status_of
+    assert sensor_status_of("ok") == "ran"
+    assert sensor_status_of("empty") == "ran"
+    assert sensor_status_of("timeout") == "degraded"
+    assert sensor_status_of("unavailable") == "degraded"
+    assert sensor_status_of("error") == "degraded"
 
 
-def test_profile_starts_empty_except_identity():
-    p = Profile(identity=Person(name="X"))
-    assert p.emails == [] and p.work_items == [] and p.channels == []
-    assert p.social_links == [] and p.roles == [] and p.consistency_notes == []
+def test_runrecord_from_resolver_ran_with_candidates():
+    from lib.schema import RunRecord
+    r = ResolverResult(resolver="git_emails",
+                       candidates=[EmailCandidate(address="a@b.com")],
+                       status="ok", elapsed_ms=120)
+    rec = RunRecord.from_resolver(r)
+    assert rec.sensor == "git_emails"
+    assert rec.status == "ran"
+    assert rec.outcome == "candidates"
+    assert rec.elapsed_ms == 120
+
+
+def test_runrecord_from_resolver_degraded_carries_reason():
+    from lib.schema import RunRecord
+    r = ResolverResult(resolver="personal_site", candidates=[], status="timeout",
+                       elapsed_ms=5000, error_detail="exceeded 5s budget")
+    rec = RunRecord.from_resolver(r)
+    assert rec.status == "degraded"
+    assert rec.outcome == "timeout"
+    assert rec.reason == "exceeded 5s budget"
+
+
+def test_deadline_exceeded_reason_distinct_from_internal_timeout():
+    """2B: a sensor abandoned at the SHARED wall-clock deadline and a sensor that
+    hit its OWN internal timeout both degrade with outcome='timeout', but their
+    `reason` text must stay distinguishable — the host should be able to tell
+    'snoop ran out of budget' from 'this sensor's socket timed out'."""
+    from lib.schema import RunRecord
+    internal = RunRecord.from_resolver(ResolverResult(
+        resolver="personal_site", candidates=[], status="timeout",
+        error_detail="socket read timed out after 5s"))
+    deadline = RunRecord.from_resolver(ResolverResult(
+        resolver="git_emails", candidates=[], status="timeout",
+        error_detail="deadline-exceeded: abandoned after 60s shared budget"))
+    assert internal.outcome == deadline.outcome == "timeout"
+    assert internal.reason != deadline.reason
+    assert "deadline-exceeded" in (deadline.reason or "")
+    assert "deadline-exceeded" not in (internal.reason or "")
+
+
+def test_runrecord_to_dict_omits_none():
+    from lib.schema import RunRecord
+    rec = RunRecord(sensor="x", status="skipped")
+    d = rec.to_dict()
+    assert d == {"sensor": "x", "status": "skipped"}  # no None keys

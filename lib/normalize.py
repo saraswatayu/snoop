@@ -20,8 +20,8 @@ Design choices:
   middle initials are dropped. Multi-particle surnames ("van der Berg") are
   joined AND space-stripped as separate variants. We do NOT do a hard
   is-this-Eastern-order detection — for any name that has exactly 2 tokens we
-  ALSO emit the reversed pairing as a variant, and let the resolver/scorer
-  let evidence pick the winner.
+  ALSO emit the reversed pairing as a variant, and let the resolver and the
+  host model pick the winner from the evidence.
 
 - IDNA: domains pass through `idna.encode` if installed, otherwise
   `str.encode('idna')`. Non-ASCII characters in the localpart are NOT handled
@@ -33,6 +33,67 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+
+
+# ---- shared email extraction primitives --------------------------------------
+#
+# The single home for the address shape and the reserved/placeholder-domain set
+# that every HTTP sensor (gh_profile, hn_profile, personal_site, git_emails,
+# package_registry) filters on. Each sensor keeps its OWN localpart policy
+# (git_emails drops bot markers, personal_site drops exact role accounts,
+# package_registry drops npm sentinels) — those are deliberately divergent — but
+# the regex and the reserved-domain set are shared so a new placeholder domain is
+# added in ONE place instead of five.
+
+# Conservative address shape: dotted TLD, no whitespace. EMAIL_RE matches an
+# address anywhere in text; SYNTAX_RE is the anchored validator (whole string),
+# derived from EMAIL_RE so the two can never drift.
+#
+# Quantifiers are BOUNDED to RFC 5321 limits (localpart <=64, domain <=255,
+# label/TLD <=63) on purpose: an unbounded `+` makes `finditer` over a large,
+# attacker-controlled body (a fetched page/profile with no '@') run in O(n^2)
+# and pin a CPU for minutes — past the wall-clock deadline, which can't kill a
+# blocking C-level regex. Bounding the runs makes per-position work constant, so
+# the scan is linear; no valid (RFC-conformant) address is excluded.
+EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,63}")
+SYNTAX_RE = re.compile(f"^{EMAIL_RE.pattern}$")
+MAILTO_RE = re.compile(f"mailto:({EMAIL_RE.pattern})", re.IGNORECASE)
+
+# RFC 2606 reserved + obviously-fake domains that no real contact uses.
+RESERVED_NOISE_DOMAINS = frozenset({
+    "example.com", "example.org", "example.net",
+    "localhost", "local", "test", "invalid",
+})
+
+
+def domain_is_noise(domain: str, *, extra: tuple[str, ...] = ()) -> bool:
+    """True if `domain` is a reserved/placeholder domain (exact or a subdomain),
+    optionally extended with sensor-specific extras (e.g. git's
+    users.noreply.github.com)."""
+    domain = (domain or "").lower()
+    return any(domain == d or domain.endswith("." + d)
+               for d in (*RESERVED_NOISE_DOMAINS, *extra))
+
+
+# ---- provider classification -------------------------------------------------
+
+# Personal-provider domains — addresses on these are NEVER work addresses, and
+# SMTP RCPT probing them is both useless (they block/throttle RCPT) and a
+# spam-filter risk. A sensor-side fact about the domain, not a judgment about
+# the person, so it lives in the normalization funnel.
+PERSONAL_PROVIDER_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com",
+    "yahoo.com", "yahoo.co.uk", "ymail.com",
+    "icloud.com", "me.com", "mac.com",
+    "outlook.com", "hotmail.com", "live.com",
+    "protonmail.com", "proton.me", "pm.me",
+    "fastmail.com", "fastmail.fm",
+    "aol.com", "duck.com", "hey.com",
+})
+
+
+def is_personal_provider(domain: str) -> bool:
+    return domain.lower() in PERSONAL_PROVIDER_DOMAINS
 
 
 # ---- ASCII-folding -----------------------------------------------------------
@@ -241,10 +302,8 @@ def localpart_templates(first: str, last: str) -> dict[str, str]:
     """Apply the common name-to-localpart templates to a folded (first, last) pair.
 
     Returns a dict of {template_name: localpart}. All localparts are already
-    fold_to_letters-clean (lowercase ASCII letters only).
-
-    Templates match the set from the legacy verify_email.py (lines 168-183)
-    so behavior is preserved when pattern_gen extracts.
+    fold_to_letters-clean (lowercase ASCII letters only). The template set
+    covers the common corporate formats (first.last, flast, first, etc.).
     """
     f = fold_to_letters(first)
     l = fold_to_letters(last)
@@ -317,6 +376,24 @@ def normalize_email(email: str) -> str:
     return f"{local.lower()}@{normalize_domain(domain)}"
 
 
+def _token_subset_match(a: set[str], b: set[str]) -> bool:
+    """Tolerant token-set equality used for loose name/company matching.
+
+    Two sets match when they are equal, OR one is a subset of the other AND the
+    subset (smaller) side has ≥2 tokens. The ≥2 floor is the SECURITY guard: a
+    lone token must not subset-match a larger set — otherwise a bare first name
+    ('John') binds 'John Smith', and a single-word company ('Apple', 'Meta')
+    binds 'Apple Bank' / 'Meta Platforms', laundering a namesake/wrong-company
+    into a bound anchor. A genuine multi-token subset ('John Smith' ⊂ 'John A.
+    Smith', 'Acme Robotics' ⊂ 'Acme Robotics Inc') still matches."""
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    smaller, larger = (a, b) if len(a) <= len(b) else (b, a)
+    return len(smaller) >= 2 and smaller.issubset(larger)
+
+
 def name_match(observed_name: str | None, target_name: str) -> bool:
     """Loose equality on names — folded ASCII, drop punctuation, compare
     set-of-tokens to handle "John A. Smith" vs "John Smith".
@@ -333,9 +410,49 @@ def name_match(observed_name: str | None, target_name: str) -> bool:
         if fold_ascii(obs.first) == fold_ascii(tgt.last) and \
            fold_ascii(obs.last) == fold_ascii(tgt.first):
             return True
-    # Token-set fallback
+    # Token-set fallback (a bare single token never subset-matches a full name)
     obs_tokens = set(fold_ascii(observed_name).split())
     tgt_tokens = set(fold_ascii(target_name).split())
-    return bool(obs_tokens) and bool(tgt_tokens) and (
-        obs_tokens.issubset(tgt_tokens) or tgt_tokens.issubset(obs_tokens)
-    )
+    return _token_subset_match(obs_tokens, tgt_tokens)
+
+
+# Common org-name suffix tokens, stripped before company matching so
+# "OpenAI" matches "OpenAI, Inc.".
+ORG_SUFFIX_TOKENS = frozenset({
+    "inc", "llc", "ltd", "corp", "co", "company",
+    "gmbh", "ag", "sa", "bv", "kg", "ltda", "srl", "spa",
+    "lp", "llp", "plc",
+})
+
+
+def employer_match(observed_company: str | None, target_employer_name: str) -> bool:
+    """Tolerant company-name match. Companies have variants ('OpenAI' vs
+    '@openai' vs 'OpenAI, Inc.'). Compare as token sets after stripping common
+    org suffixes — one must be a subset of the other.
+
+    Token-set was chosen over substring containment because `tgt in obs or obs
+    in tgt` false-positives in two real ways:
+      - plan='Apple' vs observed='Applesauce' → 'apple' in 'applesauce' = True
+      - plan='A' vs observed='OpenAI'         → 'a' in 'openai' = True
+    Both would falsely bind the github_employer_match anchor (which, with one
+    other correct anchor, flips ambiguity to single_plausible_match)."""
+    if not observed_company or not target_employer_name:
+        return False
+
+    def _tokens(s: str) -> set[str]:
+        folded = fold_ascii(s).lstrip("@")
+        raw = [t.strip(",.()[]{}\"'") for t in folded.split()]
+        return {t for t in raw if t and t not in ORG_SUFFIX_TOKENS}
+
+    obs = _tokens(observed_company)
+    tgt = _tokens(target_employer_name)
+    if not obs or not tgt:
+        return False
+    # Plain token subset (NOT the ≥2 floor used for names): a single believed
+    # employer token legitimately matches a richer observed company string
+    # ('Apple' ⊂ 'Apple Inc, Cupertino' — confirming the employer via a fuller
+    # profile). Company names collide far less than given names, and this anchor
+    # cannot bind a candidate on its own (it is not identity-bearing — see
+    # snoop._candidate_is_bound), so the residual 'Square' vs 'Square Enix'
+    # ambiguity is bounded at the binding layer rather than here.
+    return obs.issubset(tgt) or tgt.issubset(obs)

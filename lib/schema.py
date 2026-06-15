@@ -1,31 +1,26 @@
-"""Schema for /snoop's person-resolver pipeline.
+"""Schema for /snoop's sensor pipeline.
 
-Three structural choices from the dual-voice review:
+The sensors read public sources and emit these typed records; the host model
+reasons over the resulting observation bundle. Two structural choices worth
+keeping in view:
 
-1. EmailCandidate has THREE score fields, each 0-1 with None=abstain:
-   `belongs_to_person`, `current_work_address`, `deliverable`. The old
-   single-decimal `score` was a fake probability that blended ownership
-   with deliverability with currentness — different things, calibrated
-   from different evidence. Splitting them keeps abstention explicit.
-
-2. Person.ambiguity has THREE states (not two). `single_plausible_match`
+1. Person.ambiguity has THREE states (not two). `single_plausible_match`
    does NOT mean "this is definitively the person" — it means "we found
-   one candidate." Search recall is incomplete. The old `unique` state
-   was a false-confidence trap.
+   one candidate." Search recall is incomplete. A two-state `unique`/`not`
+   would be a false-confidence trap.
 
-3. Person.bound_anchors records WHICH identity signals independently
+2. Person.bound_anchors records WHICH identity signals independently
    tie this Person to the input. A handle from `--person-plan` is an
    untrusted hint until ≥2 anchors bind it. Defends against the host
    model laundering a hallucinated handle into "high-confidence
-   provenance" via downstream resolvers.
+   provenance" via downstream sensors.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any, Literal, Union
+from typing import Any, Literal
 
 
 SourceType = Literal[
@@ -86,32 +81,19 @@ SmtpVerdict = Literal[
 ]
 
 
-# ---- profile expansion (2026-06-01) -----------------------------------------
-# snoop's deliverable grows from "an email" to "a person profile." Every fact
-# we surface is a Contribution: a provenance-bearing claim about the target,
-# tagged with its `kind` and a `bind_tier` saying how confident we are it
-# belongs to THIS person (see lib.binding). EmailCandidate is the original
-# Contribution (kind="email") and keeps its richer 3-axis scoring; the new
-# kinds use the simpler bind_tier model.
-
-# How strongly a fact is tied to the resolved person:
-#   "asserted" : source is bound-by-construction — cross-linked from a validated
-#                profile (e.g. GitHub blog→domain) or directly user-supplied.
-#   "possibly" : weaker per-result binding (e.g. a free-text search hit that
-#                cleared the anchor gate but isn't bound-by-construction).
-#   "unbound"  : no binding evidence — caller should drop, not render.
-# NOTE: a domain merely DECLARED in the model-produced --person-plan is an
-# untrusted hint, NOT bound-by-construction (outside-voice Codex #2).
-BindTier = Literal["asserted", "possibly", "unbound"]
-
-ContributionKind = Literal[
-    "email",             # EmailCandidate — the original deliverable
-    "work_item",         # a repo / article / talk / podcast / paper
-    "channel",           # an observed public reachability channel
-    "social_link",       # a social profile the person linked themselves
-    "role",              # employer / title / tenure fact
-    "consistency_note",  # text-only identity-consistency observation
-]
+# ---- analyst output-contract vocabulary --------------------------------------
+#
+# The single home for the Step-3 output vocabularies (SKILL.md), so the graders,
+# the renderer, and the standing instruction don't each carry a hand-copied
+# literal that drifts. A fact's `kind` is one of FACT_KINDS; an EMAIL fact also
+# carries a deliverability `verdict` (EMAIL_VERDICTS) and a belonging `marker`
+# (BELONGS_MARKERS) — see lib.ground.GroundedFact, which preserves verdict/marker
+# through --ground.
+FACT_KINDS = frozenset({
+    "email", "channel", "social_link", "work_item", "role", "consistency_note",
+})
+EMAIL_VERDICTS = frozenset({"verified", "google-confirmed", "pattern-guess"})
+BELONGS_MARKERS = frozenset({"[+]", "[?]"})
 
 
 @dataclass(frozen=True)
@@ -130,6 +112,10 @@ class Employer:
     domains: list[str]            # email domains used by this employer (lowercase, IDNA-encoded)
     since: str | None = None      # ISO date "YYYY-MM" or "YYYY-MM-DD" if known
     until: str | None = None      # None == current; ISO date if past
+    source_url: str | None = None # where the host confirmed this employer during
+                                  # resolution (e.g. a news article / their profile);
+                                  # lets a role fact cite real corroboration instead
+                                  # of just the host's plan declaration
 
 
 @dataclass
@@ -143,11 +129,9 @@ class GitHubRepo:
 
 @dataclass
 class EmailCandidate:
-    """One candidate email for a target person.
-
-    The three score fields are NOT a single probability. Each answers
-    a different question and can independently abstain (None).
-    """
+    """One candidate email for a target person — a raw reading plus any probe
+    verdicts. The host model judges ownership/deliverability from the sources and
+    verdicts; snoop does not score."""
     address: str                  # lowercased; IDNA-encoded for non-ASCII domains
     sources: list[Source] = field(default_factory=list)
 
@@ -155,13 +139,13 @@ class EmailCandidate:
     smtp_verdict: SmtpVerdict = "unprobed"
     mx_provider: str | None = None  # "google" | "microsoft" | "other" | None for renderer hints
     # Independent of SMTP: did the Google People API confirm this account exists?
-    # See AccountExistsVerdict for semantics. The scorer's _score_deliverable
-    # merges signals from both smtp_verdict AND account_exists; either positive
-    # signal lifts deliverable. Set by lib.google_account.fetch_google_account.
+    # See AccountExistsVerdict for semantics. The host-model analyst reads both
+    # smtp_verdict AND account_exists; either positive signal supports
+    # deliverability. Set by lib.google_account.fetch_google_account.
     account_exists: AccountExistsVerdict = "unprobed"
     # When account_exists=="verified" AND Google returned a profile name, this
-    # holds the display name as Google sees it. The scorer compares against
-    # the target's name to bind the name_match anchor (or flag a delta if
+    # holds the display name as Google sees it. Candidate binding compares it
+    # against the target's name to bind the name_match anchor (or flag a delta if
     # Google's name doesn't match the target's).
     account_display_name: str | None = None
     # When account_exists=="verified" AND Google returned a non-default profile
@@ -171,109 +155,21 @@ class EmailCandidate:
     # placeholder avatars are dropped at capture (a generic silhouette tells you
     # nothing). Set by lib.google_account.fetch_google_account.
     account_photo_url: str | None = None
+    # When account_exists=="verified", Google returns a stable Gaia (Google
+    # account) id for the mailbox. Two verified addresses with the SAME gaia_id are
+    # aliases of ONE account (same person — collapse them); DIFFERENT gaia_ids are
+    # distinct accounts (a name-collision → namesake risk). This is the disambiguator
+    # for a locked Workspace tenant that returns existence but no display name: it
+    # answers "same person or different people?" deterministically. It does NOT by
+    # itself prove the account belongs to the target (a lone account may still be a
+    # collision) — identity still needs name_match / an observed cross-reference.
+    # Set by lib.google_account.fetch_google_account.
+    gaia_id: str | None = None
 
     # Domain-level facts
     employer_match: bool = False           # address domain ∈ resolved current employer.domains
     employer_former_match: bool = False    # address domain ∈ a former employer.domains
     is_personal_provider: bool = False     # @gmail / @yahoo / @icloud / @outlook / @hotmail / @protonmail
-
-    # Three-field score (None = no signal; abstain)
-    belongs_to_person: float | None = None     # 0-1: how confident is this person's address
-    current_work_address: float | None = None  # 0-1: how confident this is a current WORK address
-    deliverable: float | None = None           # 0-1: a message sent here will reach a human
-
-    # Per-field reasons (renderable receipts)
-    score_reasons: list[str] = field(default_factory=list)
-
-    # Contribution discriminant. EmailCandidate is the original/canonical
-    # Contribution; `kind` lets the merge step dispatch it uniformly with the
-    # new profile fact types. Appended (defaulted) so existing construction is
-    # unaffected.
-    kind: ContributionKind = "email"
-
-
-# ---- profile fact types (new Contribution kinds) ----------------------------
-# Each carries `sources` (provenance), a `bind_tier` (set by lib.binding), and
-# `bind_reasons` (renderable receipts), mirroring EmailCandidate's shape so the
-# renderer and merge step can treat all contributions uniformly.
-
-
-@dataclass
-class WorkItem:
-    """Something the person published: a repo, article, talk, podcast, paper."""
-    title: str
-    kind: ContributionKind = "work_item"
-    url: str | None = None
-    item_type: Literal["repo", "article", "talk", "podcast", "paper", "other"] = "other"
-    published_at: str | None = None      # ISO date if known
-    summary: str | None = None
-    sources: list[Source] = field(default_factory=list)
-    bind_tier: BindTier = "unbound"
-    bind_reasons: list[str] = field(default_factory=list)
-
-
-@dataclass
-class Channel:
-    """An OBSERVED public reachability channel — not a ranked 'best way in'
-    (outside-voice Codex #7: we can observe channels, not reliably rank intent
-    fit). `rank_hint` is an optional ordering signal, evidence-based, not a
-    promise."""
-    channel_type: str                     # email|x_dm|linkedin|bluesky|contact_form|calendly
-    value: str                            # the address / url / handle
-    kind: ContributionKind = "channel"
-    evidence: str | None = None           # e.g. "X bio says DMs open"
-    rank_hint: float | None = None        # optional, observed ordering signal
-    sources: list[Source] = field(default_factory=list)
-    bind_tier: BindTier = "unbound"
-    bind_reasons: list[str] = field(default_factory=list)
-
-
-@dataclass
-class SocialLink:
-    """A social profile the person linked from their OWN profile/site. No
-    inference: only links the person published about themselves."""
-    platform: str                         # github|x|linkedin|bluesky|mastodon|instagram|...
-    url: str
-    kind: ContributionKind = "social_link"
-    handle: str | None = None
-    sources: list[Source] = field(default_factory=list)
-    bind_tier: BindTier = "unbound"
-    bind_reasons: list[str] = field(default_factory=list)
-
-
-@dataclass
-class RoleFact:
-    """An employer / title / tenure fact, optionally with company context."""
-    employer: str
-    kind: ContributionKind = "role"
-    title: str | None = None
-    since: str | None = None
-    until: str | None = None              # None == current
-    summary: str | None = None           # what the company does / why-now context
-    sources: list[Source] = field(default_factory=list)
-    bind_tier: BindTier = "unbound"
-    bind_reasons: list[str] = field(default_factory=list)
-
-
-@dataclass
-class ConsistencyNote:
-    """Text-only identity-consistency observation (narrowed from "anti-catfish"
-    per outside-voice Codex #4 — NO photo/image/reverse-image matching). A
-    mismatch is neutral evidence, never a scary "FAKE?" verdict.
-    e.g. 'GitHub name "Daniel Neil" vs plan "Dan" — diminutive, consistent'."""
-    note: str
-    kind: ContributionKind = "consistency_note"
-    severity: Literal["info", "mismatch"] = "info"
-    sources: list[Source] = field(default_factory=list)
-    bind_tier: BindTier = "unbound"
-    bind_reasons: list[str] = field(default_factory=list)
-
-
-# The tagged union (outside-voice D2): a heterogeneous list of these flows from
-# resolvers; the merge step dispatches on `.kind`.
-Contribution = Union[
-    EmailCandidate, WorkItem, Channel, SocialLink, RoleFact, ConsistencyNote,
-]
 
 
 @dataclass
@@ -331,55 +227,65 @@ class ResolverResult:
     status: Literal["ok", "empty", "timeout", "unavailable", "error"]
     elapsed_ms: int | None = None
     error_detail: str | None = None
-    # Profile expansion: resolvers that produce non-email facts return them here
-    # as a tagged Contribution list (email resolvers keep using `candidates`
-    # during the migration; both feed the same Profile). Defaulted so existing
-    # resolvers and their tests are unaffected. Typed as a covariant Sequence so
-    # a resolver may hand back e.g. a list[SocialLink] without an invariance
-    # complaint; nothing mutates this list in place (consumers read + dispatch).
-    contributions: Sequence[Contribution] = field(default_factory=list)
 
 
-# ---- Identity + Profile (the profile-expansion deliverable) ------------------
+# ---- run telemetry -----------------------------------------------------------
 
-# `Identity` is the resolved-person record. Today it is `Person` (which already
-# holds exactly the identity fields plus the gh_* dossier). The eng plan's
-# "slim Person down to identity-only" is a follow-up refactor kept separate so
-# each commit stays green; new code should reference `Identity`.
-Identity = Person
+# Bundle schema version. Bumped to 2 for the timing/degradation contract;
+# `--ground` rejects a stale v1 bundle and tells you to re-run --observations.
+BUNDLE_SCHEMA_VERSION = 2
+
+# The typed degradation contract: what a sensor actually did, independent of the
+# resolver-status enum. "ran" = produced a real reading (ok or honest-empty);
+# "skipped" = never invoked (no input, or SMTP unprobed); "degraded" = invoked
+# but couldn't complete (timeout, deadline-exceeded, unavailable, error).
+SensorStatus = Literal["ran", "skipped", "degraded"]
+
+_RESOLVER_TO_SENSOR_STATUS: dict[str, SensorStatus] = {
+    "ok": "ran",
+    "empty": "ran",
+    "timeout": "degraded",
+    "unavailable": "degraded",
+    "error": "degraded",
+}
+
+
+def sensor_status_of(resolver_status: str) -> SensorStatus:
+    """Map a ResolverResult.status onto the typed sensor-status contract."""
+    return _RESOLVER_TO_SENSOR_STATUS.get(resolver_status, "degraded")
 
 
 @dataclass
-class Profile:
-    """The profile-expansion deliverable: a resolved identity plus typed,
-    provenance-bearing sections. The email candidates remain their own list
-    (the original product); the new sections carry the expansion.
+class RunRecord:
+    """One sensor's run outcome — the single record that serializes three ways:
+    into the bundle (per-sensor timing the host reasons about), into a ledger
+    line (yield metadata only — never target names/addresses/handles), and into
+    a calibration row. Carries no target data by construction."""
+    sensor: str                            # "git_emails", "gh_profile", ...
+    status: SensorStatus                   # ran | skipped | degraded
+    elapsed_ms: int | None = None
+    outcome: str | None = None             # outcome class: "candidates" | "empty" | "<reason>"
+    reason: str | None = None              # for skipped/degraded: a short why
 
-    `add()` is the merge primitive (D2): dispatch a Contribution into its
-    section by `.kind`. `contributions()` flattens back for uniform iteration."""
-    identity: Person
-    emails: list[EmailCandidate] = field(default_factory=list)
-    work_items: list[WorkItem] = field(default_factory=list)
-    channels: list[Channel] = field(default_factory=list)
-    social_links: list[SocialLink] = field(default_factory=list)
-    roles: list[RoleFact] = field(default_factory=list)
-    consistency_notes: list[ConsistencyNote] = field(default_factory=list)
+    @classmethod
+    def from_resolver(cls, r: "ResolverResult") -> "RunRecord":
+        """Derive a RunRecord from a completed resolver result."""
+        status = sensor_status_of(r.status)
+        if status == "degraded":
+            outcome = r.status
+        elif r.candidates:
+            outcome = "candidates"
+        else:
+            outcome = "empty"
+        return cls(sensor=r.resolver, status=status, elapsed_ms=r.elapsed_ms,
+                   outcome=outcome, reason=r.error_detail)
 
-    def add(self, c: Contribution) -> None:
-        """Dispatch a contribution into the right section by kind."""
-        bucket = {
-            "email": self.emails,
-            "work_item": self.work_items,
-            "channel": self.channels,
-            "social_link": self.social_links,
-            "role": self.roles,
-            "consistency_note": self.consistency_notes,
-        }[c.kind]
-        bucket.append(c)
-
-    def contributions(self) -> list[Contribution]:
-        """All facts as a flat list, in a stable section order."""
-        return [
-            *self.emails, *self.work_items, *self.channels,
-            *self.social_links, *self.roles, *self.consistency_notes,
-        ]
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {"sensor": self.sensor, "status": self.status}
+        if self.elapsed_ms is not None:
+            d["elapsed_ms"] = self.elapsed_ms
+        if self.outcome is not None:
+            d["outcome"] = self.outcome
+        if self.reason is not None:
+            d["reason"] = self.reason
+        return d

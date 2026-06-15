@@ -1,20 +1,20 @@
 """lib/pattern_gen.py — name × domain × template → candidate emails.
 
-The fallback resolver. When discovery resolvers (git_emails, gh_profile,
-personal_site) come up dry, pattern generation is what remains. It is
-explicitly the lowest-trust source in the scorer's source weights
-(SOURCE_WEIGHTS["pattern"] = 0.15 baseline; corroboration via
-known-company-pattern inference multiplies up to ~0.65).
+The fallback sensor. When the discovery sensors (git_emails, gh_profile,
+personal_site) come up dry, pattern generation is what remains — and it is
+explicitly the lowest-trust source: a name×domain guess with no observation
+behind it, marked `Source(type="pattern")` so the host model treats it as a
+guess until a probe (SMTP / Google account) or a known-company pattern
+corroborates it.
 
-Behavior matches the legacy `verify_email.py`'s `_templates` /
-`infer_patterns` / `rank_candidates` logic, with three changes:
+Design notes:
 
 1. Name handling delegates to `lib.normalize` (NFKD fold, accent strip,
    name_variants for Eastern-order / German-transliteration).
 
 2. Output is a list of `EmailCandidate`s with `Source(type="pattern",
-   detail=...)`, not the legacy bare-list. The scorer treats pattern
-   sources distinctly.
+   detail=...)` so a pattern guess is always distinguishable from an
+   observed address in the bundle.
 
 3. Pattern inference uses *all* `manual_known` addresses whose domain
    matches one of the target domains, even if the names span multiple

@@ -177,9 +177,9 @@ def test_format_report_renders_metrics_table():
             ],
             "final_candidates": [{
                 "address": "x@y.com",
-                "belongs_to_person": 0.85,
-                "current_work_address": 0.90,
-                "deliverable": None,
+                "smtp_verdict": "verified",
+                "account_exists": "unprobed",
+                "sources": ["git_commit"],
             }],
             "ground_truth": {"work": "x@y.com"},
         },
@@ -222,3 +222,67 @@ def test_committed_fixture_loads_and_parses():
         assert "person_plan" in t
         # ground_truth slots must exist (even if null)
         assert "ground_truth" in t
+
+
+# Real public names that may appear in the committed fixture (their ground truth
+# is still null — only the NAME is public, no address is committed).
+_ALLOWLISTED_REAL_NAMES = {"Peter Steinberger"}
+# Synthetic test personas (accent/name-order folding) that aren't EXAMPLE-marked.
+_ALLOWLISTED_SYNTHETIC_NAMES = {"Étienne Dupont", "Wang Xiaoming"}
+
+
+def test_committed_public_fixture_leaks_no_real_ground_truth():
+    """T5 privacy gate (CI-enforced): the committed public fixture must NEVER carry
+    a real address. Every ground_truth value is null or contains no '@' — real
+    truths live only in the gitignored local override."""
+    public_path = Path(__file__).parent / "fixtures" / "calibration_targets.json"
+    data = json.loads(public_path.read_text())
+    for t in data["targets"]:
+        for slot, val in (t.get("ground_truth") or {}).items():
+            assert val is None or "@" not in str(val), \
+                f"{t['id']}.ground_truth.{slot} leaks an address into the public fixture"
+
+
+def test_committed_public_fixture_personas_are_example_or_allowlisted():
+    """T5: every committed persona is either EXAMPLE-marked, an allowlisted
+    synthetic normalize-test name, or an allowlisted real public name (whose truth
+    is still null) — so no unmarked real person rides along."""
+    public_path = Path(__file__).parent / "fixtures" / "calibration_targets.json"
+    data = json.loads(public_path.read_text())
+    for t in data["targets"]:
+        name = t["name"]
+        ok = ("EXAMPLE" in name
+              or name in _ALLOWLISTED_SYNTHETIC_NAMES
+              or name in _ALLOWLISTED_REAL_NAMES)
+        assert ok, f"persona {name!r} ({t['id']}) is neither EXAMPLE nor allowlisted"
+
+
+def test_aggregate_and_report_handle_the_n25_gate():
+    """The N>=25 calibration gate at the harness level: aggregate + format_report
+    over >=25 target results report the count correctly (the real >=25 targets
+    live in the local override; this proves the harness scales to the gate)."""
+    target_results = [
+        {"name": f"Target {i}", "id": f"t{i}", "ambiguity": "single_plausible_match",
+         "anchors_bound": 2,
+         "resolver_results": [{"resolver": "pattern_gen", "status": "ok",
+                               "candidate_count": 1, "candidate_addresses": [f"x{i}@e.com"],
+                               "elapsed_ms": 5, "error_detail": None}],
+         "final_candidates": [], "ground_truth": {}}
+        for i in range(25)
+    ]
+    metrics = aggregate(target_results)
+    report = format_report(target_results, metrics)
+    assert "Targets measured: **25**" in report
+
+
+def test_readme_carries_calibration_methodology_and_retention():
+    """T-minor A + T5: the README frames numbers as measurements (not accuracy
+    claims), discloses local-fixture reproducibility, and states the
+    deletion-on-request retention line — so the honest story can't silently
+    regress to a vibes number."""
+    raw = (Path(__file__).resolve().parent.parent / "README.md").read_text().lower()
+    readme = " ".join(raw.split())  # normalize line-wrapping
+    assert "measurements, not accuracy claims" in readme
+    assert "measured on n targets" in readme
+    assert "calibration_targets.local.json" in readme
+    assert "deleted on the subject's request" in readme

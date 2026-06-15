@@ -38,22 +38,15 @@ from typing import Any
 
 from . import _gh_api
 from ._gh_api import GhCaller
-from .normalize import normalize_email
+from .normalize import domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 _DEFAULT_LOOKBACK_DAYS = 90
 _DEFAULT_REPO_LIMIT = 30  # per-repo pass cost; cap to keep latency bounded
 
-_NOISE_DOMAINS = (
-    "users.noreply.github.com",
-    "example.com",
-    "example.org",
-    "example.net",
-    "localhost",
-    "local",
-    "invalid",
-    "test",
-)
+# GitHub's privacy-noreply domain is git-specific; the reserved/placeholder set
+# is shared (lib.normalize.RESERVED_NOISE_DOMAINS via domain_is_noise).
+_EXTRA_NOISE_DOMAINS = ("users.noreply.github.com",)
 _NOISE_LOCALPART_PREFIXES = ("noreply", "no-reply")
 _BOT_MARKERS = ("[bot]", "dependabot", "github-actions", "renovate", "snyk-bot")
 
@@ -71,7 +64,7 @@ def _is_noise_email(email: str) -> bool:
     local, _, domain = email.lower().partition("@")
     if not local or not domain:
         return True
-    if any(domain == d or domain.endswith("." + d) for d in _NOISE_DOMAINS):
+    if domain_is_noise(domain, extra=_EXTRA_NOISE_DOMAINS):
         return True
     if any(local.startswith(lp) for lp in _NOISE_LOCALPART_PREFIXES):
         return True
@@ -139,12 +132,13 @@ def _harvest_from_events(
 def _harvest_from_repos(
     repos: Any,
     cutoff: datetime,
-    handle: str,
+    quoted_handle: str,
     caller: GhCaller,
     out: dict[str, list[Source]],
     repo_limit: int = _DEFAULT_REPO_LIMIT,
 ) -> None:
-    """Walk the /repos response, fetching one commit per repo for `handle`.
+    """Walk the /repos response, fetching one commit per repo authored by
+    `quoted_handle` (percent-encoded by the caller for the `author=` query).
 
     Catches infrequent pushers whose activity is outside the /events
     window. Limited to repo_limit repos to keep the second-pass cost
@@ -173,7 +167,7 @@ def _harvest_from_repos(
             continue
         try:
             commits = caller(
-                f"/repos/{owner}/{name}/commits?author={handle}&per_page=1"
+                f"/repos/{owner}/{name}/commits?author={quoted_handle}&per_page=1"
             )
         except (subprocess.SubprocessError, urllib.error.URLError,
                 json.JSONDecodeError, OSError):
@@ -248,11 +242,12 @@ def fetch_git_emails(
     by_addr: dict[str, list[Source]] = {}
 
     try:
-        events = caller(f"/users/{handle}/events?per_page=100")
+        quoted_handle = _gh_api.quote_handle(handle)
+        events = caller(f"/users/{quoted_handle}/events?per_page=100")
         _harvest_from_events(events, cutoff, by_addr)
 
-        repos = caller(f"/users/{handle}/repos?per_page=100&type=owner")
-        _harvest_from_repos(repos, cutoff, handle, caller, by_addr, repo_limit)
+        repos = caller(f"/users/{quoted_handle}/repos?per_page=100&type=owner")
+        _harvest_from_repos(repos, cutoff, quoted_handle, caller, by_addr, repo_limit)
     except subprocess.TimeoutExpired as e:
         elapsed = int((datetime.now(timezone.utc) - start).total_seconds() * 1000)
         return ResolverResult(

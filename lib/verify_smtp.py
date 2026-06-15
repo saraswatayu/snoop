@@ -1,30 +1,29 @@
 """lib/verify_smtp.py — SMTP RCPT probing for candidate addresses.
 
-Refactored from the legacy verify_email.py (still kept at the skill root
-as a back-compat CLI). Three structural changes vs legacy:
+The SMTP RCPT handshake is one verification signal the host model reasons over;
+it never sends mail. Two structural choices:
 
 1. **Skip personal-provider domains entirely.** Probing @gmail.com,
    @yahoo.com, @icloud.com, @outlook.com, @hotmail.com, @protonmail.com,
    @proton.me, etc. is useless — mass-market providers either block
    RCPT, return greylist 451 to non-recognized senders, or just
-   blackhole the connection — AND it tips spam filters. The score
-   layer treats a personal-provider unprobed verdict as None (abstain
-   with a deliverability-is-high-IF-mailbox-exists note).
+   blackhole the connection — AND it tips spam filters. Those candidates
+   carry smtp_verdict="unprobed" and the host model treats SMTP as
+   uninformative there.
 
-2. **Inconclusive carries zero information.** Per Codex c1, RCPT
-   inconclusive on Google/M365 (the dominant business inbox in 2026)
-   tells us NOTHING about whether the mailbox exists. The scorer's
-   `deliverable` field abstains on inconclusive — no false-confidence
-   floor. mx_provider is exposed on the candidate so the renderer can
-   explain ("SMTP inconclusive (M365 blocks RCPT)").
+2. **Inconclusive carries zero information.** RCPT inconclusive on
+   Google/M365 (the dominant business inbox in 2026) tells us NOTHING
+   about whether the mailbox exists. The observation reports it honestly
+   as `smtp=inconclusive`; mx_provider is exposed so the host model can
+   explain it ("SMTP inconclusive (M365 blocks RCPT)") and lean on the
+   Google account probe instead.
 
-3. **EmailCandidate is the unit, not raw strings.** The legacy code
-   took candidate strings and produced JSON verdicts; the new function
+3. **EmailCandidate is the unit, not raw strings.** verify_candidates
    mutates EmailCandidate objects in place, setting smtp_verdict and
-   mx_provider. The 3-field score is computed separately by lib/score.
+   mx_provider; the host model reads those verdicts off the bundle.
 
-The catch-all sentinel + connection-reuse logic from the legacy
-`DomainProbe` class is preserved unchanged — that mechanism is correct
+The catch-all sentinel + connection-reuse logic in the `DomainProbe`
+class is the original mechanism, preserved unchanged — it is correct
 and well-tested.
 
 Per-domain daily budget (optional) caps probes to avoid spammy patterns
@@ -37,7 +36,6 @@ from __future__ import annotations
 import json
 import os
 import random
-import re
 import smtplib
 import socket
 import string
@@ -47,10 +45,15 @@ from pathlib import Path
 from typing import Iterable, Literal
 
 from .schema import EmailCandidate
-from .score import is_personal_provider
+# SYNTAX_RE re-exported from lib.normalize (the single home for the address
+# validator) so existing callers/tests can keep importing verify_smtp.SYNTAX_RE.
+from .normalize import SYNTAX_RE, is_personal_provider  # noqa: F401
+from .fetch import is_public_host, resolve_public_ip
 
-
-SYNTAX_RE = re.compile(r"^[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}$")
+# Bound the MX DNS lookup so a blackholing nameserver can't stall a probe past
+# the caller's timeout budget (the smtplib socket below is already bounded, but
+# resolution was not).
+_DNS_TIMEOUT_SEC = 5.0
 
 
 def detect_provider(mx_host: str) -> str:
@@ -71,14 +74,18 @@ def detect_provider(mx_host: str) -> str:
     return "other"
 
 
-def get_mx(domain: str) -> tuple[str | None, str | None]:
-    """Return (mx_host, None) on success or (None, error_string)."""
+def get_mx(domain: str, *,
+           lifetime: float = _DNS_TIMEOUT_SEC) -> tuple[str | None, str | None]:
+    """Return (mx_host, None) on success or (None, error_string).
+
+    `lifetime` bounds the total DNS time so a slow/blackholing nameserver
+    can't stall the probe indefinitely."""
     try:
         import dns.resolver  # type: ignore
     except ImportError:
         return None, "dnspython not installed (pip install dnspython)"
     try:
-        records = dns.resolver.resolve(domain, "MX")
+        records = dns.resolver.resolve(domain, "MX", lifetime=lifetime)
         if not records:
             return None, "no MX records"
         best = min(records, key=lambda r: r.preference)
@@ -169,17 +176,14 @@ class ProbeBudget:
 
 class DomainProbe:
     """One MX lookup + one catch-all sentinel probe + one reused SMTP
-    connection per domain.
-
-    Preserved unchanged from the legacy verify_email.py — that mechanism
-    is correct.
-    """
+    connection per domain."""
 
     def __init__(self, domain: str, mail_from: str, timeout: int):
         self.domain = domain
         self.mail_from = mail_from
         self.timeout = timeout
         self.mx: str | None = None
+        self._mx_ip: str | None = None  # the validated public IP we pin the connect to
         self.provider: str | None = None
         self.catch_all: bool | None = None
         self.error: str | None = None
@@ -188,7 +192,13 @@ class DomainProbe:
     def _open(self) -> None:
         self._server = smtplib.SMTP(timeout=self.timeout)
         assert self.mx is not None
-        self._server.connect(self.mx)
+        assert self._mx_ip is not None  # pinned by _connect before _open runs
+        # Connect to the validated IP, not the name: smtplib.connect would
+        # re-resolve a hostname and a rebinding MX could flip it to a private
+        # address between the is_public_host check and here. EHLO sends the LOCAL
+        # hostname (no server-name dependency), and the probe is plain SMTP (no
+        # TLS / cert), so connecting by IP is correct.
+        self._server.connect(self._mx_ip)
         self._server.ehlo_or_helo_if_needed()
         self._server.mail(self.mail_from)
 
@@ -198,6 +208,22 @@ class DomainProbe:
             self.error = f"no usable MX for {self.domain}: {err}"
             return False
         self.provider = detect_provider(self.mx)
+        # SSRF guard: the MX host comes from the candidate domain's own DNS
+        # (target-influenced). Refuse to open a socket to a private / loopback /
+        # link-local / reserved address — that would be an internal port-probe,
+        # not a deliverability check. lib.fetch hardens HTTP the same way; SMTP
+        # must not be a hole around it.
+        if not is_public_host(self.mx):
+            self.error = f"MX host not a public address: {self.mx}"
+            return False
+        # Pin the validated public IP and connect to THAT, not the name. Without
+        # this, smtplib.connect(self.mx) re-resolves the hostname, so a rebinding
+        # MX could answer public for is_public_host and private for the connect
+        # (the HTTP path pins the same way in lib.fetch._pinned_https_open).
+        self._mx_ip = resolve_public_ip(self.mx)
+        if self._mx_ip is None:
+            self.error = f"MX host did not resolve to a public address: {self.mx}"
+            return False
         try:
             self._open()
         except (smtplib.SMTPException, socket.error, OSError) as e:
@@ -282,9 +308,9 @@ def verify_candidates(
         timeout: Per-domain SMTP socket timeout in seconds.
         skip_personal_providers: If True (default), addresses on Gmail/
             iCloud/Yahoo/M365-consumer/etc. are left with smtp_verdict=
-            "unprobed" (the scorer treats this as None deliverable with
-            a hint string). Set False to force-probe — useful only for
-            self-hosted-provider edge cases.
+            "unprobed" (the host model treats SMTP as uninformative there).
+            Set False to force-probe — useful only for self-hosted-provider
+            edge cases.
         budget: Optional per-domain daily probe budget. If provided and
             exhausted for a domain, candidates on that domain are left
             "unprobed."
@@ -317,7 +343,7 @@ def verify_candidates(
             continue
         domain = c.address.rsplit("@", 1)[1].lower()
 
-        # Skip personal providers — the scorer downstream knows what to
+        # Skip personal providers — the host model downstream knows what to
         # do with an unprobed personal-provider address.
         if skip_personal_providers and is_personal_provider(domain):
             c.smtp_verdict = "unprobed"

@@ -308,6 +308,20 @@ def test_fetch_marks_verified_when_account_exists_with_profile():
     assert "Peter Steinberger" in src.detail
 
 
+def test_fetch_captures_gaia_id_on_verified_candidate():
+    """The Gaia (account) id is stored on the candidate, not just truncated into
+    the source detail — it's the primitive the host clusters verified hits by."""
+    body = _people_response({"personId": "10876228334455"})
+    http = make_http_get({"people/lookup": (200, body)})
+    cands = [EmailCandidate(address="jibben@stripe.com")]
+    ga.fetch_google_account(
+        cands, cookie_loader=make_cookies(), http_get=http, now=NOW,
+        target_domains=["stripe.com"],
+    )
+    assert cands[0].account_exists == "verified"
+    assert cands[0].gaia_id == "10876228334455"
+
+
 def test_real_display_name_keeps_a_real_name():
     assert ga._real_display_name("Jordan Vega", "jvega@globex.com") == "Jordan Vega"
 

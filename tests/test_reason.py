@@ -1,17 +1,11 @@
-"""Tests for lib/reason.py — the LLM-native reasoning step.
+"""Tests for lib/reason.py — build_evidence (the observation bundle).
 
-No network: a fake Anthropic client returns a canned structured payload. The
-tests pin the two guarantees that make this safe — the call is TOOL-LESS, and
-every returned fact is grounded against a real observation (lib.ground) — plus
-the SDK call shape (model, adaptive thinking, cached instructions, structured
-output).
+No network: build_evidence is a pure flatten of the resolved person + scored
+candidates into a numbered, typed, cited observation list that the host model
+reasons over.
 """
 
 from __future__ import annotations
-
-import json
-
-import pytest
 
 from lib import reason
 from lib.schema import EmailCandidate, Employer, GitHubRepo, Person, Source
@@ -40,46 +34,10 @@ def _person():
 
 def _candidate():
     return EmailCandidate(
-        address="alice@corp.com", belongs_to_person=0.8, smtp_verdict="verified",
+        address="alice@corp.com", smtp_verdict="verified",
         sources=[Source(type="gh_profile", url="https://github.com/alice",
                         observed_at=NOW, detail="profile email")],
     )
-
-
-class _Usage:
-    input_tokens = 100
-    output_tokens = 50
-    cache_read_input_tokens = 0
-    cache_creation_input_tokens = 80
-
-
-class _Block:
-    def __init__(self, text):
-        self.type = "text"
-        self.text = text
-
-
-class _Resp:
-    def __init__(self, text):
-        self.content = [_Block(text)]
-        self.usage = _Usage()
-
-
-class _Messages:
-    def __init__(self, outer):
-        self._outer = outer
-
-    def create(self, **kwargs):
-        self._outer.calls.append(kwargs)
-        return _Resp(json.dumps(self._outer.payload))
-
-
-class FakeClient:
-    """Stand-in for anthropic.Anthropic(); records create() kwargs."""
-    def __init__(self, payload):
-        self.payload = payload
-        self.calls = []
-        self.messages = _Messages(self)
 
 
 # --- build_evidence ----------------------------------------------------------
@@ -104,7 +62,7 @@ def test_build_evidence_surfaces_google_display_name_with_name_match_yes():
     """The text disambiguator: a Google-confirmed account whose display name
     matches the target shows name_match=yes for the host model to bind on."""
     cand = EmailCandidate(
-        address="alicesmith@corp.com", belongs_to_person=0.85,
+        address="alicesmith@corp.com",
         smtp_verdict="catch_all", account_exists="verified",
         account_display_name="Alice Smith",
     )
@@ -117,7 +75,7 @@ def test_build_evidence_flags_name_match_no_for_namesake():
     """A real-but-different account on the same tenant (e.g. jdoe@ vs jdoeh@)
     must show name_match=no so it can be dropped — text, not faces."""
     cand = EmailCandidate(
-        address="alice@corp.com", belongs_to_person=0.4,
+        address="alice@corp.com",
         smtp_verdict="catch_all", account_exists="verified",
         account_display_name="Alice Wong",
     )
@@ -154,74 +112,206 @@ def test_build_evidence_empty_candidates_still_describes_identity():
     assert not any(o.type == "email_candidate" for o in obs)
 
 
-# --- reason_profile ----------------------------------------------------------
+# --- structured data mirror ---------------------------------------------------
 
 
-def _payload(facts, summary="Alice Smith, engineer at Corp."):
-    return {"summary": summary, "identity_confidence": 0.9, "facts": facts}
+def test_email_candidate_carries_structured_data():
+    """The host model reads fields off `data` instead of re-parsing the sentence;
+    every source URL survives (the content line keeps only one for readability)."""
+    cand = EmailCandidate(
+        address="alice@corp.com", smtp_verdict="verified",
+        sources=[
+            Source(type="git_commit", url="https://github.com/x/y/commit/abc",
+                   observed_at=NOW, detail="commit"),
+            Source(type="gh_profile", url="https://github.com/alice",
+                   observed_at=NOW, detail="profile email"),
+        ],
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert o.data is not None
+    assert o.data["address"] == "alice@corp.com"
+    assert o.data["smtp"] == "verified"
+    assert {s["type"] for s in o.data["sources"]} == {"git_commit", "gh_profile"}
+    # both source URLs survive in data (content keeps just one)
+    urls = {s["url"] for s in o.data["sources"]}
+    assert "https://github.com/x/y/commit/abc" in urls
+    assert "https://github.com/alice" in urls
 
 
-def test_reason_profile_grounds_and_maps():
-    # one fact cites a real candidate obs; one cites a bogus id and must drop.
-    person, cand = _person(), _candidate()
-    obs = reason.build_evidence(person, [cand])
-    email_id = next(o.id for o in obs if o.type == "email_candidate")
-    payload = _payload([
-        {"kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
-         "confidence": 0.9, "evidence_ids": [email_id], "reasoning": "profile email"},
-        {"kind": "work_item", "label": "", "value": "ghost", "detail": "",
-         "confidence": 0.8, "evidence_ids": ["o999"], "reasoning": "hallucinated"},
-    ])
-    client = FakeClient(payload)
-
-    profile = reason.reason_profile(person, [cand], client=client)
-
-    assert profile.summary.startswith("Alice Smith")
-    assert profile.identity_confidence == 0.9
-    kinds = [f.kind for f in profile.facts]
-    assert kinds == ["email"]                       # the o999 fact was dropped
-    assert profile.facts[0].verified is True        # value appears in the cited obs
-    assert profile.usage["input_tokens"] == 100
+def test_structured_data_mirrors_google_name_match():
+    cand = EmailCandidate(
+        address="alicesmith@corp.com", account_exists="verified",
+        account_display_name="Alice Smith",
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert o.data["google_display_name"] == "Alice Smith"
+    assert o.data["name_match"] is True
 
 
-def test_reason_profile_call_is_tool_less():
-    client = FakeClient(_payload([]))
-    reason.reason_profile(_person(), [_candidate()], client=client)
-    kwargs = client.calls[0]
-    assert "tools" not in kwargs            # the exfiltration control
-    assert "tool_choice" not in kwargs
+def test_non_email_observations_have_no_data():
+    obs = reason.build_evidence(_person(), [])
+    assert all(o.data is None for o in obs)
 
 
-def test_reason_profile_uses_opus_with_cached_instructions():
-    client = FakeClient(_payload([]))
-    reason.reason_profile(_person(), [], client=client)
-    kwargs = client.calls[0]
-    assert kwargs["model"] == "claude-opus-4-8"
-    assert kwargs["thinking"] == {"type": "adaptive"}
-    # structured output + effort both live under output_config
-    assert kwargs["output_config"]["format"]["type"] == "json_schema"
-    assert kwargs["output_config"]["effort"] == "high"
-    # frozen instruction block is cached (prompt-caching prefix)
-    assert kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
-    assert "snoop" in kwargs["system"][0]["text"]
+# --- Gaia clustering (the locked-tenant disambiguator) -----------------------
 
 
-def test_reason_profile_appends_extra_observations_with_unique_ids():
-    person, cand = _person(), _candidate()
-    extra = [reason.Observation(id="x", type="web_search",
-                                content="talk on widgets", source_url="https://conf/x")]
-    client = FakeClient(_payload([]))
-    profile = reason.reason_profile(person, [cand], client=client, extra_observations=extra)
-    ids = [o.id for o in profile.observations]
-    assert len(ids) == len(set(ids))                 # all unique
-    assert any(o.type == "web_search" for o in profile.observations)
-    # the rendered evidence text in the call includes the appended obs
-    assert "talk on widgets" in client.calls[0]["messages"][0]["content"]
+def _cluster_obs(obs):
+    return next((o for o in obs if o.type == "account_cluster"), None)
 
 
-def test_reasoning_unavailable_propagates(monkeypatch):
-    def _boom():
-        raise reason.ReasoningUnavailable("no creds")
-    monkeypatch.setattr(reason, "_default_client", _boom)
-    with pytest.raises(reason.ReasoningUnavailable):
-        reason.reason_profile(_person(), [], client=None)
+def test_email_candidate_mirrors_gaia_id():
+    cand = EmailCandidate(address="jibben@stripe.com", account_exists="verified",
+                          gaia_id="10876228334455")
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert o.data["gaia_id"] == "10876228334455"
+    assert "gaia=10876228" in o.content   # truncated in the human line, grounds
+
+
+def test_no_cluster_observation_for_single_verified():
+    """Clustering needs ≥2 verified-with-gaia hits; one alone has nothing to group."""
+    cand = EmailCandidate(address="jibben@stripe.com", account_exists="verified",
+                          gaia_id="111")
+    assert _cluster_obs(reason.build_evidence(_person(), [cand])) is None
+
+
+def test_same_gaia_collapses_to_one_account():
+    """Two verified addresses sharing a Gaia id are aliases of ONE person — the
+    cluster note collapses them, no namesake."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", account_exists="verified", gaia_id="555"),
+        EmailCandidate(address="jh@stripe.com", account_exists="verified", gaia_id="555"),
+    ]
+    o = _cluster_obs(reason.build_evidence(_person(), cands))
+    assert o is not None
+    assert o.data["distinct_account_count"] == 1
+    assert "ONE account" in o.content
+    assert "jh@stripe.com = jibben@stripe.com" in o.content  # sorted, joined as aliases
+
+
+def test_distinct_gaia_flags_namesake():
+    """Two verified addresses with DIFFERENT Gaia ids are different people — the
+    cluster note raises the namesake flag for the host to split."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", account_exists="verified", gaia_id="555"),
+        EmailCandidate(address="jh@stripe.com", account_exists="verified", gaia_id="999"),
+    ]
+    o = _cluster_obs(reason.build_evidence(_person(), cands))
+    assert o is not None
+    assert o.data["distinct_account_count"] == 2
+    assert "DISTINCT accounts" in o.content and "namesake risk" in o.content
+    gaias = {c["gaia_id"] for c in o.data["clusters"]}
+    assert gaias == {"555", "999"}
+
+
+def test_cluster_ignores_unverified_and_gaialess():
+    """Only verified hits that actually carry a Gaia id cluster — a not_found or a
+    verified-without-gaia hit can't be grouped."""
+    cands = [
+        EmailCandidate(address="jibben@stripe.com", account_exists="verified", gaia_id="555"),
+        EmailCandidate(address="jhillen@stripe.com", account_exists="not_found"),
+        EmailCandidate(address="j.hillen@stripe.com", account_exists="verified"),  # no gaia
+    ]
+    # Only one verified-with-gaia → no cluster note.
+    assert _cluster_obs(reason.build_evidence(_person(), cands)) is None
+
+
+# --- employer corroboration provenance ----------------------------------------
+
+
+def _employer_obs(obs):
+    return [o for o in obs if o.type == "employer"]
+
+
+def test_employer_without_source_is_declared_only():
+    person = Person(name="X", employer=Employer(name="Corp", domains=["corp.com"]))
+    o = _employer_obs(reason.build_evidence(person, []))[0]
+    assert "declared current employer: Corp" in o.content
+    assert o.source_url is None
+
+
+def test_employer_with_source_url_is_citable():
+    """When the host set employer.source_url (where it confirmed the employer),
+    the observation says 'confirmed via source' and carries the URL — so a role
+    fact cites real corroboration, not just the host's plan declaration."""
+    person = Person(
+        name="X",
+        employer=Employer(name="Simile", domains=["simile.ai"],
+                          source_url="https://www.bloomberg.com/news/simile"),
+    )
+    o = _employer_obs(reason.build_evidence(person, []))[0]
+    assert "current employer confirmed via source: Simile" in o.content
+    assert o.source_url == "https://www.bloomberg.com/news/simile"
+
+
+def test_former_employer_source_url_is_citable():
+    person = Person(
+        name="X",
+        former_employers=[Employer(name="Figma", domains=["figma.com"], until="2026",
+                                   source_url="https://lennys/figma")],
+    )
+    o = _employer_obs(reason.build_evidence(person, []))[0]
+    assert "former employer confirmed via source: Figma" in o.content
+    assert o.source_url == "https://lennys/figma"
+
+
+# --- channel-hint confirmation ------------------------------------------------
+
+
+def _channel_obs(obs):
+    return [o for o in obs if o.type == "channel_hint"]
+
+
+def test_bare_channel_hint_is_declared():
+    person = Person(name="X", channel_hints={"linkedin": "https://linkedin.com/in/x"})
+    o = _channel_obs(reason.build_evidence(person, []))[0]
+    assert "declared channel hint: linkedin = https://linkedin.com/in/x" in o.content
+    assert o.source_url == "https://linkedin.com/in/x"
+
+
+def test_confirmed_channel_hint_carries_basis():
+    """When the host confirmed a public profile during resolution, the channel is
+    emitted as 'confirmed channel' with the basis and a citable URL."""
+    person = Person(name="X", channel_hints={
+        "linkedin": {"url": "https://linkedin.com/in/x",
+                     "confirmed_via": "public profile: name + Simile match"},
+    })
+    o = _channel_obs(reason.build_evidence(person, []))[0]
+    assert "confirmed channel: linkedin = https://linkedin.com/in/x" in o.content
+    assert "public profile: name + Simile match" in o.content
+    assert o.source_url == "https://linkedin.com/in/x"
+
+
+def test_non_http_channel_hint_has_no_source_url():
+    person = Person(name="X", channel_hints={"x_dms_open": True})
+    o = _channel_obs(reason.build_evidence(person, []))[0]
+    assert o.source_url is None
+
+
+# --- mx provider / M365 honesty -----------------------------------------------
+
+
+def test_m365_inconclusive_surfaces_lean_on_channel_hints():
+    """On M365 there's no existence oracle, so an inconclusive RCPT is surfaced
+    with the provider + explicit 'lean on channel hints' guidance."""
+    cand = EmailCandidate(
+        address="exec@corp.com", smtp_verdict="inconclusive", mx_provider="microsoft",
+        sources=[Source(type="pattern", url=None, observed_at=NOW, detail="guess")],
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert "mx=microsoft" in o.content
+    assert "no existence oracle" in o.content
+    assert o.data["mx_provider"] == "microsoft"
+    assert "channel hints" in o.data["smtp_note"]
+
+
+def test_mx_provider_surfaced_without_m365_note_for_other_providers():
+    cand = EmailCandidate(
+        address="a@corp.com", smtp_verdict="verified", mx_provider="other",
+        sources=[Source(type="gh_profile", url="https://github.com/a",
+                        observed_at=NOW, detail="profile")],
+    )
+    o = _email_obs(reason.build_evidence(_person(), [cand]))
+    assert "mx=other" in o.content
+    assert "existence oracle" not in o.content  # the M365-specific note only on microsoft
+    assert "smtp_note" not in o.data

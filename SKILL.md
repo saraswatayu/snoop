@@ -1,64 +1,63 @@
 ---
 name: snoop
-description: Use when the user wants to find, guess, or verify someone's email address. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify this email address". Resolves a person across public sources (GitHub commits, profile, personal-site mailto: anchors, name-pattern fallback), gathers provenance-bearing observations, and helps you write a contact decision card. SMTP probing is one verification signal among many, not the engine.
+description: Use when the user wants to find, guess, or verify someone's email address, or build a contact profile for outreach. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify jane@acme.com". snoop is the sensor — it does the I/O you can't (git commits, the GitHub API, personal-site mailto: anchors, the SMTP RCPT handshake, the Google People API, MX lookups) and emits a typed observation bundle. You are the analyst: you reason over the bundle and a tiny deterministic check (`--ground`) verifies your citations.
 ---
 
 # snoop
 
-## Overview
+## What this does
 
-Build a **person profile for outreach**: who they are, the best way to reach
-them, and the context to write a good first message. The reachable email leads
-the output (the "what do I paste" answer is first), profile sections follow.
+Build a **contact profile for outreach**: who the person is, the best email to
+reach them, and the context for a good first message. The reachable email leads;
+profile context follows.
 
 **snoop is a sensor; you are the analyst.** snoop's irreducible job is the I/O
 you cannot do yourself — git-commit emails, the GitHub REST API, personal-site
-HTML, the SMTP RCPT handshake, the Chrome-cookie-authed Google People API, MX
-lookups. It performs those, and emits a **typed observation bundle**: raw
-readings, each with a source URL and any probe verdict. **You** — the model
-already running, already resolving the person and able to run WebSearch — reason
-over that bundle: pick the email, judge the namesake, build the profile, write
-the prose, mark the provenance. A tiny deterministic check (`--ground`) verifies
-your citations trace to real observations.
+HTML, the SMTP `RCPT` handshake, the Chrome-cookie-authed Google People API, MX
+lookups. It performs those and emits a **typed observation bundle**: raw
+readings, each with a `source_url`, a structured `data` field, and any probe
+verdict. **You** — already running, able to run WebSearch — reason over that
+bundle: pick the email, judge the namesake, write the prose, mark the
+provenance. `--ground` then checks that every claim cites a real observation.
 
-Why this split: the I/O genuinely needs code (you can't open a socket and speak
+Why the split: the I/O genuinely needs code (you can't open a socket and speak
 SMTP). The reasoning is yours because you are best at it, you are already here,
 and you handle the long tail a rule table can't (name variants, company
-rebrands, intent ranking). A bundled script making its *own* model call to
-reason would be redundant — you are the reasoner.
+rebrands, intent ranking).
 
-**The loop:**
+## The loop
 
 ```
-1. You resolve the target -> a --person-plan JSON (+ optional WebSearch)
-2. snoop --observations  -> the sensor bundle (the I/O you can't do)
-3. You reason over the bundle -> facts (each citing observation ids) + prose
-4. snoop --ground         -> drops uncited facts, renders the grounded card
+1. You resolve the target  → a --person-plan JSON (+ optional WebSearch)
+2. snoop --observations     → the sensor bundle (the I/O you can't do)
+3. You reason over the bundle → facts (each citing observation ids) + prose
+4. snoop --ground           → drops uncited facts, renders the grounded card
 5. You present the card
 ```
 
-**What's in scope (and what isn't).** Every fact you surface must be
-self-published under the person's own real identity (or directly user-supplied).
-Do NOT de-anonymize pseudonymous accounts, do NOT target home address / live
-location / family, do NOT infer sensitive attributes (health, sexuality,
-politics, religion). Identity "consistency" observations are text-only and
-neutral. One target per invocation, no bulk.
+`snoop.py` is in this skill's own directory — resolve that directory at runtime;
+don't hardcode an absolute path.
 
-**Profile photos are human-review artifacts, never an automated match.** snoop
-may *surface* a self-published avatar (e.g. the Google account photo) as a link
-for a person to eyeball against another self-published photo (e.g. LinkedIn) —
-that's presenting evidence for human judgment. snoop and the host model must NOT
-compute face/biometric similarity, score a match, or assert identity from a
-face. Disambiguate with the **text** `name_match` signal (the Google display
-name vs the target); treat the photo as something a human confirms, and never as
-a verdict you emit.
+## Step 1 — Resolve the person, then build the `--person-plan` (you)
 
-## Step 1 — Build the `--person-plan` (you, the model)
+**This is the highest-leverage step — don't skimp.** snoop has no bundled search;
+the sensors only find what you feed them. Before sensing, do a focused
+**resolution pass** with WebSearch (and WebFetch on the hits) to learn who this
+person is and what they have online, then pour it into the plan:
 
-This is your job. You know context the sensors don't: nicknames, employer
-chronology, role hints, name spellings. Pass it structured.
+- their **personal site / domain** → `personal_domains` (fires the `personal_site`
+  `mailto:` sensor — often their address directly — and is a strong identity
+  anchor). This is the single highest-yield thing to find.
+- their **primary socials** (X, LinkedIn, GitHub, HN) → `handles` / `channel_hints`
+  (WebFetch the public profile and match name + employer → pass it `confirmed`).
+- their **current employer + domain**, with the URL you confirmed it from →
+  `employer` + `employer.source_url`.
+- a few **body-of-work** items (talks, articles, papers) → `work_search_results`.
 
-Minimum useful plan:
+A name + company alone (no site, no handle) leaves the sensors with only
+pattern-guessing — so spend the searches here. You know context the sensors
+don't: nicknames, employer chronology, handles. Pass it all structured. Minimum
+useful plan:
 
 ```json
 {
@@ -71,17 +70,29 @@ Minimum useful plan:
 
 Optional fields:
 
-- `handles.x` / `handles.hn` — recorded; only `github` is validated in v1
-- `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023"}]`
+- `employer.source_url` / `former_employers[].source_url`: where you **confirmed
+  the employer during resolution** (the news article, their profile, the company
+  page). Set it whenever you learned the employer from WebSearch rather than the
+  user — the role/employer facts then cite that corroboration instead of just
+  your own declaration. You almost always resolve the employer by searching, so
+  almost always set this.
+- `former_employers`: `[{"name": "PSPDFKit", "domains": ["pspdfkit.com"], "until": "2023", "source_url": "https://..."}]`
+- `handles.hn`: a Hacker News username → snoop reads the public email off their
+  HN profile (high-yield on YC/founder targets). It's an untrusted hint, so
+  facts from it are `[?]` at most.
+- `packages`: `[{"registry": "npm"|"pypi", "name": "<package>"}]` — packages the
+  person published. snoop pulls the publisher/author email from the registry
+  (near-100% precision when present). Supply these when you know them.
 - `channel_hints`: `{"x_dms_open": true, "linkedin": "<url>", "prefers": "x"}` —
-  populate whenever you learned a backup channel while resolving the person
-  (found them via LinkedIn → `{"linkedin": "<url>"}`; saw "DMs open" on their X
-  bio → `{"x_dms_open": true}`).
-- `name_variants`: explicit overrides for non-Latin spellings normalization misses
-- `work_search_results`: the body-of-work feed (T8). snoop has no bundled search
-  provider on purpose — **you are the provider.** Run your built-in WebSearch
-  (≤2 queries, e.g. `"<name>" talk OR podcast OR conference`, `"<name>" article
-  OR paper`) and pass the hits:
+  backup channels you learned while resolving. snoop has no LinkedIn/X sensor
+  (auth-walled, ToS-laden), but you can WebFetch a public profile preview and
+  match it to the target; pass the confirmation so the fact cites it, not a bare
+  declaration: `{"linkedin": {"url": "<url>", "confirmed_via": "public profile: name + employer match"}}`
+  (a confirmed self-published profile is a strong cross-link → `[+]`).
+- `name_variants`: explicit overrides for non-Latin spellings normalization misses.
+- `work_search_results`: the body-of-work feed. snoop has no bundled search
+  provider — **you are the provider.** Run your built-in WebSearch (a query or
+  two — published work is one of the blind resolution angles) and pass the hits:
   ```json
   "work_search_results": [
     {"title": "...", "url": "https://...", "item_type": "talk|article|podcast|paper|other",
@@ -89,131 +100,180 @@ Optional fields:
      "crosslink_url": "https://<their-bound-domain-or-profile>/..."}
   ]
   ```
-  These become `web_search` observations. Set `crosslink_url` only when you
-  actually verified the page ties to THIS person; a result you can't tie to a
-  bound signal is a namesake risk and you must mark any fact from it `[?]` at
-  most (never `[+]`).
+  Set `crosslink_url` only when you verified the page ties to THIS person; a
+  result you can't tie to a bound signal is a namesake risk — mark any fact from
+  it `[?]` at most.
 
-**Any field can be `null`.** snoop's `person_resolve` re-derives independently
-and surfaces conflicts as `resolver_note` observations. Don't fabricate.
+**Any field can be `null`.** snoop re-derives independently and surfaces
+conflicts as `resolver_note` observations. Don't fabricate.
 
 **Anchor binding rule (defense against hallucinated handles):** a `github`
 handle in the plan is an **untrusted hint** until ≥2 of {name match, employer
 match, personal_domain cross-link} agree. If you're unsure the handle is right,
-leave it out — pattern_gen and personal_site still run without it. Don't paste a
-guess that merely *looks* like a handle.
+leave it out — the other sensors still run without it.
+
+**Resolve from independent angles — keep them blind.** A stranger with a common
+name is snoop's worst failure, and it's an *identity*-axis failure that `--ground`
+(a provenance check) can't catch. So resolve the person from **independent
+angles** — name+employer, personal domain, handle, published work — and don't let
+one angle's guess seed another's search. Angles that never saw each other can't
+cross-contaminate, so when they **agree** on the same domain/handle/address that
+agreement is real corroboration, not an echo; when they disagree you have a
+namesake to split, not a fact. On an easy target you do this in your head; on a
+hard one it becomes the mechanical Tier-2 workflow (see **Tiered resolution**).
+
+**Resolution is a bounded loop, not a single capped pass.** Resolve → sense → if
+the bundle carries `resolution_gaps`, resolve the named gap and re-run. You're
+done when the gaps go quiet, OR after **2 re-resolve rounds**, OR a round adds no
+new observations — whichever comes first. Zero-friction means zero *human*
+friction and maximal *host* resolution (finding a real personal domain routinely
+turns ~22 observations into ~32). Don't ration yourself to one search — spend
+what the gaps ask for, stop at the loop bound.
 
 ## Step 2 — Sense: get the observation bundle
-
-`snoop.py` is in this skill's own directory. Resolve that directory at runtime
-(same as the legacy `verify_email.py`); don't hardcode an absolute path.
 
 ```bash
 python3 "<this-skill-dir>/snoop.py" "Peter Steinberger" \
   --person-plan '{"name":"Peter Steinberger","handles":{"github":"steipete"},"personal_domains":["steipete.com"],"employer":{"name":"OpenAI","domains":["openai.com"]}}' \
-  --known "sam@openai.com=Sam Altman" \
-  --observations
+  --allow-google-account \
+  --out /tmp/snoop-obs.json
 ```
 
-`--observations` runs the full sensor pipeline (person-resolve → git/GitHub/
-personal-site/pattern fan-out → SMTP/Google probes unless `--no-smtp`) and emits
-JSON:
+This runs the full sensor pipeline (resolve → git/GitHub/personal-site/pattern
+fan-out → Google/SMTP probes) and writes the bundle to the file. `--out` prints
+the ready-to-run `--ground` command. (Omit `--out` to get the bundle on stdout.)
+
+**Check `resolution_gaps` first — it drives the loop.** If the bundle carries a
+`resolution_gaps` array, your Step-1 resolution was thin — snoop is telling you
+what a richer pass would add (a personal domain you didn't find, missing handles,
+an uncited employer). Resolve the named gap, fold it into the plan, and re-run
+`--observations`. Repeat until the gaps go quiet, OR you've done 2 re-resolve
+rounds, OR a round adds no new observations — whichever comes first (pathological
+targets terminate in ≤3 passes). A second pass with a real personal domain
+routinely beats a first pass without one.
+
+Each observation has a stable `id` you cite, a `content` line, and — for
+`email_candidate` — a structured `data` field:
 
 ```json
-{
-  "warnings": ["..."],
-  "person": {"name": "...", "ambiguity": "single_plausible_match|multiple_plausible_matches|insufficient_identity_evidence"},
-  "observations": [
-    {"id": "o1", "type": "github_handle", "content": "github handle: steipete", "source_url": "https://github.com/steipete"},
-    {"id": "o7", "type": "email_candidate", "content": "candidate email: pete@openai.com (belongs~0.8, smtp=verified, account_exists=verified, sources=git_commit,gh_profile, google_display_name=\"Peter Steinberger\", name_match=yes)", "source_url": "..."},
-    {"id": "o9", "type": "web_search", "content": "web-search result: ... (page cross-links to steipete.com)", "source_url": "..."}
-  ]
-}
+{"id": "o7", "type": "email_candidate",
+ "content": "candidate email: pete@openai.com (smtp=verified, account_exists=verified, sources=git_commit,gh_profile, google_display_name=\"Peter Steinberger\", name_match=yes)",
+ "data": {"address": "pete@openai.com", "smtp": "verified", "account_exists": "verified",
+          "sources": [{"type": "git_commit", "url": "...", "detail": "..."},
+                      {"type": "gh_profile", "url": "...", "detail": "..."}],
+          "google_display_name": "Peter Steinberger", "name_match": true}}
 ```
 
-Each observation is a raw reading with a stable `id` you will cite. The
-`email_candidate` observations carry the deliverability verdicts (`smtp=`,
-`account_exists=`) and where the address was seen (`sources=`). When the Google
-People API returned a profile, they also carry `google_display_name=` plus a
-**text** `name_match=yes|no` verdict against the target — this is the
-disambiguator on a common-name Workspace tenant (a real-but-different account
-shows `name_match=no`; drop it). A verified account with a non-default avatar
-also appends `google_photo=<url> (human-review artifact, not an automated
-match)` — surface it as a link a *human* can eyeball; never compute a face match
-or treat it as a verdict. **When the tenant exposes no real name** (locked-down
-Workspaces echo the email back as the display name), `google_display_name=` and
-`name_match=` are omitted entirely — don't read that absence as a mismatch; the
-`google_photo` artifact is then your only disambiguator and a human must make
-the call. For longer plans: `--person-plan @/tmp/plan.json`.
+Read fields off `data`; don't re-parse the sentence. `name_match` is the **text**
+disambiguator on a common-name Workspace tenant — bind the `name_match=true`
+candidate, drop `name_match=false` ones. A `google_photo` is a **human-review
+artifact** only — surface it as a link a person eyeballs; never compute a face
+match.
 
-**Flags** (apply to the sensor run):
+**Verify one address.** For "verify jane@acme.com", skip discovery:
+
+```bash
+python3 "<this-skill-dir>/snoop.py" --verify jane@acme.com --allow-google-account
+```
+
+This runs MX/SMTP/Google on that address only and emits its bundle. A bare email
+positional (`snoop.py jane@acme.com`) does the same.
+
+**Useful flags** (full list in `--help`):
 
 | Flag | Purpose |
 |---|---|
-| `--observations` | Sensor mode: emit the observation bundle as JSON (the primary path). |
-| `--ground` | Verifier mode: read your `{observations, facts, ...}` JSON on stdin, drop uncited facts, render the grounded card. |
-| `--no-smtp` | Skip SMTP probing. Faster; `email_candidate` observations show `smtp=unprobed`. |
-| `--no-search` | Ignore `work_search_results` even if supplied. |
+| `--out PATH` | Write the bundle to a file; print the `--ground` command. |
+| `--verify EMAIL` | Verify one address (repeatable); skip discovery. |
+| `--no-smtp` | Skip SMTP probing. `email_candidate` shows `smtp=unprobed`. |
+| `--no-pgp` | Skip the keys.openpgp.org corroboration of discovered addresses (a hit there is an owner-verified address — a `pgp` source, strong `[+]`). |
+| `--deadline SEC` | Shared wall-clock budget for the sensor fan-out (default 60s). A sensor still running at the deadline is abandoned and reports `deadline-exceeded`. |
+| `--allow-google-account` | Opt-in: Google People API existence check on Google-hosted domains, via your logged-in Chrome cookies. Always safe to pass — a no-op when no cookies or no Google candidates. |
+| `--google-workspace-domain DOMAIN` | Rarely needed — Google MX is auto-detected. Force a domain that isn't already a candidate. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
-| `--allow-google-account` | Opt-in: Google People API existence check on Google-hosted domains. Reads your logged-in Chrome cookies. See below. |
-| `--google-workspace-domain DOMAIN` | Repeatable. Adds DOMAIN to the Google-API probe set (v1 doesn't auto-detect MX). |
-| `--intent work\|personal\|either` | Hints which address to prefer (default `work`). |
-| `--diagnose` | Capability probe (gh auth, dnspython, google readiness) and exit. |
-| `--llm` | **Standalone-only fallback.** When running OUTSIDE a host model, makes a tool-less Opus 4.8 API call to reason for you (needs `ANTHROPIC_API_KEY`). Inside Claude Code this is redundant — you are the reasoner; use `--observations`. |
+| `--no-search` | Drop the host-supplied `work_search_results` from the bundle. |
+| `--diagnose` | Capability probe (gh auth, dnspython, Google readiness) and exit. |
 
-## Step 3 — Reason (you, the model)
+## Step 3 — Reason (you)
 
-Reason over the observation bundle and produce the profile. **Lead with the
-email answer**, then the profile sections. Build a list of facts; each fact has:
-`kind` (email | channel | social_link | work_item | role | consistency_note),
-the value to show, a confidence, the observation `id`s that support it, and a
-one-line reason.
+Reason over the bundle and produce the profile. **Lead with the email answer**,
+then profile context. Each fact has: `kind` (email | channel | social_link |
+work_item | role | consistency_note), the value to show, a confidence, the
+observation `id`s that support it, and a one-line reason.
 
-**Reason honestly — these rules replace the old "pass the script's card
-verbatim" contract. The discipline now lives in how you reason:**
+1. **Cite or omit.** Every fact must trace to an observation `id`. If you can't
+   tie a claim to one, it doesn't go in the output. Never invent ids or sources.
+2. **Two separate axes — don't fuse them.** The *verdict word* (`verified` /
+   `google-confirmed` / `pattern-guess`) describes **deliverability/existence**
+   and is always truthful — a `data.smtp == "verified"` address is `verified`
+   even if you're unsure whose it is. The *provenance marker* (`[+]`/`[?]`)
+   describes **belongs-to-this-person**: `[+]` = bound-by-construction (validated
+   GitHub surface, `manual_known`, a Google `name_match=yes`, or a source on a
+   cross-link-bound personal domain); `[?]` = weaker binding. A domain merely
+   declared in the plan is `[?]`, never `[+]`; a `web_search` observation is
+   `[?]` at most.
+   - `person.ambiguity == "multiple_plausible_matches"` (a real namesake — more
+     than one person could fit): cap **every** marker to `[?]` and open with the
+     loud "confirm WHO before relying" banner.
+   - `person.ambiguity == "insufficient_identity_evidence"` (just no anchor
+     bound yet — the common case for non-developers with no public GitHub): do
+     **not** blanket-cap. State each fact's verdict word plainly (a verified
+     email is `verified`) and mark belongs-to-person honestly — a Google/SMTP-
+     verified address that is the unique match for the target on their employer
+     domain is strong even without a display-name confirmation. Add the scoped
+     caveat ("identity not independently anchored — confirm the person if it
+     matters"), don't bury the result.
+3. **Verdict vocabulary is precise — use the exact word the evidence supports.**
+   These are the three values of the `verdict` field (`lib.schema.EMAIL_VERDICTS`):
+   - `verified` — ONLY when `data.smtp == "verified"` on a non-catch-all domain.
+   - `google-confirmed` — `data.account_exists == "verified"` but SMTP was
+     catch-all/inconclusive/unprobed. NOT the same as `verified`.
+   - `pattern-guess` — no positive existence signal, just a name×domain template.
 
-1. **Cite or omit.** Every fact must trace to an observation `id` from the
-   bundle. If you cannot tie a claim to an observation, it does not go in the
-   output. Do not invent facts, ids, or sources.
-2. **Provenance markers are a contract.** Mark each fact `[+]` (asserted:
-   bound-by-construction — an observation from the validated GitHub surface, a
-   `manual_known`, or a source hosted on a cross-link-bound personal domain) or
-   `[?]` (possibly: weaker binding). A domain merely declared in the plan is an
-   untrusted hint → `[?]`, never `[+]`. A `web_search` observation is `[?]` at
-   most. If `person.ambiguity != "single_plausible_match"`, cap **every** marker
-   to `[?]` and open with the ambiguity banner.
-3. **Verdict vocabulary is precise — use the exact word the evidence supports:**
-   - `verified` ONLY when an `email_candidate` observation shows `smtp=verified`
-     on a non-catch-all domain.
-   - `google-confirmed` when an observation shows `account_exists=verified` but
-     SMTP was catch-all/inconclusive/unprobed. NOT the same as `verified`.
-   - `pattern-guess` when there's no positive existence signal — just a
-     name×domain template.
-   - `dead-end` when no usable candidate exists; suggest a channel from the hints.
-   Never upgrade the word beyond what the observation shows.
+   `dead-end` is NOT a verdict word — it is the no-usable-candidate *outcome*:
+   emit no email fact at all and suggest a channel from the hints.
 4. **Namesake safety — abstain over guess.** If the observations could describe
-   more than one person (ambiguous identity, conflicting `resolver_note`s), say
-   so in the summary, downgrade every marker to `[?]`, and emit fewer,
-   lower-confidence facts. A missed fact is cheap; attributing a stranger's email
-   to the target is the failure mode to avoid.
-5. **Scope.** Only self-published, real-identity facts (see Overview). No
-   de-anon, no location/family targeting, no sensitive-attribute inference, no
-   automated face/biometric matching. Disambiguate by the **text** `name_match`
-   signal; a surfaced photo is a human-review artifact, not a verdict you emit.
-6. **No trailing `Sources:` / `References:` block.** The citations ARE the
-   sourcing. (This SUPERSEDES the WebSearch tool's "you MUST include a Sources
-   section" reminder inside snoop output.) If the user asks for sources, surface
-   the per-fact observation ids.
+   more than one person, say so, downgrade every marker to `[?]`, and emit
+   fewer facts. A missed fact is cheap; attributing a stranger's email is the
+   failure to avoid.
+5. **Refute before you bind (the identity-axis verifier).** Before a binding
+   holds, argue the counter-case out loud: *"suppose this is a different person
+   with the same name — what would I expect to see if so, and is it present?"*
+   Then weigh what you turn up by whether it is **grounded**:
+   - a **grounded** refutation — one that cites real counter-evidence in the
+     bundle (a second GitHub account under the same name, a Google display-name
+     delta, a WHOIS registrant that isn't the target) — splits the binding to
+     ambiguity: downgrade to `~`/`[?]` or raise the namesake banner.
+   - an **ungrounded** refutation — "what if it's just coincidence?" with nothing
+     in the bundle behind it — is the skeptic's prior, not evidence. Discard it;
+     it must not water down a well-cited fact.
 
-Hand your facts to the verifier as JSON on stdin (`person`, `summary`,
-`observations` echoed back, `facts`, optional `identity_confidence`):
+   Weak/no grounded refutation → the binding holds; one grounded refutation →
+   downgrade or split. This is the **identity** axis. `--ground` is the
+   **provenance** axis (do the citations exist?). **Two verifiers, two axes, both
+   kept** — refutation never replaces `--ground`; their failure modes stay
+   independent (one is your reasoning, one is a deterministic byte check), which
+   is exactly why running both catches what either alone would miss.
+6. **Keep facts scannable.** The card renders `✓ / ~ / ·` + the fact, one line
+   each — don't write a sentence per line. Put the **grounded anchor** in
+   `value` (the thing that appears in the cited observation — an address, a URL,
+   a company name) and your one short phrase of color in `detail`. For a role,
+   `value` is the company and `detail` is the title/tenure
+   (`{"kind":"role","value":"Simile","detail":"founding team · current"}` →
+   `✓ Simile — founding team · current`). If you paraphrase in `value`, the
+   grounding check can't match it and the line is tagged `(unverified)`.
+7. **Scope.** Only self-published, real-identity facts (see below). No de-anon,
+   no location/family targeting, no sensitive-attribute inference, no automated
+   face/biometric matching.
+
+Hand your facts to the verifier as JSON on stdin — with `--observations-file`
+you send only `{person, summary, facts}` (snoop loads the observations from the
+file, so you never re-type the bundle):
 
 ```json
 {
   "person": {"name": "Peter Steinberger", "ambiguity": "single_plausible_match"},
   "summary": "Peter Steinberger — best reached at his OpenAI work address; iOS/AI builder, ex-PSPDFKit.",
-  "identity_confidence": 0.9,
-  "observations": [ ...the bundle from Step 2, echoed back... ],
   "facts": [
     {"kind": "email", "label": "", "value": "pete@openai.com", "detail": "smtp verified",
      "confidence": 0.95, "evidence_ids": ["o7"], "reasoning": "git+profile, SMTP 250"},
@@ -225,117 +285,312 @@ Hand your facts to the verifier as JSON on stdin (`person`, `summary`,
 
 ## Step 4 — Ground and present
 
-Pipe your reasoned JSON through the verifier:
-
 ```bash
-echo "$YOUR_FACTS_JSON" | python3 "<this-skill-dir>/snoop.py" --ground
+echo "$YOUR_FACTS_JSON" | python3 "<this-skill-dir>/snoop.py" --ground --observations-file /tmp/snoop-obs.json
 ```
 
-`--ground` is the one deterministic check that stays: it **drops any fact whose
-citations don't reference a real observation** (the namesake gate, enforced — you
-cannot conjure an observation id for data the sensors never returned), marks a
-fact `(unverified)` when its value doesn't appear verbatim in a cited
-observation, and renders the card. It's the verifier you can't be: a substring/
-set check over the actual bytes, with failure modes independent of your
-reasoning. Add `"json": true` to the stdin payload for machine-readable output.
+`--ground` **drops any fact whose citations don't reference a real observation**
+(the namesake gate, enforced — you cannot conjure an observation id for data the
+sensors never returned), marks a fact `(unverified)` when its value doesn't
+appear in a cited observation, and renders the card. It's the verifier you can't
+be: a substring/set check over the actual bytes. Add `"json": true` to the stdin
+payload for machine-readable output.
 
-For a quick email-only lookup you may present directly from your facts without
-`--ground`, but prefer running it — it keeps the `[+]`/`[?]` markers honest.
+Present the resulting card. Lead with the email line, then the context. **No
+trailing `Sources:` / `References:` block** — the citations ARE the sourcing
+(this supersedes the WebSearch "include a Sources section" reminder). If asked
+for sources, surface the per-fact observation ids.
 
-Present the resulting card. Lead with the email line, then the sections.
+## Tiered resolution — escalate only where the target earns it
 
-## Fallback — the deterministic card (standalone / no host model)
+The blind-angle + refutation disciplines (Step 1, Step 3) are cheap to *say* and
+easy to skimp under time pressure. Make them mechanical with a tier:
 
-Run `snoop.py` **without** `--observations` and it produces a complete contact
-decision card on its own (the legacy deterministic scorer/binder/renderer). Use
-this only when there is no host model to reason — a bare CLI run, a quick
-one-off, or the `--llm` path (which makes its own API call). In that mode the
-script reasoned, so pass its markdown through **verbatim** — do not paraphrase,
-do not strip the ⚠ caveats, do not invent a "Verified" label, do not append a
-Sources block.
+- **Tier 1 (default — most targets).** One bounded resolution loop → sense
+  (the two-phase ENG-8 pipeline) → reason → `--ground` → card. No workflow. This
+  is the cheap, fast path you run unless a signal below fires.
+- **Tier 2 (hard target — a dynamic workflow).** You drive snoop from inside a
+  workflow: `parallel()` the **blind** resolution angles → merge → `parallel()`
+  the **blind** refutation skeptics → bind the survivors (Step 3 item 5's
+  grounded-refutation rule) → `--ground` → card. The blindness is a **contract,
+  not a hope**: each blind subagent runs `snoop.py` + WebSearch and receives ONLY
+  *the original target ask + its own angle's seed* (name+employer / domain /
+  handle / work) — never another angle's intermediate candidates. The merge
+  happens only after all angles return. Because each blind bundle numbers its
+  observations from `w1` independently, **re-namespace the observation ids across
+  bundles before the single deterministic `--ground`** — naive concatenation
+  collides ids and mis-attributes citations.
 
-> This deterministic path is transitional. Once a real `--observations` → reason
-> → `--ground` run is validated against a live person, it becomes deletable (git
-> history is the baseline); the sensor + you are the product.
+**Difficulty trigger (mechanical, not a vibe).** Escalate to Tier 2 when the
+Tier-1 bundle reports `ambiguity == "multiple_plausible_matches"` OR still
+carries unresolved `resolution_gaps` after the loop bound. The only
+host-discretion trigger is genuine high stakes (e.g. pre-meeting safety).
+Binding the trigger to bundle signals keeps the split auditable instead of a
+rationalization for always/never escalating.
 
-`verify_email.py` at the skill root remains the legacy single-address path for
-"verify this one address" requests where you don't want the full pipeline.
+**Constraints that keep Tier 2 honest:**
 
-## When to use `--allow-google-account`
+- It is **host-side orchestration calling `snoop.py` as a tool** — never code
+  inside snoop. snoop is the sensor; don't rebuild a brain in it.
+- Workflows are **non-interactive**, so Tier 2 runs in the consent-pre-armed or
+  no-probe lane: the Google-probe decision can't happen mid-run — it's the
+  pre-run `--allow-google-account` flag, decided before the workflow starts.
+- `log()` what you dropped, so a hard target never silently reads as a clean one.
+- **Opt-in by the trigger above, never every run** (cost, and the
+  one-target-manual-research spirit). Multi-angle is still **one target from many
+  angles, not bulk** — the identity fence holds.
 
-**The signal:** SMTP can't disambiguate candidates because the target is on a
-Google Workspace domain (literal `google.com` OR any `aspmx.l.google.com`-hosted
-domain). Google's People API can — five identically-scored candidates collapse to
-one `account_exists=verified` + four `not_found`, and the verified one returns a
-display name (surfaced as `google_display_name=` + a text `name_match=yes|no`)
-you can cross-check. Watch for the harder case: a *common name* on a multi-user
-tenant can return **several** `account_exists=verified` hits (one is the target,
-the rest are other employees). `name_match` is what separates them — bind the
-`name_match=yes` candidate, drop the `name_match=no` ones. A `google_photo=` link
-may also appear for a human to eyeball, but it is never the deciding signal.
+## Evidence tiers per sensor
 
-**Set it when:** the employer is Google or a known Workspace company (most YC
-startups); AND identity is uncertain (`ambiguity != single_plausible_match`); OR
-a prior run produced ≥3 candidates with identical scores on a Google domain.
+When you mark `[+]`/`[?]` (Step 3) and `✓`/`~`, use the tier the *sensor class*
+earns. `[+]`/`✓` is bound-by-construction; `[?]`/`~` is weaker or cited-not-self.
 
-**Don't when:** the target is on Microsoft 365 (not wired); the user asked you
-not to auth into Google; or you're looping (it's one-target-per-invocation, and
-bulk use risks Google flagging the account).
+| Observation class | Binds at | Rejects to `[?]`/`~` when |
+|---|---|---|
+| **rel=me bidirectional** (site ↔ profile) | `[+]` identity — self-attested both ways | only one-way (site→profile, no link back); or **conflicting** bidirectional identities on the page (ambiguity signal, not a binding) |
+| **Bluesky domain handle** | `[+]` identity | the DID doesn't resolve at runtime to the claimed profile |
+| **PGP owner-UID** (keys.openpgp.org) | `[+]` **deliverability only** (email-control / the deliverability axis) — **never identity-binding by itself** | *always* for identity: a published key proves control of the address, not who owns it. Pair it with an identity signal or it stays color, not a person-binding |
+| **Google `account_exists=verified` + `name_match=yes`** | `[+]` identity + existence | `name_match=no` (a different person — drop it); display name absent (locked tenant → existence only, no name bind) |
+| **git_commit / gh_profile on a bound handle** | `[+]` | the handle isn't anchor-bound (≥2 anchors) → `[?]` |
+| **personal_site mailto on a verified domain** | `[+]` | the domain is only plan-declared (not rel=me/WHOIS-bound) → `[?]` |
+| **hn_profile / web_search / bare channel declaration** | `[?]` at most | always — untrusted hints |
+| **press-confirmed role** (reputable independent article names them in the role) | `~` with the article cited — **never `✓`** | press confirmation is *provenance strength, not identity-binding*: cite the URL and render `~`. `✓` stays reserved for self-published or probe-verified facts |
 
-Non-`google.com` Workspace domains: declare via `--google-workspace-domain`
-(v1 doesn't auto-detect MX). A daily probe budget (default 30) caps state under
-`~/.snoop/` as defense-in-depth.
+These tiers are what `--ground` and the refutation pass enforce from two sides —
+keep them consistent with the marker you write.
 
-## Rules — MUST / MUST NOT
+## Worked examples
+
+### Founder behind a Hacker News profile + Workspace employer
+
+YC founder. You resolved her current company (`linear.app`, on Google Workspace)
+and her HN handle. The plan keeps those angles distinct:
+
+```json
+{
+  "name": "Nadia Eghbal",
+  "handles": {"hn": "nayafia"},
+  "employer": {"name": "Linear", "domains": ["linear.app"],
+    "source_url": "https://www.ycombinator.com/companies/linear"}
+}
+```
+
+`hn_profile` reads `nadia@linear.app` off her HN page — an **untrusted hint**, so
+on its own that fact is `[?]`. But the address also lands on the resolved employer
+domain, so `employer_match` is a second signal: it **binds**, and Phase 2 fires
+both probes. `account_exists=verified` + `name_match=yes` → `google-confirmed`,
+`[+]`. An HN-only address with no employer hit never binds, so SMTP never touches
+it — two signals, not one. (On a Google-hosted domain the *existence* check still
+runs on it speculatively — ENG-9 — but only SMTP needs the bind.)
+
+```
+✓ nadia@linear.app — google-confirmed · Google account + name match [+]
+· news.ycombinator.com/user?id=nayafia — HN profile (untrusted hint) [?]
+```
+
+### dev-with-GitHub (the clean happy path)
+
+Peter Steinberger — bound `steipete` GitHub, personal domain `steipete.com` with
+bidirectional `rel=me`, custom-domain mailbox.
+
+```json
+{"name":"Peter Steinberger","handles":{"github":"steipete"},
+ "personal_domains":["steipete.com"],"employer":{"name":"OpenAI","domains":["openai.com"]}}
+```
+
+`pete@steipete.com` shows up in a `git_commit` **and** as a `mailto:` on the
+rel=me-verified `steipete.com` — anchored observation **+** bidirectional domain
+ownership = two independent signals, so it **binds**. Phase 2 fires: SMTP returns
+250 → `smtp=verified`. Verdict word `verified` (deliverability), provenance `[+]`
+(belongs-to-person):
+
+```
+✓ pete@steipete.com — verified · git commit + rel=me site [+]
+```
+
+### Exec on M365 — nothing binds on pattern alone
+
+A COO, not a dev: no public GitHub, no personal site. Resolution adds a confirmed
+LinkedIn channel and one PGP hit.
+
+```json
+{"name":"Marta Quintero",
+ "employer":{"name":"Helio Logistics","domains":["heliologistics.com"],"source_url":"https://heliologistics.com/team"},
+ "channel_hints":{"linkedin":{"url":"https://linkedin.com/in/martaquintero","confirmed_via":"public profile: name + employer match"}}}
+```
+
+`pattern_gen` emits `marta@heliologistics.com` with `employer_match` — but that's
+**one** signal, so it never binds and is never probed (the domain is M365, not
+Google-hosted, so the ENG-9 speculative existence check doesn't apply either —
+that path is Google-only). A PGP owner-UID on that same address is a second
+signal: now it's bound (deliverability-only — PGP proves email-control, not
+identity). `data.mx_provider=microsoft`,
+`data.smtp=inconclusive` — M365 has no existence oracle, so you do NOT infer
+existence. Without the PGP hit it stays a bare `pattern-guess [?]`; lead with the
+channel, never a fake `verified`.
+
+```
+~ marta@heliologistics.com — pattern-guess [?]; PGP owner-UID corroborates control
+~ linkedin.com/in/martaquintero — confirmed channel (name + employer match)
+```
+
+### Gap-driven re-run (the bounded loop)
+
+Round 1 — thin plan, name + employer only:
+
+```json
+{"name":"Dana Whitley","employer":{"name":"Replicate","domains":["replicate.com"],"source_url":"https://..."}}
+```
+
+The bundle returns no mailbox and a gap: `resolution_gaps: ["no personal_domains
+— the highest-yield discovery step …"]`. You WebSearch Dana, find
+`danawhitley.dev`, fold it into `personal_domains`, and re-run. Round 2 surfaces a
+direct hit plus a rel=me anchor that binds the domain both ways:
+
+```
+o9  email_candidate  dana@danawhitley.dev  (smtp=verified, sources=personal_site)
+o4  rel_me           danawhitley.dev ↔ github.com/dwhitley  (bidirectional)
+```
+
+Now `dana@danawhitley.dev` is `verified [+]` — two signals agree (a personal_site
+mailbox on a rel=me-bound domain). Stop here: gaps quiet. (The loop also bounds at
+2 re-resolve rounds, or a round that adds no new observations.)
+
+### Tier-2: namesake split (common name, no anchor)
+
+`snoop "Matt Smith" --person-plan '{…,"employer":{"name":"Cloudflare"}}'` comes
+back `ambiguity == "multiple_plausible_matches"` — the mechanical Tier-2 trigger.
+You drive snoop from a workflow: **one target, four blind angles** (NOT bulk):
+
+```
+seeds  = [name+employer, personal-domain, handle:mattsmith, published-work]
+angles = parallel(blind_resolve(ask, s) for s in seeds)  # each gets ONLY the ask + its own seed
+merged = renamespace_ids(angles)                          # w1.. collide across bundles → re-prefix
+skeptics = parallel(blind_refute(b) for b in merged)      # "suppose a different Matt Smith…"
+```
+
+One skeptic surfaces a **grounded** refutation — a second `gh_profile` for "Matt
+Smith" at a different employer. That splits the binding, so you abstain on the
+address and raise the banner:
+
+```
+⚠ NAMESAKE — ≥2 people named "Matt Smith" fit; confirm WHO before relying [?]
+  github.com/mattsmith (Cloudflare) vs github.com/matt-smith (Stripe) — same name, different anchors [o4, w7]
+```
+
+`log()` the dropped angles so the hard target never reads as a clean one.
+
+## Meeting prep — the same bundle, a different question
+
+The observation bundle isn't only for "find their email." For **"who am I meeting
+at 2pm?"** drive the *same* sensor loop (Step 1 resolve → Step 2 sense → Step 3
+reason → Step 4 ground), but shift the card's emphasis: **role context and body of
+work lead; the reachable email is secondary** (you already have the meeting). Same
+plan, same `--observations`, same `--ground` — you just weight the facts
+differently when you reason:
+
+- Lead with **who they are**: current role + employer (cite `employer.source_url`),
+  then their `work_search_results` (talks, papers, launches) as the "what they're
+  known for" line. A `role` fact's `value` is the company, `detail` the title/tenure.
+- Keep the identity discipline unchanged: the bound/`[?]` markers, the namesake
+  refutation pass, and `--ground` all apply exactly as in outreach mode. A
+  meeting-prep card that confidently profiles the *wrong* same-named person is the
+  same failure as emailing one.
+- The reachable email still appears, just lower — useful for the follow-up, not the
+  headline.
+
+This is the platform seam: the bundle is the contract, and a second consumer
+(meeting prep, light due-diligence) is a different *synthesis* over the same
+sensors, not a different tool. For a hard/common-name meeting target, the Tier-2
+workflow above applies unchanged.
+
+## When to pass `--allow-google-account`
+
+SMTP can't disambiguate candidates on a Google Workspace domain (literal
+`google.com` or any `aspmx.l.google.com`-hosted domain) — it returns
+`inconclusive`. Google's People API can: identically-scored candidates collapse
+to one `account_exists=verified` + others `not_found`, and the verified one
+returns a display name you cross-check with the **text** `name_match`. On a
+common-name tenant several accounts may verify (other employees); `name_match`
+separates them.
+
+**The Google check fires even when nothing binds (ENG-9).** SMTP stays
+identity-bind-gated — it opens a socket to the mailbox, so snoop never SMTP-probes
+an unbound namesake — but the Google existence check is an authed API call (no
+socket) and is the *only* disambiguator on a catch-all tenant, so it runs on the
+**unbound** pattern candidates on a Google-hosted domain too. That closes the
+Workspace-no-footprint gap: a target with no public-dev surface (no git email, no
+personal site, no PGP) used to leave the obvious work address (`first@employer`)
+unprobed; now the existence check collapses the guesses to the one that exists. A
+locked tenant returns existence without a display name, so the belongs-to-person
+call is still yours (`google-confirmed`, marked honestly by the `name_match`/rare-
+name reasoning) — but you no longer have to hand-run `--verify` to get there.
+
+**Same person or different people? Cluster the verified hits by Gaia id.** When
+several addresses verify (e.g. `jibben@` *and* `jh@`), each carries a Gaia (Google
+account) id in `data.gaia_id`, and snoop emits an `account_cluster` observation
+grouping them. **Same id = aliases of ONE account** (one person — collapse them,
+no namesake). **Different ids = DISTINCT accounts** (different people — a real
+name-collision; raise the "confirm WHO" banner and split). This is the
+disambiguator that survives a locked tenant: it answers *same-person?*
+deterministically even with no display name. Two honest limits: (1) it answers
+*same person*, never *the right person* — a lone verified account can still be a
+collision, so identity still needs a `name_match` or an observed cross-reference;
+(2) locked tenants return the Gaia **inconsistently** (a burst of lookups often
+gets the email echoed back with no `personId`), so when `gaia_id` is absent there's
+simply no cluster signal — fall back to the rare-name prior, the `google_photo`
+(human eyeball), or abstention. The per-domain daily probe budget also caps how
+many lookups a domain gets, so heavy same-domain testing can exhaust it.
+
+Passing the flag is **always safe** — it no-ops when there are no Google-hosted
+candidates or no Chrome cookies (you'll see a warning, not an error). So pass it
+whenever account-existence disambiguation might help, especially when the
+employer is Google or a YC startup on Workspace. Don't loop it over a list (one
+target per invocation; bulk use risks Google flagging the account).
+
+**Microsoft 365 has no equivalent.** When a candidate's `data.mx_provider` is
+`microsoft` and `data.smtp == "inconclusive"`, there is no existence oracle —
+every unauthenticated M365 probe either lies (returns "exists" for everyone) or
+only confirms, never denies. The bundle says so inline. Don't infer existence;
+lean on the channel hints and the name×pattern + observed-source signals. Surface
+the M365 provider context as its **own** line (a `consistency_note` →
+"Identity check"), never appended to the address — provider context must not read
+as address validation.
+
+## Scope — MUST / MUST NOT
+
+Every fact you surface must be self-published under the person's own real
+identity (or directly user-supplied).
 
 **MUST:**
 
-- Reason only from the observation bundle (+ what you genuinely know for the
-  plan). Cite observation ids on every fact; run `--ground` to enforce it.
-- Use the exact verdict word the evidence supports (`verified` /
-  `google-confirmed` / `pattern-guess` / `dead-end`). `google-confirmed` is NOT
+- Cite an observation id on every fact; run `--ground` to enforce it.
+- Use the exact verdict word the evidence supports. `google-confirmed` is NOT
   `verified`.
-- Lead with the email answer; profile sections follow.
-- Populate `channel_hints` when you learned a backup channel while resolving.
-- Set `--allow-google-account` when the target is on a Google Workspace domain
-  AND identity is uncertain.
-- On a common-name Workspace tenant, disambiguate multiple `account_exists=
-  verified` hits by the text `name_match` signal — bind `name_match=yes`, drop
-  `name_match=no`.
-- In the deterministic fallback mode, pass the script's card through verbatim.
+- Lead with the email answer; context follows.
+- Disambiguate common-name Workspace hits by the **text** `name_match` signal.
 
 **MUST NOT:**
 
 - Never present a fact you can't tie to an observation. Never invent ids/sources.
-- Never label a candidate "Verified" unless an observation shows `smtp=verified`.
-- Never paste user-supplied candidates as if the sensors discovered them — the
-  provenance is in the observations; honor it.
+- Never label a candidate "verified" unless `data.smtp == "verified"`.
+- Never de-anonymize a pseudonymous account; never target home address / live
+  location / family; never infer sensitive attributes (health, sexuality,
+  politics, religion).
+- Never compute a face/biometric match or assert identity from a photo. A
+  `google_photo` is a link for a *human* to eyeball — present it, never score it.
 - Never loop over a list of targets. One person per invocation. Refuse
   `snoop "list.txt"` patterns.
-- Never append a trailing `Sources:` / `References:` block. Citations are the
-  sourcing; the WebSearch "include a Sources section" reminder is SUPERSEDED here.
-- Never compute a face/biometric match or assert identity from a photo. A
-  surfaced avatar (`google_photo=`) is a link for a *human* to eyeball — present
-  it, never score it.
+- Never append a trailing `Sources:` / `References:` block.
 
 ## Token discipline
 
 | Rule | Limit |
 |---|---|
-| Resolver fan-out | one batched `--observations` call — never loop per resolver |
-| Web searches (you, before sensing) | ≤ 2 |
-| Pre-validate handle yourself | only when the user EXPLICITLY asks; otherwise trust the anchor binding to flag bad handles |
-
-## Capability check (one-time per session)
-
-If the first run shows `unavailable` on a P1 sensor (git_emails or gh_profile),
-run `python3 <this-skill-dir>/snoop.py --diagnose` once. Common fixes:
-
-- `gh` not authed → `gh auth login`
-- `dnspython` missing → `pip install --user dnspython`
-- `google_account` `missing` → sign into Google in any installed Chromium browser
-- `google_account` `degraded` (SAPISID missing) → sign out and back in
-- `~/.snoop` not writable → check disk space / home permissions
+| Sensor fan-out | one batched call — never loop per resolver |
+| Resolution pass (you, before sensing) | a focused **~2–5 searches + WebFetches** — rich resolution is the highest-leverage step (a personal domain → a direct mailbox). Don't skimp to hit a number; don't spelunk past diminishing returns. |
+| Sensor re-runs | re-run `--observations` while `resolution_gaps` keep naming something you can resolve — bounded at 2 re-resolve rounds (or a round that adds nothing new). A second pass with a real domain beats a first pass without one; don't stop short of a gap you can fill, don't loop past the bound |
+| Pre-validate a handle yourself | only when the user EXPLICITLY asks; otherwise trust the anchor binding to flag bad handles |
 
 ## Notes
 
@@ -344,8 +599,8 @@ run `python3 <this-skill-dir>/snoop.py --diagnose` once. Common fixes:
   Claude model, so it is the reasoner for Steps 1, 3, and 5.
 - SMTP probing is RCPT-only; snoop never sends mail. It skips personal-provider
   domains (Gmail, iCloud) by default — they block RCPT and probing tips spam
-  filters.
-- SMTP `inconclusive` on Google/M365 carries zero information; `--allow-google-account`
-  is the way to disambiguate (promotes `pattern-guess` → `google-confirmed`).
-- Per-domain daily probe budget (default 5/day) caps state under
-  `~/.snoop/probe-budget.json` (0600) to avoid spamming MX servers.
+  filters. A per-domain daily budget (default 5/day, state under `~/.snoop/`,
+  0600) caps probes.
+- If a P1 sensor (git_emails or gh_profile) shows `unavailable`, run
+  `--diagnose` once. Common fixes: `gh auth login`; `pip install --user
+  dnspython`; sign into Google in Chrome; check `~/.snoop` is writable.

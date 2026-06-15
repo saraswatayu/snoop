@@ -18,8 +18,8 @@ resolver fan-out enforces a wall-clock cap via `future.result(timeout=5)`.
 
 Generic-inbox addresses (`info@`, `hello@`, `contact@`) are KEPT, not
 dropped — many one-person consultancies legitimately publish
-`hello@theirname.com` as their personal address. The scorer will
-downrank these via a generic-localpart check. System-only addresses
+`hello@theirname.com` as their personal address. The host model can
+weigh these down by their generic localpart. System-only addresses
 (`noreply@`, `webmaster@`, `postmaster@`, `abuse@`) ARE dropped here.
 """
 
@@ -28,26 +28,24 @@ from __future__ import annotations
 import re
 import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
 
-from .normalize import normalize_email
+from .fetch import FetchBlocked, fetch
+from .normalize import domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
 _DEFAULT_TIMEOUT_SEC = 4.0
 _PATHS_TO_TRY = ("/", "/about", "/contact")
 
-# Drop these system-only addresses outright. Generic-but-legitimate
-# localparts (info@, hello@, contact@) are kept; the scorer downranks them.
+# Drop these system-only addresses outright (EXACT localpart match —
+# deliberately stricter than the prefix policy in the profile sensors).
+# Generic-but-legitimate localparts (info@, hello@, contact@) are kept; the
+# host model weighs them down. The reserved-domain set is shared (lib.normalize).
 _SYSTEM_LOCALPARTS = (
     "noreply", "no-reply", "do-not-reply",
     "postmaster", "abuse", "webmaster",
     "mailer-daemon",
-)
-_BAD_DOMAINS = (
-    "example.com", "example.org", "example.net",
-    "test", "invalid", "localhost", "local",
 )
 
 # Match `href="mailto:foo@bar.com"` or `href='mailto:foo@bar.com?subject=...'`.
@@ -73,7 +71,7 @@ HttpGet = Callable[[str], str | None]  # url -> body or None on 404
 
 def _is_extractable(email: str) -> bool:
     """Drop only system-only mailto addresses. Generic-but-legitimate
-    locals (hello@, info@) pass through; scorer handles them."""
+    locals (hello@, info@) pass through; the host model judges them."""
     if not email or "@" not in email:
         return False
     local, _, domain = email.lower().partition("@")
@@ -81,7 +79,7 @@ def _is_extractable(email: str) -> bool:
         return False
     if local in _SYSTEM_LOCALPARTS:
         return False
-    if any(domain == d or domain.endswith("." + d) for d in _BAD_DOMAINS):
+    if domain_is_noise(domain):
         return False
     return True
 
@@ -110,22 +108,19 @@ def _extract_mailto_addresses(html: str) -> list[str]:
 
 
 def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str | None:
-    """Fetch URL body as text. Returns None on 404; raises on connection error."""
-    req = urllib.request.Request(url, headers={"User-Agent": "snoop-skill"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # Cap response size to avoid pathological downloads.
-            body = resp.read(2_000_000)  # 2MB cap
-            # Best-effort charset detection. Most HTML is utf-8 or ISO-8859-1.
-            charset = resp.headers.get_content_charset() or "utf-8"
-            try:
-                return body.decode(charset, errors="replace")
-            except (LookupError, TypeError):
-                return body.decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code in (404, 410):
-            return None
-        raise
+    """Fetch URL body as text through the SSRF-hardened shared fetch (lib.fetch):
+    HTTPS-only, public-IP-pinned, redirect-revalidated, decompressed-body-capped.
+
+    A target's declared personal domain is untrusted input, so it must never be
+    steerable into the operator's internal network — this is the canonical
+    target-influenced fetch the guard exists for. Returns None on 404/410.
+    FetchBlocked (private host, bad scheme, oversize, disallowed content-type) and
+    network/TLS errors (OSError) propagate to the caller, which records them as a
+    per-domain fetch error."""
+    result = fetch(url, timeout=timeout)
+    if result.status in (404, 410):
+        return None
+    return result.text
 
 
 def fetch_personal_site(
@@ -171,7 +166,10 @@ def fetch_personal_site(
             url = f"https://{domain}{path}"
             try:
                 body = http(url)
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
+            except (FetchBlocked, urllib.error.URLError, OSError, TimeoutError) as e:
+                # FetchBlocked = the SSRF guard refused (private host, redirect to
+                # a private host, oversize). Record it as an honest fetch error,
+                # not a silent skip — and never a connection to an internal host.
                 fetch_errors.append(f"{url}: {type(e).__name__}")
                 continue
             if body is None:

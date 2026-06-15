@@ -1,0 +1,115 @@
+{
+  "bundle": {
+    "observations": [
+      {
+        "content": "declared current employer: Helioform Logistics",
+        "id": "o1",
+        "source_url": null,
+        "type": "employer"
+      },
+      {
+        "content": "candidate email: marisol@helioform.example (smtp=inconclusive, mx=microsoft (M365 blocks RCPT and has no existence oracle \u2014 lean on channel hints), account_exists=unprobed, sources=pattern,pgp)",
+        "data": {
+          "account_exists": "unprobed",
+          "address": "marisol@helioform.example",
+          "mx_provider": "microsoft",
+          "smtp": "inconclusive",
+          "smtp_note": "M365 blocks RCPT and has no existence oracle \u2014 lean on channel hints",
+          "sources": [
+            {
+              "detail": "first.last @ employer M365 domain",
+              "type": "pattern",
+              "url": null
+            },
+            {
+              "detail": "OpenPGP key UID",
+              "type": "pgp",
+              "url": "https://keys.openpgp.example/vks/v1/by-email/marisol@helioform.example"
+            }
+          ]
+        },
+        "id": "o2",
+        "source_url": "https://keys.openpgp.example/vks/v1/by-email/marisol@helioform.example",
+        "type": "email_candidate"
+      }
+    ],
+    "person": {
+      "ambiguity": "insufficient_identity_evidence",
+      "name": "Marisol Brandquist"
+    },
+    "resolution_gaps": [
+      "no personal_domains \u2014 the personal_site mailto sensor did not run. Finding their site is the highest-yield discovery step (often a direct mailbox + a strong identity anchor); resolve it and re-run.",
+      "no handles (github/hn) \u2014 the git/profile/HN sensors did not run, so discovery is name\u00d7domain pattern-guessing only. Resolve their GitHub/HN/socials and re-run.",
+      "employer is plan-declared only (no source_url) \u2014 role/employer facts will be uncited. Set employer.source_url to where you confirmed it."
+    ],
+    "schema": 2,
+    "sensors": [
+      {
+        "elapsed_ms": 0,
+        "outcome": "candidates",
+        "sensor": "pattern_gen",
+        "status": "ran"
+      },
+      {
+        "reason": "no bound github handle",
+        "sensor": "git_emails",
+        "status": "skipped"
+      },
+      {
+        "reason": "no bound github handle",
+        "sensor": "gh_profile",
+        "status": "skipped"
+      },
+      {
+        "reason": "no hn handle in plan",
+        "sensor": "hn_profile",
+        "status": "skipped"
+      },
+      {
+        "reason": "no personal_domains in plan",
+        "sensor": "personal_site",
+        "status": "skipped"
+      },
+      {
+        "reason": "no personal_domains in plan",
+        "sensor": "rel_me",
+        "status": "skipped"
+      },
+      {
+        "reason": "no packages in plan",
+        "sensor": "package_registry",
+        "status": "skipped"
+      },
+      {
+        "elapsed_ms": 0,
+        "outcome": "candidates",
+        "sensor": "pgp",
+        "status": "ran"
+      }
+    ],
+    "warnings": []
+  },
+  "id": "m365-exec",
+  "labels": {
+    "banner_required": false,
+    "forbidden_verdicts": [
+      "verified",
+      "google-confirmed"
+    ],
+    "must_emit": [
+      {
+        "confidence_max": 0.6,
+        "evidence": [
+          "o2"
+        ],
+        "kind": "email",
+        "marker": "[?]",
+        "value": "marisol@helioform.example",
+        "verdict": "pattern-guess"
+      }
+    ],
+    "must_not_emit": [],
+    "rubric_notes": "M365 exec: pattern address on the employer's Microsoft domain, PGP-corroborated, SMTP inconclusive. Label rationale: SKILL.md forbids `verified` unless data.smtp == verified on a non-catch-all domain, and `google-confirmed` needs account_exists == verified \u2014 neither holds, so `pattern-guess`/`[?]` is the ceiling. PGP corroborates deliverability only; the M365 note in the observation says lean on channel hints."
+  },
+  "suite": "regression"
+}

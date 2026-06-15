@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "description": "Calibration fixture for measuring resolver hit rate + precision. Per the plan's §Calibration section: estimates in SKILL.md should be replaced with measured numbers once a labeled set of real targets is built.",
-  "notes_for_user": "Ground-truth emails are intentionally null in the committed fixture (this repo is public — don't commit other people's addresses). Add your own targets and their known emails in `tests/fixtures/calibration_targets.local.json` (gitignored). The measurement harness merges the public fixture with the local overrides.",
+  "description": "Calibration fixture for measuring resolver hit rate + precision. Per the plan's §Calibration section: estimates in SKILL.md should be replaced with measured numbers once a labeled set of real targets is built. The committed rows are EXAMPLE/synthetic archetype shapes (null ground truth, no measurement value); the measured N>=25 real set lives ONLY in the gitignored local override.",
+  "notes_for_user": "Ground-truth emails are intentionally null in the committed fixture (this repo is public — don't commit other people's addresses). Add your own targets and their known emails in `tests/fixtures/calibration_targets.local.json` (gitignored). The measurement harness merges the public fixture with the local overrides. Retention: local ground-truth entries are deleted on the subject's request — remove their row from the local override.",
   "targets": [
     {
       "id": "public-dev-1",
@@ -62,6 +62,96 @@
         "personal": null
       },
       "note": "Validates Eastern-order reversal: both wang.xiaoming@ and xiaoming.wang@ should appear as candidates."
+    },
+    {
+      "id": "google-workspace-startup-1",
+      "name": "EXAMPLE Founder",
+      "company": "EXAMPLE YC Startup",
+      "person_plan": {
+        "handles": {"github": null, "hn": null},
+        "employer": {"name": "EXAMPLE YC Startup", "domains": ["example.dev"]}
+      },
+      "audience": "google-workspace-tenant",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Replace with a real founder on a Google-Workspace tenant. The hard case SMTP can't crack: run with --allow-google-account and measure whether the Google People API + name_match disambiguates where SMTP returns inconclusive. Set handles.hn to test the HN sensor on this population."
+    },
+    {
+      "id": "m365-corporate-1",
+      "name": "EXAMPLE Enterprise Contact",
+      "company": "EXAMPLE Enterprise",
+      "person_plan": {
+        "employer": {"name": "EXAMPLE Enterprise", "domains": ["example-corp.com"]}
+      },
+      "audience": "microsoft-365-tenant",
+      "ground_truth": {
+        "work": null,
+        "personal": null
+      },
+      "note": "Replace with a real contact on a Microsoft 365 tenant (MX = mail.protection.outlook.com). The current gap: SMTP returns inconclusive and there's no M365 existence probe wired, so this measures the floor — does the pipeline degrade honestly to pattern-guess + channel hints? See docs/plans/2026-06-11-m365-spike.md."
+    },
+    {
+      "id": "founder-with-hn-1",
+      "name": "EXAMPLE HN Founder",
+      "company": "EXAMPLE Linear-shaped",
+      "person_plan": {
+        "handles": {"hn": "example_hn"},
+        "employer": {"name": "EXAMPLE Linear-shaped", "domains": ["example.app"]}
+      },
+      "audience": "founder-with-hn",
+      "ground_truth": {"work": null, "personal": null},
+      "note": "Identity-engine archetype: the HN handle is an untrusted hint, but an address on the employer domain BINDS via employer_match (ENG-8) so it can be Google-probed. Measures whether HN-only addresses are correctly left unbound."
+    },
+    {
+      "id": "rel-me-dev-1",
+      "name": "EXAMPLE Indieweb Dev",
+      "company": "EXAMPLE",
+      "person_plan": {
+        "handles": {"github": "example_dev"},
+        "personal_domains": ["example-indie.dev"],
+        "employer": {"name": "EXAMPLE", "domains": ["example.com"]}
+      },
+      "audience": "rel-me-personal-domain",
+      "ground_truth": {"work": null, "personal": null},
+      "note": "Identity-engine archetype: a personal_site mailbox on a bidirectionally rel=me-verified domain BINDS (anchored observation + rel=me ownership = 2 signals, ENG-8). Measures the rel_me sensor + the binding gate together."
+    },
+    {
+      "id": "namesake-ambiguity-1",
+      "name": "EXAMPLE Common Name",
+      "company": "EXAMPLE",
+      "person_plan": {
+        "handles": {"github": "example_common"},
+        "employer": {"name": "EXAMPLE", "domains": ["example.com"]}
+      },
+      "audience": "namesake-multiple-matches",
+      "ground_truth": {"work": null, "personal": null},
+      "note": "Identity-engine archetype: a common name that should resolve to ambiguity=multiple_plausible_matches (the mechanical Tier-2 trigger). Measures whether the pipeline ABSTAINS — no bound candidate, no probe — rather than attributing a namesake's address."
+    },
+    {
+      "id": "pgp-corroborated-1",
+      "name": "EXAMPLE Privacy Dev",
+      "company": "EXAMPLE",
+      "person_plan": {
+        "handles": {"github": "example_pgp"},
+        "employer": {"name": "EXAMPLE", "domains": ["example.com"]}
+      },
+      "audience": "pgp-owner-uid",
+      "ground_truth": {"work": null, "personal": null},
+      "note": "Identity-engine archetype: an address corroborated by a keys.openpgp.org owner-UID (E3). Measures that PGP is treated as deliverability-axis corroboration (pairs with another signal to bind), never identity-binding by itself (ENG-6)."
+    },
+    {
+      "id": "package-publisher-1",
+      "name": "EXAMPLE OSS Maintainer",
+      "company": "EXAMPLE",
+      "person_plan": {
+        "packages": [{"registry": "pypi", "name": "example-pkg"}],
+        "employer": {"name": "EXAMPLE", "domains": ["example.com"]}
+      },
+      "audience": "package-registry-email",
+      "ground_truth": {"work": null, "personal": null},
+      "note": "Identity-engine archetype: a publisher email off a PyPI/npm package the person authored (near-100% precision when present). Measures the package_registry sensor."
     }
   ]
 }

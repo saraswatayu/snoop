@@ -340,6 +340,116 @@ def test_budget_exhausted_domains_left_unprobed():
         assert cands[1].smtp_verdict == "unprobed"
 
 
+# ---- SSRF guard: never dial a private/internal MX ---------------------------
+
+
+def test_smtp_refuses_private_mx(monkeypatch):
+    """A candidate domain whose MX resolves to a private/loopback/link-local
+    address must NOT trigger an SMTP connection — that would be an internal
+    port-probe (SSRF). The probe fails closed to 'unprobed' and never opens
+    a socket."""
+    from lib import verify_smtp
+
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d, **k: ("internal.mx.local", None))
+    monkeypatch.setattr(verify_smtp, "is_public_host", lambda h, **k: False)
+    opened: list[str] = []
+    monkeypatch.setattr(verify_smtp.DomainProbe, "_open",
+                        lambda self: opened.append(self.mx or ""))
+
+    probe = verify_smtp.DomainProbe("evil.example", "verify@example.com", 5)
+    verdict, _provider, _code = probe.test("victim@evil.example")
+
+    assert verdict == "unprobed"
+    assert opened == []  # the guard blocked the connection attempt entirely
+    assert probe.error and "public" in probe.error.lower()
+
+
+def test_smtp_allows_public_mx(monkeypatch):
+    """A public MX still gets probed (the guard only blocks private targets), and
+    the connection is pinned to the validated IP, not the name."""
+    from lib import verify_smtp
+
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d, **k: ("aspmx.l.google.com", None))
+    monkeypatch.setattr(verify_smtp, "is_public_host", lambda h, **k: True)
+    monkeypatch.setattr(verify_smtp, "resolve_public_ip", lambda h, **k: "142.250.1.27")
+    opened: list[str] = []
+    monkeypatch.setattr(verify_smtp.DomainProbe, "_open",
+                        lambda self: opened.append(self._mx_ip or ""))
+
+    probe = verify_smtp.DomainProbe("openai.com", "verify@example.com", 5)
+    probe.test("pete@openai.com")
+
+    assert opened == ["142.250.1.27"]  # the pinned validated IP, not the name
+
+
+def test_smtp_connect_pins_validated_ip_not_the_name(monkeypatch):
+    """DNS-rebinding guard: the validated public IP is what we connect to, not a
+    re-resolution of the MX name. A rebinding MX that answers public for the guard
+    check and private for the connect must never reach the private address."""
+    from lib import verify_smtp
+
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d, **k: ("rebind.evil.example", None))
+    monkeypatch.setattr(verify_smtp, "is_public_host", lambda h, **k: True)
+    monkeypatch.setattr(verify_smtp, "resolve_public_ip",
+                        lambda h, **k: "203.0.113.10")  # the validated, pinned IP
+
+    connected: list = []
+
+    class SpySMTP:
+        def __init__(self, *a, **k):
+            pass
+
+        def connect(self, host, port=0):
+            connected.append((host, port))
+            return (220, b"ok")
+
+        def ehlo_or_helo_if_needed(self):
+            pass
+
+        def mail(self, *a):
+            pass
+
+        def rcpt(self, addr):
+            return (250, b"ok")
+
+        def quit(self):
+            pass
+
+    monkeypatch.setattr(verify_smtp.smtplib, "SMTP", lambda *a, **k: SpySMTP())
+
+    probe = verify_smtp.DomainProbe("evil.example", "verify@example.com", 5)
+    probe.test("victim@evil.example")
+
+    assert connected, "the probe should have opened a connection"
+    assert all(host == "203.0.113.10" for host, _ in connected)
+    assert all(host != "rebind.evil.example" for host, _ in connected)
+
+
+def test_smtp_refuses_mx_that_resolves_only_private(monkeypatch):
+    """is_public_host may pass (e.g. the name check is lenient), but if pinning the
+    address yields no public IP — a rebinding MX that now resolves only to a
+    private address — the probe fails closed to 'unprobed' and opens no socket."""
+    from lib import verify_smtp
+
+    monkeypatch.setattr(verify_smtp, "get_mx",
+                        lambda d, **k: ("rebind.evil.example", None))
+    monkeypatch.setattr(verify_smtp, "is_public_host", lambda h, **k: True)
+    monkeypatch.setattr(verify_smtp, "resolve_public_ip", lambda h, **k: None)
+    opened: list[str] = []
+    monkeypatch.setattr(verify_smtp.DomainProbe, "_open",
+                        lambda self: opened.append(self._mx_ip or ""))
+
+    probe = verify_smtp.DomainProbe("evil.example", "verify@example.com", 5)
+    verdict, _provider, _code = probe.test("victim@evil.example")
+
+    assert verdict == "unprobed"
+    assert opened == []
+    assert probe.error and "public address" in probe.error.lower()
+
+
 # ---- mx_provider exposure for renderer hints --------------------------------
 
 

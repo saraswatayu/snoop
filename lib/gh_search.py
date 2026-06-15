@@ -35,39 +35,10 @@ import json
 import subprocess
 import urllib.error
 import urllib.parse
-from typing import Any
 
 from . import _gh_api
 from ._gh_api import GhCaller
-from .normalize import fold_ascii, name_match
-
-
-# Reuse the org-suffix token set from person_resolve so company matching
-# stays consistent across modules. Imported lazily to avoid a circular
-# dependency (person_resolve imports nothing from gh_search).
-def _employer_match(observed_company: str | None, target_employer_name: str) -> bool:
-    """Same tolerant token-set match person_resolve uses for anchor binding.
-    Replicated here (vs. imported) to keep gh_search standalone — it gets
-    called from snoop.py's pipeline, not from person_resolve, so there's
-    no need to couple them."""
-    if not observed_company or not target_employer_name:
-        return False
-    _ORG_SUFFIX_TOKENS = frozenset({
-        "inc", "llc", "ltd", "corp", "co", "company",
-        "gmbh", "ag", "sa", "bv", "kg", "ltda", "srl", "spa",
-        "lp", "llp", "plc",
-    })
-
-    def _tokens(s: str) -> set[str]:
-        folded = fold_ascii(s).lstrip("@")
-        raw = [t.strip(",.()[]{}\"'") for t in folded.split()]
-        return {t for t in raw if t and t not in _ORG_SUFFIX_TOKENS}
-
-    obs = _tokens(observed_company)
-    tgt = _tokens(target_employer_name)
-    if not obs or not tgt:
-        return False
-    return obs.issubset(tgt) or tgt.issubset(obs)
+from .normalize import employer_match as _employer_match, name_match
 
 
 def _default_gh_caller() -> GhCaller | None:
@@ -130,7 +101,7 @@ def find_github_handle(
         # Fetch the profile to get the name/company fields the search
         # response doesn't include
         try:
-            profile = caller(f"/users/{login}")
+            profile = caller(f"/users/{_gh_api.quote_handle(login)}")
         except (subprocess.SubprocessError, urllib.error.URLError,
                 json.JSONDecodeError, OSError):
             continue
@@ -152,19 +123,3 @@ def find_github_handle(
     if len(matches) != 1:
         return None
     return matches[0]
-
-
-def _safe_find_github_handle(
-    name: str,
-    employer_name: str | None = None,
-    *,
-    gh_caller: Any = None,
-) -> str | None:
-    """find_github_handle wrapped in a try/except — when called from inside
-    person_resolve, any unexpected error must not break the rest of the
-    pipeline. Returns None on anything unexpected, including programmer
-    errors elsewhere in the call chain."""
-    try:
-        return find_github_handle(name, employer_name, gh_caller=gh_caller)
-    except Exception:  # noqa: BLE001
-        return None

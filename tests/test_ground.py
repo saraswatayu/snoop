@@ -65,6 +65,45 @@ def test_verified_matches_on_longest_token_when_whole_value_normalized():
     assert out[0].verified is True
 
 
+def test_url_value_not_verified_by_shared_host_token():
+    """A profile URL must NOT verify against a DIFFERENT profile on the same
+    host: 'github.com/janedoe' shares only the generic host token 'github.com'
+    with 'github.com/someoneelse', so the longest-token fallback used to stamp
+    it verified — laundering a namesake URL as source-confirmed."""
+    obs = [_obs("o1", "see https://github.com/someoneelse for code")]
+    out = ground([_fact(value="https://github.com/janedoe", ids=["o1"],
+                        kind="social_link")], obs)
+    assert out[0].verified is False
+
+
+def test_url_value_verified_when_distinctive_segment_present():
+    obs = [_obs("o1", "their account is github.com/janedoe (confirmed)")]
+    out = ground([_fact(value="https://github.com/janedoe", ids=["o1"],
+                        kind="social_link")], obs)
+    assert out[0].verified is True
+
+
+def test_ground_preserves_verdict_and_marker():
+    """The analyst emits a per-fact verdict (email deliverability) and marker
+    ([+]/[?] belonging) per SKILL.md; --ground must PRESERVE them, not strip
+    them — otherwise the machine output the evals grade omits fields production
+    was told to produce."""
+    facts = [{
+        "kind": "email", "label": "", "value": "alice@corp.com", "detail": "",
+        "confidence": 0.9, "evidence_ids": ["o1"], "reasoning": "",
+        "verdict": "verified", "marker": "[+]",
+    }]
+    out = ground(facts, OBS)
+    assert out[0].verdict == "verified"
+    assert out[0].marker == "[+]"
+
+
+def test_ground_defaults_verdict_marker_to_none():
+    out = ground([_fact(value="alice@corp.com", ids=["o1"])], OBS)
+    assert out[0].verdict is None
+    assert out[0].marker is None
+
+
 def test_confidence_is_clamped():
     out = ground([_fact(confidence=5.0, ids=["o1"], value="alice@corp.com")], OBS)
     assert out[0].confidence == 1.0
@@ -80,3 +119,23 @@ def test_returns_grounded_fact_objects_in_order():
     out = ground(facts, OBS)
     assert [f.kind for f in out] == ["email", "consistency_note"]
     assert all(isinstance(f, GroundedFact) for f in out)
+
+
+def test_string_evidence_ids_is_one_citation_not_char_iteration():
+    """A model that emits evidence_ids as a bare string must be treated as ONE
+    citation id, not iterated character-by-character (which silently drops a real
+    multi-char id, or char-matches a single-char one)."""
+    fact = _fact(value="alice@corp.com")
+    fact["evidence_ids"] = "o1"  # a bare string, not a list
+    out = ground([fact], OBS)
+    assert len(out) == 1
+    assert out[0].evidence_ids == ["o1"]
+
+
+def test_non_list_evidence_ids_drops_the_fact():
+    """A non-list, non-string evidence_ids (dict/number) is malformed: no valid
+    citation, so the fact is dropped (fail closed) rather than grounding via key
+    iteration."""
+    fact = _fact()
+    fact["evidence_ids"] = {"o1": True}
+    assert ground([fact], OBS) == []

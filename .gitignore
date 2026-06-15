@@ -10,10 +10,21 @@ __pycache__/
 *.swp
 /tmp_*
 
-# Internal design docs — keep out of the public repo. Local-only.
-docs/plans/
+# Local tooling / scratch dirs — never committed.
+.benchmarks/
+.claude/
+.gstack/
+
+# Internal docs (designs, plans, specs) — keep out of the public repo. Local-only.
+docs/
 
 # Calibration fixture overrides may contain real targets' email addresses.
 # Local-only; never committed.
 tests/fixtures/calibration_targets.local.json
 tests/fixtures/calibration_report.md
+
+# Eval fixtures distilled from real cases may contain real identities while
+# being fictionalized, and eval runs transcribe whatever bundle they graded.
+# Local-only; never committed.
+tests/evals/fixtures/*.local.json
+tests/evals/runs/

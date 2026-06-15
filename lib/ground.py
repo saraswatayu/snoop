@@ -21,15 +21,23 @@ running if its failure modes are INDEPENDENT of the thing it checks. A second
 LLM reading the same adversarial bundle shares the generator's errors; a plain
 substring/set check does not. Keep this until prompt injection is a solved,
 relied-upon property — not before. (Personal read-only tool: the blast radius of
-a wrong fact is small, so this is a quality net more than a security wall, but
-the existence check is cheap and keeps the [+]/[?] markers honest.)
+a wrong fact is small, so this is a quality net more than a security wall.)
+
+Scope of the guarantee, stated honestly: the existence check DROPS any fact
+whose citations don't resolve, and `verified` marks whether the value appears in
+a cited observation. It does NOT license the analyst's `verdict`/`marker` against
+the evidence — those are passed through verbatim (see `_opt_str`), so a `[+]` or
+`verdict="verified"` rides on the analyst's word, gated only by citation-existence
+and value-appears. Licensing the verdict word against `data.smtp` is the planned
+`--ground` extension (TODOS: "Promote the verdict-word check into --ground").
 """
 
 from __future__ import annotations
 
 import re
+import urllib.parse
 from dataclasses import dataclass, field
-from typing import Iterable, Protocol
+from typing import Iterable, Protocol, Sequence
 
 
 class _Observation(Protocol):
@@ -45,7 +53,14 @@ class GroundedFact:
 
     `evidence_ids` is filtered to citations that exist. `grounded` is always
     True for a returned fact (ungrounded facts are dropped). `verified` is the
-    substring confirmation against a cited observation."""
+    substring confirmation against a cited observation.
+
+    `verdict` (email deliverability; vocabulary owned by lib.schema.EMAIL_VERDICTS)
+    and `marker` (belonging; lib.schema.BELONGS_MARKERS) are the analyst's per-fact
+    contract fields (SKILL.md Step 3). They are PRESERVED verbatim, not interpreted — the
+    deterministic check has no opinion on them; it only passes them through so
+    the machine output carries what the analyst produced instead of silently
+    dropping it. Optional: a fact without them keeps None."""
     kind: str
     label: str
     value: str
@@ -55,6 +70,8 @@ class GroundedFact:
     evidence_ids: list[str] = field(default_factory=list)
     grounded: bool = True
     verified: bool = False
+    verdict: str | None = None
+    marker: str | None = None
 
 
 # Tokens long enough to be meaningful for the substring check. A 2-char token
@@ -66,22 +83,49 @@ def _significant_tokens(value: str) -> list[str]:
     return [m.group(0).lower() for m in _TOKEN.finditer(value or "")]
 
 
+def _distinctive_url_token(value: str) -> str | None:
+    """For a URL value, the last non-empty path segment — the username / repo /
+    slug that actually identifies it. Returns None when the value isn't a URL
+    with a path. The host (github.com, x.com) is deliberately NOT used: it is
+    generic and shared across every profile on the platform, so matching on it
+    would verify a DIFFERENT profile's URL."""
+    s = (value or "").strip()
+    if "://" not in s:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(s)
+    except ValueError:
+        return None
+    if not parsed.netloc:
+        return None
+    segments = [seg for seg in parsed.path.split("/") if seg]
+    return segments[-1].lower() if segments else None
+
+
 def _value_appears(value: str, haystacks: Iterable[str]) -> bool:
     """True when the value (or its most significant token) shows up verbatim in
     any cited observation. Whole-value match first; else fall back to the
     longest token so a normalized form (lowercased email, trimmed title) still
-    verifies without a brittle exact match."""
+    verifies without a brittle exact match.
+
+    A URL value is matched on its DISTINCTIVE path segment, not the longest
+    token: the longest token of `https://github.com/janedoe` is the generic host
+    `github.com`, which would spuriously verify against any other github URL. The
+    last path segment (`janedoe`) is the identity that must actually appear."""
     v = (value or "").strip().lower()
     if not v:
         return False
     blob = "\n".join(h.lower() for h in haystacks)
     if v in blob:
         return True
+    url_token = _distinctive_url_token(value)
+    if url_token is not None:
+        return url_token in blob
     toks = sorted(_significant_tokens(value), key=len, reverse=True)
     return any(t in blob for t in toks[:1])  # the single longest token
 
 
-def ground(facts: list[dict], observations: list[_Observation]) -> list[GroundedFact]:
+def ground(facts: list[dict], observations: Sequence[_Observation]) -> list[GroundedFact]:
     """Filter and stamp model facts against the evidence bundle.
 
     For each fact:
@@ -95,7 +139,11 @@ def ground(facts: list[dict], observations: list[_Observation]) -> list[Grounded
     kept: list[GroundedFact] = []
 
     for fact in facts:
-        raw_ids = fact.get("evidence_ids") or []
+        raw_ids = fact.get("evidence_ids")
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]  # a bare id string is ONE citation, not characters
+        elif not isinstance(raw_ids, list):
+            raw_ids = []  # malformed (dict/number/None) -> no citation, fail closed
         valid = [i for i in raw_ids if isinstance(i, str) and i in by_id]
         if not valid:
             continue  # the gate: a fact with no real citation is dropped
@@ -111,8 +159,16 @@ def ground(facts: list[dict], observations: list[_Observation]) -> list[Grounded
             evidence_ids=valid,
             grounded=True,
             verified=_value_appears(str(fact.get("value", "")), cited_content),
+            verdict=_opt_str(fact.get("verdict")),
+            marker=_opt_str(fact.get("marker")),
         ))
     return kept
+
+
+def _opt_str(value: object) -> str | None:
+    """Pass a verdict/marker through as a string, or None if absent. No
+    validation — the analyst's contract fields are preserved verbatim."""
+    return str(value) if value is not None else None
 
 
 def _clamp01(value: object) -> float:

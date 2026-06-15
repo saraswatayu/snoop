@@ -39,7 +39,6 @@ if str(_SKILL_ROOT) not in sys.path:
     sys.path.insert(0, str(_SKILL_ROOT))
 
 import snoop  # noqa: E402
-from lib.score import score_all  # noqa: E402
 
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "calibration_targets.json"
@@ -103,7 +102,7 @@ def measure_one_target(target: dict[str, Any]) -> dict[str, Any]:
     person = resolve_person(name, plan=plan)
     results = snoop.run_pipeline(person)
     candidates = snoop.cluster_candidates(results)
-    score_all(candidates, person)
+    candidates.sort(key=snoop._probe_rank)
 
     return {
         "id": target.get("id"),
@@ -126,9 +125,9 @@ def measure_one_target(target: dict[str, Any]) -> dict[str, Any]:
         "final_candidates": [
             {
                 "address": c.address,
-                "belongs_to_person": c.belongs_to_person,
-                "current_work_address": c.current_work_address,
-                "deliverable": c.deliverable,
+                "smtp_verdict": c.smtp_verdict,
+                "account_exists": c.account_exists,
+                "sources": sorted({s.type for s in c.sources}),
             }
             for c in candidates
         ],
@@ -215,10 +214,10 @@ def format_report(
         if tr["final_candidates"]:
             top = tr["final_candidates"][0]
             lines.append(
-                f"- **Final top**: `{top['address']}` "
-                f"(belongs={top['belongs_to_person']}, "
-                f"work={top['current_work_address']}, "
-                f"deliv={top['deliverable']})"
+                f"- **Top candidate**: `{top['address']}` "
+                f"(smtp={top['smtp_verdict']}, "
+                f"account_exists={top['account_exists']}, "
+                f"sources={','.join(top['sources']) or 'none'})"
             )
         gt = tr.get("ground_truth", {})
         if any(gt.values()):
