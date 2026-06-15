@@ -135,8 +135,15 @@ def resolve_public_ip(host: str, *, port: int | None = None,
 
 def _ip_is_public(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)  # raises ValueError if not an IP literal
-    return not (addr.is_private or addr.is_loopback or addr.is_link_local
-                or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+    # `is_global` is the authoritative "globally routable" test (it tracks the
+    # IANA special-purpose registry): it rejects CGNAT / shared address space
+    # (100.64.0.0/10 — Tailscale tailnets + MagicDNS live here), benchmarking
+    # (198.18.0.0/15) and documentation (192.0.2.0/24) ranges that the
+    # hand-rolled is_private/is_reserved flags below silently miss. Both are
+    # kept: the explicit flags are belt-and-suspenders for any is_global edge.
+    return (addr.is_global
+            and not (addr.is_private or addr.is_loopback or addr.is_link_local
+                     or addr.is_reserved or addr.is_multicast or addr.is_unspecified))
 
 
 def _safe_ip_is_public(ip: str) -> bool:
