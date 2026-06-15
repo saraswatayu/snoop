@@ -139,8 +139,12 @@ def _ip_is_public(ip: str) -> bool:
     # IANA special-purpose registry): it rejects CGNAT / shared address space
     # (100.64.0.0/10 — Tailscale tailnets + MagicDNS live here), benchmarking
     # (198.18.0.0/15) and documentation (192.0.2.0/24) ranges that the
-    # hand-rolled is_private/is_reserved flags below silently miss. Both are
-    # kept: the explicit flags are belt-and-suspenders for any is_global edge.
+    # hand-rolled is_private/is_reserved flags below silently miss. Keep the
+    # disjunction too: `is_multicast` is the one flag NOT subsumed by is_global
+    # — global-scope multicast (224.0.0.1, 239.255.255.250, ff0e::1) is
+    # is_global=True, so dropping it would let multicast targets through. The
+    # other five flags are already covered by is_global; they're kept only for
+    # legibility, so don't "simplify" the multicast check away with them.
     return (addr.is_global
             and not (addr.is_private or addr.is_loopback or addr.is_link_local
                      or addr.is_reserved or addr.is_multicast or addr.is_unspecified))
