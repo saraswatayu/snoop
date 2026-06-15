@@ -48,9 +48,9 @@ class GroundedFact:
     True for a returned fact (ungrounded facts are dropped). `verified` is the
     substring confirmation against a cited observation.
 
-    `verdict` (email deliverability: verified|google-confirmed|pattern-guess)
-    and `marker` ([+]/[?] belonging) are the analyst's per-fact contract fields
-    (SKILL.md Step 3). They are PRESERVED verbatim, not interpreted — the
+    `verdict` (email deliverability; vocabulary owned by lib.schema.EMAIL_VERDICTS)
+    and `marker` (belonging; lib.schema.BELONGS_MARKERS) are the analyst's per-fact
+    contract fields (SKILL.md Step 3). They are PRESERVED verbatim, not interpreted — the
     deterministic check has no opinion on them; it only passes them through so
     the machine output carries what the analyst produced instead of silently
     dropping it. Optional: a fact without them keeps None."""
@@ -132,7 +132,11 @@ def ground(facts: list[dict], observations: Sequence[_Observation]) -> list[Grou
     kept: list[GroundedFact] = []
 
     for fact in facts:
-        raw_ids = fact.get("evidence_ids") or []
+        raw_ids = fact.get("evidence_ids")
+        if isinstance(raw_ids, str):
+            raw_ids = [raw_ids]  # a bare id string is ONE citation, not characters
+        elif not isinstance(raw_ids, list):
+            raw_ids = []  # malformed (dict/number/None) -> no citation, fail closed
         valid = [i for i in raw_ids if isinstance(i, str) and i in by_id]
         if not valid:
             continue  # the gate: a fact with no real citation is dropped

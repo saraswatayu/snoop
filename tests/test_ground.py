@@ -119,3 +119,23 @@ def test_returns_grounded_fact_objects_in_order():
     out = ground(facts, OBS)
     assert [f.kind for f in out] == ["email", "consistency_note"]
     assert all(isinstance(f, GroundedFact) for f in out)
+
+
+def test_string_evidence_ids_is_one_citation_not_char_iteration():
+    """A model that emits evidence_ids as a bare string must be treated as ONE
+    citation id, not iterated character-by-character (which silently drops a real
+    multi-char id, or char-matches a single-char one)."""
+    fact = _fact(value="alice@corp.com")
+    fact["evidence_ids"] = "o1"  # a bare string, not a list
+    out = ground([fact], OBS)
+    assert len(out) == 1
+    assert out[0].evidence_ids == ["o1"]
+
+
+def test_non_list_evidence_ids_drops_the_fact():
+    """A non-list, non-string evidence_ids (dict/number) is malformed: no valid
+    citation, so the fact is dropped (fail closed) rather than grounding via key
+    iteration."""
+    fact = _fact()
+    fact["evidence_ids"] = {"o1": True}
+    assert ground([fact], OBS) == []
