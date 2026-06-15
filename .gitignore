@@ -17,6 +17,7 @@ __pycache__/
 
 # Internal docs (designs, plans, specs) — keep out of the public repo. Local-only.
 docs/
+TODOS.md
 
 # Calibration fixture overrides may contain real targets' email addresses.
 # Local-only; never committed.
