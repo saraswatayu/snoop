@@ -299,3 +299,15 @@ def test_roster_passes_when_all_expected_fixtures_ran():
     }
     result = gate.aggregate(trials, expected_fixtures=["happy-dev", "m365-exec"])
     assert result.passed is True
+
+
+def test_empty_roster_with_no_trials_fails_closed():
+    """An EMPTY expected_fixtures list with zero trials is the same
+    misconfiguration as no roster at all (SPECS failed to import -> the runner
+    derives an empty roster AND runs nothing). `[] is not None` must NOT route
+    this around the zero-fixture guard and read green on a run that measured
+    nothing."""
+    result = gate.aggregate({}, expected_fixtures=[])
+    assert result.passed is False
+    assert result.hard_failures
+    assert any("zero fixtures" in detail for _f, _g, detail in result.hard_failures)

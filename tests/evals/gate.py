@@ -178,8 +178,12 @@ def aggregate(
             suite.soft_flagged += 1
             rerun.append(fixture_id)
 
-    # The measurement instrument must not pass when it measured nothing.
-    if expected_fixtures is not None:
+    # The measurement instrument must not pass when it measured nothing. Note the
+    # truthiness check (not `is not None`): an EMPTY roster is treated as "no
+    # roster supplied", so an empty `expected_fixtures` plus zero trials (SPECS
+    # failed to import -> empty derived roster AND nothing ran) still falls
+    # through to the zero-fixture guard instead of vacuously passing.
+    if expected_fixtures:
         for fid in expected_fixtures:
             agg = per_fixture.get(fid)
             if agg is None:
