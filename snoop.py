@@ -1438,6 +1438,7 @@ def _merge_probe_verdicts(real: EmailCandidate, staged: EmailCandidate) -> None:
     real.account_exists = staged.account_exists
     real.account_display_name = staged.account_display_name
     real.account_photo_url = staged.account_photo_url
+    real.gaia_id = staged.gaia_id  # carry the Gaia id so reason.py's verified-Gaia clustering (ENG-9) fires on live probes, not just unit tests
     if staged.mx_provider:
         real.mx_provider = staged.mx_provider
     existing = {(s.type, s.url) for s in real.sources}
@@ -1626,11 +1627,16 @@ def main(argv: list[str] | None = None) -> int:
     if verify_addresses:
         person, candidates = _verify_setup(verify_addresses, args)
         candidates.sort(key=_probe_rank)
-        _probe_candidates(person, candidates, args,
-                          google_ready=_google_ready(capabilities),
-                          deadline_sec=args.deadline)
+        probe_rec = _probe_candidates(person, candidates, args,
+                                      google_ready=_google_ready(capabilities),
+                                      deadline_sec=args.deadline)
+        # Carry the Phase-2 degradation record (e.g. deadline-exceeded) into the
+        # bundle just like the main path does — otherwise a probe timeout in
+        # --verify mode is indistinguishable from "ran and found nothing."
+        verify_records = [probe_rec] if probe_rec is not None else []
         _reassess_identity(person, candidates)
-        _emit_observations(person, candidates, {}, warnings, out_path=args.out)
+        _emit_observations(person, candidates, {}, warnings, out_path=args.out,
+                           run_records=verify_records)
         return 0
 
     if not args.name and not args.person_plan:
