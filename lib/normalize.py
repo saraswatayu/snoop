@@ -20,8 +20,8 @@ Design choices:
   middle initials are dropped. Multi-particle surnames ("van der Berg") are
   joined AND space-stripped as separate variants. We do NOT do a hard
   is-this-Eastern-order detection — for any name that has exactly 2 tokens we
-  ALSO emit the reversed pairing as a variant, and let the resolver/scorer
-  let evidence pick the winner.
+  ALSO emit the reversed pairing as a variant, and let the resolver and the
+  host model pick the winner from the evidence.
 
 - IDNA: domains pass through `idna.encode` if installed, otherwise
   `str.encode('idna')`. Non-ASCII characters in the localpart are NOT handled

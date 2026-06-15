@@ -459,7 +459,7 @@ def fetch_google_account(
         # so a confirmed Gaia binding answers the question — additional
         # probes burn the daily budget and risk Google flagging the account.
         # Subsequent candidates are left as `unprobed` rather than `not_found`
-        # so the scorer knows we abstained, not negated.
+        # so the host model knows we abstained, not negated.
         if rate_limited_seen or verified_seen:
             c.account_exists = "unprobed"
             continue

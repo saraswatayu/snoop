@@ -88,8 +88,8 @@ def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str
 def _extract_emails_from_text(text: str) -> list[tuple[str, str]]:
     """Return a list of (email, extraction_method) tuples from a block of text.
 
-    `extraction_method` is "mailto" or "regex". Mailto-tagged hits get a
-    higher trust weight at the scorer; raw-regex hits sometimes are
+    `extraction_method` is "mailto" or "regex". Mailto-tagged hits carry
+    higher trust for the host model; raw-regex hits sometimes are
     obfuscated or false-positives.
 
     Deduplication is by normalized address (not by method), keeping the

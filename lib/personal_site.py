@@ -18,8 +18,8 @@ resolver fan-out enforces a wall-clock cap via `future.result(timeout=5)`.
 
 Generic-inbox addresses (`info@`, `hello@`, `contact@`) are KEPT, not
 dropped — many one-person consultancies legitimately publish
-`hello@theirname.com` as their personal address. The scorer will
-downrank these via a generic-localpart check. System-only addresses
+`hello@theirname.com` as their personal address. The host model can
+weigh these down by their generic localpart. System-only addresses
 (`noreply@`, `webmaster@`, `postmaster@`, `abuse@`) ARE dropped here.
 """
 
@@ -41,7 +41,7 @@ _PATHS_TO_TRY = ("/", "/about", "/contact")
 # Drop these system-only addresses outright (EXACT localpart match —
 # deliberately stricter than the prefix policy in the profile sensors).
 # Generic-but-legitimate localparts (info@, hello@, contact@) are kept; the
-# scorer downranks them. The reserved-domain set is shared (lib.normalize).
+# host model weighs them down. The reserved-domain set is shared (lib.normalize).
 _SYSTEM_LOCALPARTS = (
     "noreply", "no-reply", "do-not-reply",
     "postmaster", "abuse", "webmaster",
@@ -71,7 +71,7 @@ HttpGet = Callable[[str], str | None]  # url -> body or None on 404
 
 def _is_extractable(email: str) -> bool:
     """Drop only system-only mailto addresses. Generic-but-legitimate
-    locals (hello@, info@) pass through; scorer handles them."""
+    locals (hello@, info@) pass through; the host model judges them."""
     if not email or "@" not in email:
         return False
     local, _, domain = email.lower().partition("@")

@@ -32,7 +32,8 @@ What v1 DOES NOT (deferred to v2):
 
 The contract: v1 either binds anchors with confidence, OR sets
 ambiguity to `insufficient_identity_evidence` and lets the rest of
-the pipeline run with weaker downstream-scorer confidence.
+the pipeline run, leaving the host model to judge with lower identity
+confidence.
 """
 
 from __future__ import annotations

@@ -343,7 +343,7 @@ def verify_candidates(
             continue
         domain = c.address.rsplit("@", 1)[1].lower()
 
-        # Skip personal providers — the scorer downstream knows what to
+        # Skip personal providers — the host model downstream knows what to
         # do with an unprobed personal-provider address.
         if skip_personal_providers and is_personal_provider(domain):
             c.smtp_verdict = "unprobed"
