@@ -21,8 +21,15 @@ running if its failure modes are INDEPENDENT of the thing it checks. A second
 LLM reading the same adversarial bundle shares the generator's errors; a plain
 substring/set check does not. Keep this until prompt injection is a solved,
 relied-upon property — not before. (Personal read-only tool: the blast radius of
-a wrong fact is small, so this is a quality net more than a security wall, but
-the existence check is cheap and keeps the [+]/[?] markers honest.)
+a wrong fact is small, so this is a quality net more than a security wall.)
+
+Scope of the guarantee, stated honestly: the existence check DROPS any fact
+whose citations don't resolve, and `verified` marks whether the value appears in
+a cited observation. It does NOT license the analyst's `verdict`/`marker` against
+the evidence — those are passed through verbatim (see `_opt_str`), so a `[+]` or
+`verdict="verified"` rides on the analyst's word, gated only by citation-existence
+and value-appears. Licensing the verdict word against `data.smtp` is the planned
+`--ground` extension (TODOS: "Promote the verdict-word check into --ground").
 """
 
 from __future__ import annotations
