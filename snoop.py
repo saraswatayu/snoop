@@ -37,7 +37,6 @@ from __future__ import annotations
 import argparse
 import copy
 import json
-import re
 import sys
 import threading
 import time
@@ -52,14 +51,8 @@ from lib.gh_profile import fetch_gh_profile, fetch_recent_repos
 from lib.google_account import fetch_google_account
 from lib.hn_profile import fetch_hn_profile
 from lib.ledger import append_run, build_record, ledger_health
-from lib.normalize import (
-    is_personal_provider,
-    localpart_templates,
-    name_match,
-    parse_name,
-)
 from lib.package_registry import fetch_package_emails
-from lib.pattern_gen import _DEFAULT_TEMPLATE_ORDER, fetch_pattern_candidates
+from lib.pattern_gen import fetch_pattern_candidates
 from lib.person_resolve import resolve_person
 from lib.pgp_keyserver import fetch_pgp_emails
 from lib.rel_me import verify_rel_me
@@ -72,7 +65,29 @@ from lib.schema import (
     RunRecord,
     Source,
 )
+# is_google_hosted is re-exported here only so tests can target
+# `monkeypatch.setattr(snoop, "is_google_hosted", ...)` as a no-network tripwire;
+# the live MX lookup itself now lives in lib.pipeline.probes.autodetect_workspace_domains.
 from lib.verify_smtp import ProbeBudget, default_budget, is_google_hosted, verify_candidates
+from lib.pipeline.binding import (
+    bound_github_handle as _gh_handle,
+    bind_context as _bind_context,
+    candidate_is_bound as _candidate_is_bound,
+    reassess_identity as _reassess_identity,
+)
+from lib.pipeline.candidates import (
+    cluster_candidates,
+    primary_localparts as _primary_localparts,
+    probe_rank as _probe_rank,
+)
+from lib.pipeline.probes import (
+    _SPECULATIVE_GOOGLE_CAP,
+    autodetect_workspace_domains as _autodetect_workspace_domains,
+    google_account_candidates as _google_account_candidates,
+    google_target_domains as _google_target_domains,
+    smtp_candidates as _smtp_candidates,
+    speculative_google_candidates as _speculative_google_candidates,
+)
 
 
 # Shared wall-clock budget for the whole sensor fan-out (E6). Sensors run
@@ -430,23 +445,6 @@ def _parse_knowns(values: list[str] | None) -> list[tuple[str, str | None]]:
 # ---- pipeline orchestration -------------------------------------------------
 
 
-def _gh_handle(person: Person) -> str | None:
-    """Return the github handle ONLY if person_resolve actually bound it.
-    A handle that exists but didn't bind anchors is an untrusted hint;
-    don't fan out resolvers on it (defense against host hallucination)."""
-    handle = person.handles.get("github")
-    if not handle:
-        return None
-    validating = [a for a in person.bound_anchors if a[0] != "github_handle_exists"]
-    if len(validating) == 0:
-        # Handle exists but no validating anchors. Use it for resolvers
-        # only when ambiguity is single_plausible_match; otherwise treat
-        # as untrusted hint and skip.
-        if person.ambiguity != "single_plausible_match":
-            return None
-    return handle
-
-
 def _run_resolver(
     name: str,
     fn: Callable[[], ResolverResult],
@@ -781,358 +779,6 @@ def _run_summary(run_records: list[RunRecord]) -> str:
         else:
             parts.append(f"{r.sensor} skipped ({r.reason})")
     return "sensors: " + " · ".join(parts)
-
-
-def cluster_candidates(results: list[ResolverResult]) -> list[EmailCandidate]:
-    """Merge candidates across resolvers by lowercased address.
-
-    Source lists are concatenated; later-arriving sources are appended.
-    Per Codex finding #8 (source independence over-counted), we DO NOT
-    cluster by family in v1 — multiple appearances of the same address
-    in profile README + personal_site /about may both reflect the same
-    contact-info block. That's a v2 problem.
-    """
-    by_addr: dict[str, EmailCandidate] = {}
-    for r in results:
-        for c in r.candidates:
-            addr_key = c.address.lower()
-            if addr_key not in by_addr:
-                # Canonicalize to the lowercase form for downstream rendering
-                # and copy-paste. Without this, a candidate first seen as
-                # 'Pete@OpenAI.COM' would surface in the decision card verbatim
-                # while the SMTP probe internally lowercased it — verdict and
-                # displayed address disagree by case.
-                c.address = addr_key
-                by_addr[addr_key] = c
-            else:
-                merged = by_addr[addr_key]
-                # Merge sources, dropping exact duplicates by (type, url)
-                existing_keys = {(s.type, s.url) for s in merged.sources}
-                for s in c.sources:
-                    if (s.type, s.url) not in existing_keys:
-                        merged.sources.append(s)
-                # Combine domain-level flags (or them together)
-                merged.employer_match = merged.employer_match or c.employer_match
-                merged.employer_former_match = (
-                    merged.employer_former_match or c.employer_former_match
-                )
-                merged.is_personal_provider = (
-                    merged.is_personal_provider or c.is_personal_provider
-                )
-                # Verification-layer fields: today no pre-cluster resolver sets
-                # these, but defense-in-depth — if a future cached/manual_known
-                # resolver returns candidates with prior verdicts, don't silently
-                # drop them. First-seen-non-default wins; explicit verdicts are
-                # never overwritten by "unprobed".
-                if merged.smtp_verdict == "unprobed" and c.smtp_verdict != "unprobed":
-                    merged.smtp_verdict = c.smtp_verdict
-                if merged.account_exists == "unprobed" and c.account_exists != "unprobed":
-                    merged.account_exists = c.account_exists
-                if merged.mx_provider is None and c.mx_provider is not None:
-                    merged.mx_provider = c.mx_provider
-                if (merged.account_display_name is None
-                        and c.account_display_name is not None):
-                    merged.account_display_name = c.account_display_name
-                if (merged.account_photo_url is None
-                        and c.account_photo_url is not None):
-                    merged.account_photo_url = c.account_photo_url
-    return list(by_addr.values())
-
-
-_GOOGLE_NATIVE_DOMAIN = "google.com"
-
-
-def _google_target_domains(workspace_domains: list[str]) -> set[str]:
-    """Domains worth probing via the Google People API. Always includes the
-    literal google.com; user can add Workspace tenant domains explicitly."""
-    domains = {_GOOGLE_NATIVE_DOMAIN}
-    for d in workspace_domains or []:
-        if isinstance(d, str) and d.strip():
-            domains.add(d.strip().lower())
-    return domains
-
-
-def _autodetect_workspace_domains(
-    candidates: list[EmailCandidate],
-    explicit: list[str],
-    *,
-    is_google_hosted_fn: Callable[[str], bool] = is_google_hosted,
-) -> list[str]:
-    """Find candidate domains whose MX is Google Workspace and add them to
-    the explicit list. Skips google.com (already included) and personal
-    providers (gmail.com etc. — these ARE Google MX but probing arbitrary
-    personal addresses is invasive and wrong-scope for this tool).
-
-    One DNS lookup per unique non-skip candidate domain. Returns the merged
-    list; the caller threads it to _google_target_domains.
-
-    Function injection on is_google_hosted_fn lets tests stub the MX
-    lookup without monkeypatching the verify_smtp module globally.
-    """
-    explicit_set = {d.strip().lower() for d in explicit or [] if isinstance(d, str)}
-    seen_candidate_domains: set[str] = set()
-    additions: list[str] = []
-    for c in candidates:
-        if "@" not in c.address:
-            continue
-        d = c.address.rsplit("@", 1)[1].lower()
-        if d in seen_candidate_domains or d in explicit_set or d == _GOOGLE_NATIVE_DOMAIN:
-            continue
-        seen_candidate_domains.add(d)
-        if is_personal_provider(d):
-            continue
-        if is_google_hosted_fn(d):
-            additions.append(d)
-    return list(explicit or []) + additions
-
-
-def _probe_rank(c: EmailCandidate) -> tuple:
-    """Tiebreak ORDERING within the bound set (ENG-8): rank by whether the address
-    was actually observed (any non-pattern source) over a pure name×domain guess,
-    then by how many sources corroborate it, then address for determinism. Since
-    the ENG-8 gate now decides WHICH candidates are eligible to probe at all, this
-    only sequences the survivors so an observed address is tried first; it is no
-    longer a ranking that could let an unbound guess be probed."""
-    observed = any(s.type != "pattern" for s in c.sources)
-    return (0 if observed else 1, -len(c.sources), c.address)
-
-
-# ENG-8 Phase-1 — candidate binding (identity binds before deliverability spends).
-# Surfaces whose identity is the target's GitHub account: an address observed on
-# one of these is an anchored observation ONLY when the handle itself bound.
-_GITHUB_SURFACES = frozenset({"git_commit", "gh_profile", "gh_readme", "github_repo"})
-# Surfaces tied to a personal domain the target owns.
-_DOMAIN_SURFACES = frozenset({"personal_site", "whois"})
-
-
-def _github_identity_bound(person: Person) -> bool:
-    """True when a VALIDATING github anchor bound the handle (name/employer/
-    personal-domain match) — not merely that the handle exists. A bare
-    `github_handle_exists` is an untrusted hint and does not anchor an address."""
-    return any(t.startswith("github") and t != "github_handle_exists"
-               for t, _ in person.bound_anchors)
-
-
-def _verified_personal_domains(person: Person) -> set[str]:
-    """Personal domains proven to belong to the target by a bidirectional rel=me
-    (the IndieAuth self-attestation). This is the rel=me identity signal."""
-    return {str(v).lower() for t, v in person.bound_anchors
-            if t == "personal_domain_verified"}
-
-
-def _anchored_surface_domains(person: Person) -> set[str]:
-    """Personal domains trusted enough that a reading observed ON them is an
-    anchored observation — rel=me-verified domains plus a github blog/domain
-    that matched a declared personal domain."""
-    doms = _verified_personal_domains(person)
-    doms |= {str(v).lower() for t, v in person.bound_anchors
-             if t == "github_personal_domain_match"}
-    return doms
-
-
-def _bind_context(person: Person) -> tuple[set[str], set[str], bool]:
-    """The three person-level invariants _candidate_is_bound reads — the rel=me
-    domains, the anchored-surface domains, and whether the GitHub identity is
-    bound. Computed once and reused across a batch of candidates (each scans
-    person.bound_anchors, which doesn't change per candidate)."""
-    return (_verified_personal_domains(person),
-            _anchored_surface_domains(person),
-            _github_identity_bound(person))
-
-
-def _candidate_is_bound(c: EmailCandidate, person: Person,
-                        *, ctx: tuple[set[str], set[str], bool] | None = None) -> bool:
-    """ENG-8 Phase-1: does THIS ADDRESS belong to the target? (Distinct from
-    Person.bound_anchors, which only says 'we found the right person at all.')
-
-    A candidate binds when ≥2 INDEPENDENT evidence classes agree on it:
-      1. anchored observation — a real (non-pattern) source on a surface whose
-         identity is bound: a GitHub surface when the handle bound, or a
-         personal_site/whois reading on a bound personal domain;
-      2. employer_match — the address domain is the resolved current employer's;
-      3. rel=me ownership — the address domain is a bidirectionally-verified
-         personal domain;
-      4. PGP owner-UID — keys.openpgp.org returned a key whose UID is this address.
-
-    A `manual_known` source (the --verify / --known lane: the user supplied the
-    address AS the subject) short-circuits to bound. Binding requires ≥2 signals
-    AND at least one IDENTITY-BEARING signal — an anchored observation (1) or
-    rel=me ownership (3) — because those alone tie the address to THIS person.
-    employer_match (2) and PGP owner-UID (4) are CORROBORATING but target-
-    agnostic: a domain belongs to the employer, a key proves someone controls
-    the inbox — neither says it is the target. So two corroborating signals
-    (employer + PGP) never bind, and snoop will not open a socket to a possible
-    namesake's mailbox on the strength of a name×domain template that merely
-    landed on the employer domain and carried a published key.
-    """
-    if "@" not in c.address:
-        return False
-    source_types = {s.type for s in c.sources}
-    if "manual_known" in source_types:
-        return True
-    domain = c.address.rsplit("@", 1)[1].lower()
-    # Person-level invariants don't vary across candidates; when binding a whole
-    # batch the caller hoists them once via _bind_context and passes them in so
-    # they aren't rescanned per candidate.
-    rel_me_domains, surface_domains, github_bound = ctx or _bind_context(person)
-
-    on_github_surface = github_bound and bool(source_types & _GITHUB_SURFACES)
-    on_owned_domain_surface = (
-        bool(source_types & _DOMAIN_SURFACES) and domain in surface_domains
-    )
-    anchored = on_github_surface or on_owned_domain_surface  # 1. anchored obs
-    rel_me_owned = domain in rel_me_domains                  # 3. rel=me ownership
-    identity_bearing = anchored or rel_me_owned
-
-    signals = 0
-    if anchored:
-        signals += 1
-    if c.employer_match:
-        signals += 1                                  # 2. employer (corroborating)
-    if rel_me_owned:
-        signals += 1
-    if "pgp" in source_types:
-        signals += 1                                  # 4. PGP UID (corroborating)
-    return signals >= 2 and identity_bearing
-
-
-def _google_account_candidates(
-    candidates: list[EmailCandidate],
-    workspace_domains: list[str],
-) -> list[EmailCandidate]:
-    """Filter candidates to those on Google-hosted domains worth probing.
-    Skip candidates that already have an account_exists verdict (don't
-    re-probe within one invocation). Ordered by _probe_rank so observation-
-    backed candidates probe first — on a multi-user Workspace tenant a pattern
-    guess that hits someone else's real account shouldn't short-circuit probing
-    of an observed address that hasn't been tried yet.
-    """
-    domains = _google_target_domains(workspace_domains)
-    out: list[EmailCandidate] = []
-    for c in candidates:
-        if not c.address or "@" not in c.address:
-            continue
-        if c.account_exists != "unprobed":
-            continue
-        domain = c.address.rsplit("@", 1)[1].lower()
-        if domain in domains:
-            out.append(c)
-    out.sort(key=_probe_rank)
-    return out
-
-
-# ENG-9 — split the Phase-2 gate by probe class. SMTP opens a socket to the
-# target's mailbox and can't disambiguate on a catch-all Workspace domain, so it
-# stays bind-gated (ENG-8). The Google People API existence check is categorically
-# different: it's an authed call through the user's OWN cookies (no socket to the
-# mailbox) and is the ONLY disambiguator when SMTP returns catch_all — its whole
-# value is collapsing pattern guesses to the one account that exists. So it MAY
-# run on UNBOUND pattern candidates on a Google-hosted domain. A verified hit then
-# becomes deliverability signal the host reasons over; a verified+name_match hit is
-# promoted to identity binding by _reassess_identity. Cost is bounded by the
-# per-domain daily ProbeBudget plus this cap (a name-variant blowup can't spend the
-# whole budget on one target); on an unlocked tenant the name-match short-circuit
-# in fetch_google_account stops it early.
-_SPECULATIVE_GOOGLE_CAP = 12
-_TEMPLATE_RANK = {t: i for i, t in enumerate(_DEFAULT_TEMPLATE_ORDER)}
-
-
-def _primary_localparts(name: str) -> set[str] | None:
-    """The local-parts for the PRIMARY name parse (e.g. 'jibben', 'jhillen',
-    'j.hillen' for 'Jibben Hillen'). The speculative Google burst is restricted to
-    these: the reversed-order guesses (last-as-first, 'hillen@') roughly double the
-    probe count, are almost always noise for a Western name, and can hit unrelated
-    employees — dropping them keeps the burst small enough to fit the Phase-2
-    deadline and cheap against the daily budget. Returns None when the name can't be
-    parsed (then no restriction is applied). The bound path still covers every name
-    variant; this trims only the speculative fan-out."""
-    parsed = parse_name(name) if name else None
-    if not parsed:
-        return None
-    return {lp.lower() for lp in localpart_templates(parsed.first, parsed.last).values()}
-
-
-def _pattern_template(c: EmailCandidate) -> str | None:
-    """Extract the pattern template name (e.g. 'first', 'flast') from a candidate's
-    pattern Source detail, so the speculative set can be ranked by template
-    plausibility rather than alphabetically — `first@` for a rare first name must
-    stay reachable within the cap, even though `first` is a low-popularity template."""
-    for s in c.sources:
-        m = re.search(r"(?:template|pattern) '([^']+)'", s.detail or "")
-        if m:
-            return m.group(1)
-    return None
-
-
-def _speculative_rank(c: EmailCandidate) -> tuple:
-    """Order the unbound Google probe set: company-inferred winners first, then by
-    template popularity, then address for determinism. Ensures the cap keeps the
-    plausible patterns rather than slicing by alphabet."""
-    detail = " ".join(s.detail or "" for s in c.sources)
-    inferred = 0 if "matches company pattern" in detail else 1
-    tmpl = _pattern_template(c)
-    rank = _TEMPLATE_RANK[tmpl] if tmpl in _TEMPLATE_RANK else len(_DEFAULT_TEMPLATE_ORDER)
-    return (inferred, rank, c.address)
-
-
-def _speculative_google_candidates(
-    candidates: list[EmailCandidate],
-    bound_addrs: set[str],
-    workspace_domains: list[str],
-    person: Person,
-) -> list[EmailCandidate]:
-    """ENG-9: unbound candidates on a Google-hosted domain, eligible for the Google
-    existence check (but NOT SMTP). Excludes already-bound addresses (those probe
-    via the bound path), anything already carrying an account_exists verdict, and —
-    to keep the burst within the Phase-2 deadline — the reversed-order name guesses
-    (only the primary name parse's local-parts probe speculatively). Ordered by
-    template plausibility, capped at _SPECULATIVE_GOOGLE_CAP."""
-    domains = _google_target_domains(workspace_domains)
-    allowed_localparts = _primary_localparts(person.name)
-    out: list[EmailCandidate] = []
-    seen: set[str] = set()
-    for c in candidates:
-        if not c.address or "@" not in c.address:
-            continue
-        if c.address in bound_addrs or c.address in seen:
-            continue
-        if c.account_exists != "unprobed":
-            continue
-        local, _, domain = c.address.partition("@")
-        domain = domain.lower()
-        if domain not in domains:
-            continue
-        if allowed_localparts is not None and local.lower() not in allowed_localparts:
-            continue
-        seen.add(c.address)
-        out.append(c)
-    out.sort(key=_speculative_rank)
-    return out[:_SPECULATIVE_GOOGLE_CAP]
-
-
-def _smtp_candidates(candidates: list[EmailCandidate], top_k: int = 5) -> list[EmailCandidate]:
-    """Pick the top candidates worth SMTP-probing: non-personal-provider, at
-    least one source, not already known-dead via Google. Ordered by _probe_rank
-    (observed addresses before pure guesses).
-
-    Google's 'not_found' verdict is authoritative — re-probing those addresses
-    over SMTP burns the per-domain daily budget and risks the user's MAIL FROM
-    getting rate-limited on a mailbox we already know doesn't exist.
-    """
-    eligible = []
-    for c in candidates:
-        if "@" not in c.address:
-            continue
-        domain = c.address.rsplit("@", 1)[1].lower()
-        if is_personal_provider(domain):
-            continue
-        if not c.sources:
-            continue
-        if c.account_exists == "not_found":
-            continue
-        eligible.append(c)
-    eligible.sort(key=_probe_rank)
-    return eligible[:top_k]
 
 
 # ---- main -------------------------------------------------------------------
@@ -1522,36 +1168,6 @@ def _probe_candidates(
             _merge_probe_verdicts(c, s)
     person.notes.extend(staged_notes)
     return None
-
-
-def _reassess_identity(person: Person, candidates: list[EmailCandidate]) -> None:
-    """Promote identity confidence using the probe verdicts.
-
-    person_resolve runs BEFORE the Google/SMTP probes and only knows how to bind
-    identity from a validated GitHub handle — so without a handle it defaults to
-    `insufficient_identity_evidence` and never sees the strongest identity signal
-    snoop can produce: a Google account that is `verified` AND whose display name
-    matches the target. That is genuine identity binding (existence + name), so
-    when exactly one verified candidate name-matches, promote to
-    `single_plausible_match` and record the anchor. Only acts on the
-    not-yet-bound state; a declared `multiple_plausible_matches` (real namesake)
-    is never auto-promoted."""
-    if person.ambiguity != "insufficient_identity_evidence" or not person.name:
-        return
-    name_matched = [
-        c for c in candidates
-        if c.account_exists == "verified" and c.account_display_name
-        and name_match(c.account_display_name, person.name)
-    ]
-    if len(name_matched) == 1:
-        c = name_matched[0]
-        person.ambiguity = "single_plausible_match"
-        person.bound_anchors.append(("google_name_match", str(c.account_display_name)))
-        person.notes.append(
-            f"identity promoted to single_plausible_match: Google account "
-            f"{c.address} is verified with display name "
-            f"'{c.account_display_name}' matching the target"
-        )
 
 
 def _google_ready(capabilities: list[Capability]) -> bool:
