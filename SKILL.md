@@ -223,12 +223,15 @@ observation `id`s that support it, and a one-line reason.
      domain is strong even without a display-name confirmation. Add the scoped
      caveat ("identity not independently anchored — confirm the person if it
      matters"), don't bury the result.
-3. **Verdict vocabulary is precise — use the exact word the evidence supports:**
+3. **Verdict vocabulary is precise — use the exact word the evidence supports.**
+   These are the three values of the `verdict` field (`lib.schema.EMAIL_VERDICTS`):
    - `verified` — ONLY when `data.smtp == "verified"` on a non-catch-all domain.
    - `google-confirmed` — `data.account_exists == "verified"` but SMTP was
      catch-all/inconclusive/unprobed. NOT the same as `verified`.
    - `pattern-guess` — no positive existence signal, just a name×domain template.
-   - `dead-end` — no usable candidate; suggest a channel from the hints.
+
+   `dead-end` is NOT a verdict word — it is the no-usable-candidate *outcome*:
+   emit no email fact at all and suggest a channel from the hints.
 4. **Namesake safety — abstain over guess.** If the observations could describe
    more than one person, say so, downgrade every marker to `[?]`, and emit
    fewer facts. A missed fact is cheap; attributing a stranger's email is the

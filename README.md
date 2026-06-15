@@ -118,10 +118,12 @@ Useful flags (full list in `--help` or `SKILL.md`):
 ```
 
 The host model reads fields off `data`, picks the email, and hands its facts
-(each citing observation `id`s) to `--ground`. The four verdict words the model
+(each citing observation `id`s) to `--ground`. The three verdict words the model
 uses map to the evidence: **verified** (clean SMTP RCPT 250), **google-confirmed**
-(Google People API confirms the account, SMTP couldn't), **pattern-guess** (no
-positive existence signal), **dead-end** (nothing usable — use channel hints).
+(Google People API confirms the account, SMTP couldn't), and **pattern-guess** (no
+positive existence signal). When nothing is usable the model emits no email fact
+at all — a **dead-end** — and suggests a channel from the hints; dead-end is an
+outcome, not a value of the verdict field (`lib.schema.EMAIL_VERDICTS` has three).
 
 ## How SMTP verification works
 
