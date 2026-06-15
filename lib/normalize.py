@@ -57,9 +57,7 @@ from dataclasses import dataclass
 # the scan is linear; no valid (RFC-conformant) address is excluded.
 EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,63}")
 SYNTAX_RE = re.compile(f"^{EMAIL_RE.pattern}$")
-MAILTO_RE = re.compile(
-    r"mailto:([a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,63})",
-    re.IGNORECASE)
+MAILTO_RE = re.compile(f"mailto:({EMAIL_RE.pattern})", re.IGNORECASE)
 
 # RFC 2606 reserved + obviously-fake domains that no real contact uses.
 RESERVED_NOISE_DOMAINS = frozenset({
