@@ -33,7 +33,7 @@ snoop keeps them apart, because they fail apart.
 thing:
 
 - `verified` — a clean SMTP `RCPT` 250 from the mailbox.
-- `google-confirmed` — the Google People API confirms the account; SMTP couldn't.
+- `google-confirmed` — the Google People API confirms the account exists *and* the name matches, where SMTP came back inconclusive.
 - `pattern-guess` — a name×domain guess with no positive existence signal.
 
 No blend, no percentage. When nothing is usable, snoop emits no email at all — an
@@ -44,11 +44,12 @@ honest blank that tells you what it checked, what it didn't, and why.
 won't open a socket to a same-named stranger's mailbox, and it won't hand you an
 address it can't tie to the person.
 
-**Provenance** is the third axis. Every fact carries a citation, and a second,
-deterministic pass — `snoop --ground` — drops any claim whose citation doesn't
-point at a real observation before the card renders. Two independent verifiers,
-two axes: does this address belong to the person, and does each sentence cite
-something real.
+**Provenance** is the third axis. Every fact carries citations, and a second,
+deterministic pass — `snoop --ground` — drops any fact whose citations don't
+resolve to a real observation, and flags any whose value doesn't appear in what it
+cites. It checks the receipts, not the wording. Two independent verifiers, two
+axes: identity decides whether an address belongs to the person; grounding decides
+whether each fact is attributable at all.
 
 The scope is bounded on purpose. snoop reads only self-published, real-identity,
 source-bound facts. It won't de-anonymize a pseudonym, infer a home address or
@@ -103,10 +104,44 @@ The skill takes it from there: it resolves who the person is, builds a
 the result, and returns the contact card. You read prose; Claude reads JSON.
 
 Resolution is the engine. The more snoop knows going in — a personal domain, a
-GitHub handle, a confirmed employer — the more it finds. A bare name + company
-makes the sensors pattern-guess; a found personal domain fires the
-personal-site `mailto:` sensor, often a direct mailbox and a strong identity
-anchor. Claude does that resolution pass first, then feeds it back in.
+GitHub handle, a confirmed employer — the more it finds. A name plus the company's
+email domain makes the sensors pattern-guess (the domain is what `pattern_gen`
+needs); a found personal domain fires the personal-site `mailto:` sensor, often a
+direct mailbox and a strong identity anchor. Claude does that resolution pass
+first, then feeds it back in.
+
+## What comes back
+
+In Claude Code, Claude presents the result as prose. Underneath, `snoop --ground`
+renders a plain grounded card — one line per fact, each line carrying its markers:
+
+```text
+Jane Doe — staff engineer at Acme; maintains acme-cli, writes at jane.dev.
+
+Email:
+  ✓ [+] janedoe@gmail.com — set public on her GitHub profile; Gmail, SMTP skipped by policy
+  ✓ [+] jdoe@acme.com [google-confirmed] — the one acme.com pattern that resolves; name matches, the rest not_found
+
+Social:
+  ✓ [+] github.com/janedoe — validated; links back to jane.dev
+  ~ [?] linkedin.com/in/janedoe — declared, not independently confirmed
+
+Identity check:
+  ✓ jane.dev ↔ github.com/janedoe (rel=me) — one person, no namesake
+```
+
+Three markers, three axes:
+
+- The verdict tag — `[verified]` / `[google-confirmed]` / `[pattern-guess]` — is
+  **deliverability**. No tag means snoop didn't probe it: a personal-provider
+  address like the Gmail above is skipped by policy.
+- **[+] / [?]** is **belonging** — is this fact attached to the target (bound), or
+  only declared (unconfirmed)?
+- **✓ / ~ / ·** is the analyst's **confidence** in the fact, auto-capped to `~`
+  when identity is a genuine namesake toss-up.
+
+Provenance — where a fact came from — isn't a glyph on the card; it's the citation
+behind each fact, the thing `--ground` checks.
 
 ## Reference
 
@@ -133,6 +168,9 @@ Useful flags (full list in `--help` or `SKILL.md`):
 |---|---|
 | `--out PATH` | Write the bundle to a file and print the `--ground` command. |
 | `--verify EMAIL` | Verify one address (repeatable); skip discovery. |
+| `--person-plan JSON` | The resolved person the sensors run against — `{name, handles, personal_domains, employer{domains}}`. Inline JSON, `@file`, or a path; wins over the positional/`--domain`/`--github`. |
+| `--domain DOMAIN` | Repeatable. Employer email domain(s) for `pattern_gen` and SMTP. Without it, most candidates collapse to low-confidence guesses. |
+| `--github HANDLE` | Target's GitHub handle — enables `git_emails`, `gh_profile`, `gh_search`. A wrong handle is caught by binding and skipped. |
 | `--ground` / `--observations-file PATH` | Read `{person, summary, facts}` on stdin, load observations from PATH, drop uncited facts, render the card. |
 | `--known EMAIL=Full Name` | Repeatable. Same-company knowns for pattern inference. |
 | `--no-smtp` | Skip SMTP verification. |
@@ -168,16 +206,19 @@ Useful flags (full list in `--help` or `SKILL.md`):
 Claude reads fields off `data`, picks the email, and hands its facts — each citing
 observation `id`s — to `--ground`. The verdict words map to the evidence:
 **verified** (clean SMTP `RCPT` 250), **google-confirmed** (Google People API
-confirms the account, SMTP couldn't), **pattern-guess** (no positive existence
-signal). When nothing is usable, Claude emits no email fact at all — a
+confirms the account *and* the name matches, where SMTP couldn't), **pattern-guess**
+(no positive existence signal). When nothing is usable, Claude emits no email fact
+at all — a
 **dead-end** — and suggests a channel from the hints instead. Dead-end is an
 outcome, not a fourth verdict (`lib.schema.EMAIL_VERDICTS` holds three).
 
 ### How SMTP verification works
 
 Per domain: **one** MX lookup, **one** catch-all sentinel probe (`RCPT` a random
-non-existent localpart), and **one** reused SMTP connection for all candidates.
-It stops early on the first verified hit.
+non-existent localpart), and **one** reused SMTP connection for all candidates. A
+catch-all result or an unreachable MX short-circuits the rest of that domain's
+probes; a verified hit doesn't — there may be more candidates on the domain left
+to check.
 
 The pipeline skips personal-provider domains (Gmail, iCloud, Outlook, Proton) by
 default — those either block `RCPT` or 451-throttle non-recognized senders, and
@@ -196,10 +237,14 @@ disabled SMTP `VRFY` command.
 Before any deliverability probe, snoop asks a prior question: does this address
 actually *belong* to the target?
 
-**A candidate binds only when ≥2 independent signals agree.** The signals: an
-address observed on a bound surface (a validated GitHub account, or a personal
-site on a rel=me-verified domain), the resolved employer domain, rel=me domain
-ownership, a PGP owner-UID. One signal is a coincidence. Two is a person.
+**A candidate binds only when ≥2 independent signals agree — and at least one ties
+the address to *this* person.** The identity-bearing signals: an address observed
+on a bound surface (a validated GitHub account, or a personal site on a
+rel=me-verified domain), or rel=me domain ownership. The resolved employer domain
+and a PGP owner-UID corroborate, but neither says *which* person — a domain
+belongs to a company, a key only proves someone holds the inbox. So two
+corroborating signals alone (employer + PGP) never bind. One coincidence is noise;
+an identity-bearing signal plus a second is a person.
 
 **SMTP fires only on bound candidates.** The `RCPT` probe opens a socket to the
 mailbox, so snoop will not knock on a same-named stranger's door. When nothing
@@ -224,10 +269,10 @@ person?* even on a locked tenant that returns no display name. It never answers
 intermittently — so when it's absent, snoop falls to a rare-name prior or
 abstains. It never guesses.
 
-Then `--ground` checks the same card from the other side: every sentence's
-citation against the observations it claims. Two independent verifiers, two axes —
-identity (does this address belong to the person?) and provenance (does each claim
-cite something real?).
+Then `--ground` checks the same card from the other side: each fact's citations
+against the observations they name, dropping any that don't resolve. Two
+independent verifiers, two axes — identity (does this address belong to the
+person?) and provenance (is each fact attributable to a real observation?).
 
 ### Calibration — how the numbers are measured
 
