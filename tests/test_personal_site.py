@@ -297,7 +297,7 @@ def test_default_http_get_returns_body_via_fetch(monkeypatch):
     monkeypatch.setattr("lib.fetch._default_resolve", lambda host: ["93.184.216.34"])
     monkeypatch.setattr(
         "lib.fetch._pinned_https_open",
-        lambda host, port, path, timeout: (
+        lambda host, port, path, timeout, **kw: (
             200, {"Content-Type": "text/html"},
             b"<a href='mailto:jane@example.com'>email</a>"),
     )
@@ -310,6 +310,6 @@ def test_default_http_get_returns_none_on_404(monkeypatch):
     monkeypatch.setattr("lib.fetch._default_resolve", lambda host: ["93.184.216.34"])
     monkeypatch.setattr(
         "lib.fetch._pinned_https_open",
-        lambda host, port, path, timeout: (404, {"Content-Type": "text/html"}, b"nope"),
+        lambda host, port, path, timeout, **kw: (404, {"Content-Type": "text/html"}, b"nope"),
     )
     assert _default_http_get("https://example.com/missing") is None
