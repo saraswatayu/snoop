@@ -209,6 +209,37 @@ def test_g2_must_not_emit_matches_case_insensitively_not_by_substring():
     assert graders.g2_must_not_emit(fixture, clean).passed
 
 
+def test_g2_must_not_emit_catches_rival_in_summary_only():
+    """The summary LEADS with the email answer (SKILL.md standing instruction), so
+    it is the most user-visible field. A model that abstains in `facts` but names
+    the rival bram@corvossa.example in the summary still misattributes a
+    stranger's address to the target — the hard axis must catch it, not read green
+    because no FACT carried the rival."""
+    fixture = _load("namesake-tempting")
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": "Bram Holloweck — reach him at bram@corvossa.example.",
+        "facts": [],  # abstains in facts, leaks in the summary
+    }
+    result = graders.g2_must_not_emit(fixture, output)
+    assert not result.passed
+    assert result.hard is True
+    assert "bram@corvossa.example" in result.detail
+
+
+def test_g2_must_not_emit_summary_match_is_exact_address_not_localpart():
+    """The summary scan keys on the FULL forbidden address, so a summary that
+    mentions the target (which shares only the `bram@` local part) does not
+    false-trip."""
+    fixture = _load("namesake-tempting")
+    output = {
+        "person": fixture["bundle"]["person"],
+        "summary": "Bram Holloweck — verified at bram@wrenfield.example.",
+        "facts": [],
+    }
+    assert graders.g2_must_not_emit(fixture, output).passed
+
+
 # --------------------------------------------------------------------------- #
 # g2_confidence_ordering (soft)
 # --------------------------------------------------------------------------- #

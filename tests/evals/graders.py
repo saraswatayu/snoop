@@ -727,6 +727,18 @@ def g2_must_not_emit(fixture: dict[str, Any],
                 failures.append(
                     f"emitted {fact.get('value')!r} is a must_not_emit value "
                     "(misattribution)")
+        # The summary LEADS with the email answer (SKILL.md standing instruction),
+        # so a forbidden address presented there misattributes a stranger's email
+        # to the target just as a fact would — even when no FACT carries it. Match
+        # the FULL forbidden address as a substring of the summary: that is safe
+        # because the rival and target share only the local part (`bram@`), not the
+        # whole address, so the legitimate target never false-trips.
+        summary_l = _norm_value(output.get("summary"))
+        for bad in forbidden:
+            if bad and bad in summary_l:
+                failures.append(
+                    f"must_not_emit value {bad!r} appears in the summary "
+                    "(misattribution)")
 
     passed = not failures
     detail = "no must_not_emit value was emitted" if passed \
