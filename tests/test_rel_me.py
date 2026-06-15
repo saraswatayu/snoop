@@ -364,3 +364,26 @@ def test_relmelink_dataclass_fields():
                       bidirectional=False)
     assert link2.detail == ""
     assert link2.tier == "possibly"
+
+
+def test_truncated_gzip_from_real_fetch_degrades_not_raises():
+    """End-to-end 'never raises' pin: a server that closes mid-body (truncated
+    gzip) makes the REAL lib.fetch raise FetchBlocked (it converts the EOFError),
+    which verify_rel_me catches — so the documented never-raises contract holds
+    against the real fetcher's full exception surface, not just FetchBlocked/OSError
+    side effects."""
+    import gzip as _gz
+
+    from lib.fetch import fetch as _real_fetch
+
+    truncated = _gz.compress(b"<html></html>")[:8]  # cut mid-stream
+
+    def _opener(host, port, path, timeout):
+        return (200, {"Content-Type": "text/html", "Content-Encoding": "gzip"},
+                truncated)
+
+    def fetch_fn(url, **_k):
+        return _real_fetch(url, opener=_opener, resolve=lambda h: ["93.184.216.34"])
+
+    links = verify_rel_me("jane.com", fetch_fn=fetch_fn)  # must not raise
+    assert links == []

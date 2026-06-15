@@ -256,3 +256,24 @@ def test_detail_is_single_line():
     detail = result.candidates[0].sources[0].detail
     assert "\n" not in detail
     assert "\r" not in detail
+
+
+def test_truncated_gzip_from_real_fetch_does_not_sink_pgp_batch():
+    """End-to-end 'never raises' pin: a truncated gzip from the keyserver makes the
+    REAL lib.fetch raise FetchBlocked (converted from EOFError); fetch_pgp_emails
+    catches it and returns a ResolverResult instead of propagating."""
+    import gzip as _gz
+
+    from lib.fetch import fetch as _real_fetch
+
+    truncated = _gz.compress(b"-----BEGIN PGP-----")[:8]
+
+    def _opener(host, port, path, timeout):
+        return (200, {"Content-Type": "text/plain", "Content-Encoding": "gzip"},
+                truncated)
+
+    def fetch_fn(url, **_k):
+        return _real_fetch(url, opener=_opener, resolve=lambda h: ["93.184.216.34"])
+
+    result = fetch_pgp_emails(["pete@openai.com"], fetch_fn=fetch_fn)  # must not raise
+    assert result.resolver == "pgp"
