@@ -110,6 +110,28 @@ def _default_resolve(host: str) -> list[str]:
                                  timeout=_RESOLVE_TIMEOUT_SEC)]
 
 
+def resolve_public_ip(host: str, *, port: int | None = None,
+                      timeout: float = _RESOLVE_TIMEOUT_SEC) -> str | None:
+    """Resolve `host` and return ONE validated public IP literal to connect to,
+    or None if it doesn't resolve to any public address. Bounded DNS (a slow
+    resolver can't hang the caller).
+
+    This is the pin in check-then-pin: a caller that already vetted the NAME with
+    `is_public_host` uses this to connect to the validated ADDRESS, closing the
+    DNS-rebinding gap where a host answers a public IP for the check and a private
+    IP for the connect. lib.fetch's HTTP path pins this way; SMTP uses it too."""
+    try:
+        infos = _getaddrinfo_bounded(host, port, proto=socket.IPPROTO_TCP,
+                                     timeout=timeout)
+    except OSError:
+        return None
+    for info in infos:
+        ip = str(info[4][0])
+        if _safe_ip_is_public(ip):
+            return ip
+    return None
+
+
 def _ip_is_public(ip: str) -> bool:
     addr = ipaddress.ip_address(ip)  # raises ValueError if not an IP literal
     return not (addr.is_private or addr.is_loopback or addr.is_link_local

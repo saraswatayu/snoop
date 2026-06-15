@@ -48,7 +48,7 @@ from .schema import EmailCandidate
 # SYNTAX_RE re-exported from lib.normalize (the single home for the address
 # validator) so existing callers/tests can keep importing verify_smtp.SYNTAX_RE.
 from .normalize import SYNTAX_RE, is_personal_provider  # noqa: F401
-from .fetch import is_public_host
+from .fetch import is_public_host, resolve_public_ip
 
 # Bound the MX DNS lookup so a blackholing nameserver can't stall a probe past
 # the caller's timeout budget (the smtplib socket below is already bounded, but
@@ -183,6 +183,7 @@ class DomainProbe:
         self.mail_from = mail_from
         self.timeout = timeout
         self.mx: str | None = None
+        self._mx_ip: str | None = None  # the validated public IP we pin the connect to
         self.provider: str | None = None
         self.catch_all: bool | None = None
         self.error: str | None = None
@@ -191,7 +192,13 @@ class DomainProbe:
     def _open(self) -> None:
         self._server = smtplib.SMTP(timeout=self.timeout)
         assert self.mx is not None
-        self._server.connect(self.mx)
+        assert self._mx_ip is not None  # pinned by _connect before _open runs
+        # Connect to the validated IP, not the name: smtplib.connect would
+        # re-resolve a hostname and a rebinding MX could flip it to a private
+        # address between the is_public_host check and here. EHLO sends the LOCAL
+        # hostname (no server-name dependency), and the probe is plain SMTP (no
+        # TLS / cert), so connecting by IP is correct.
+        self._server.connect(self._mx_ip)
         self._server.ehlo_or_helo_if_needed()
         self._server.mail(self.mail_from)
 
@@ -208,6 +215,14 @@ class DomainProbe:
         # must not be a hole around it.
         if not is_public_host(self.mx):
             self.error = f"MX host not a public address: {self.mx}"
+            return False
+        # Pin the validated public IP and connect to THAT, not the name. Without
+        # this, smtplib.connect(self.mx) re-resolves the hostname, so a rebinding
+        # MX could answer public for is_public_host and private for the connect
+        # (the HTTP path pins the same way in lib.fetch._pinned_https_open).
+        self._mx_ip = resolve_public_ip(self.mx)
+        if self._mx_ip is None:
+            self.error = f"MX host did not resolve to a public address: {self.mx}"
             return False
         try:
             self._open()
