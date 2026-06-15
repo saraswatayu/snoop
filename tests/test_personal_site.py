@@ -9,7 +9,10 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from lib.personal_site import (
+    _default_http_get,
     _extract_mailto_addresses,
     _is_extractable,
     fetch_personal_site,
@@ -265,3 +268,48 @@ def test_fetch_one_domain_fails_others_succeed():
     # extracted at least one address.
     assert result.status == "ok"
     assert [c.address for c in result.candidates] == ["jane@good.com"]
+
+
+# ---- default fetcher routes through the SSRF guard ---------------------------
+
+
+def test_default_http_get_blocks_private_host_via_ssrf_guard(monkeypatch):
+    """The production fetcher must route through lib.fetch's SSRF guard: a
+    personal_domain that resolves to a private/internal address is REFUSED
+    (FetchBlocked), never dialed. A target's declared domain is untrusted input;
+    before this fix _default_http_get used raw urllib.urlopen and would open a
+    socket straight to the operator's internal network."""
+    from lib.fetch import FetchBlocked
+
+    # The domain resolves to loopback (a rebinding / internal host).
+    monkeypatch.setattr("lib.fetch._default_resolve", lambda host: ["127.0.0.1"])
+    # Any actual socket open is an SSRF failure — the guard must block first.
+    def _no_socket(*_a, **_k):
+        raise AssertionError("SSRF: a socket was opened to a private host")
+    monkeypatch.setattr("lib.fetch._pinned_https_open", _no_socket)
+
+    with pytest.raises(FetchBlocked):
+        _default_http_get("https://internal.example/contact")
+
+
+def test_default_http_get_returns_body_via_fetch(monkeypatch):
+    """Happy path through lib.fetch: a public 200 returns the decoded body."""
+    monkeypatch.setattr("lib.fetch._default_resolve", lambda host: ["93.184.216.34"])
+    monkeypatch.setattr(
+        "lib.fetch._pinned_https_open",
+        lambda host, port, path, timeout: (
+            200, {"Content-Type": "text/html"},
+            b"<a href='mailto:jane@example.com'>email</a>"),
+    )
+    body = _default_http_get("https://example.com/contact")
+    assert body is not None and "mailto:jane@example.com" in body
+
+
+def test_default_http_get_returns_none_on_404(monkeypatch):
+    """A 404/410 from the guarded fetch maps to None (try the next path)."""
+    monkeypatch.setattr("lib.fetch._default_resolve", lambda host: ["93.184.216.34"])
+    monkeypatch.setattr(
+        "lib.fetch._pinned_https_open",
+        lambda host, port, path, timeout: (404, {"Content-Type": "text/html"}, b"nope"),
+    )
+    assert _default_http_get("https://example.com/missing") is None

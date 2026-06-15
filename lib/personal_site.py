@@ -28,10 +28,10 @@ from __future__ import annotations
 import re
 import urllib.error
 import urllib.parse
-import urllib.request
 from datetime import datetime, timezone
 from typing import Callable
 
+from .fetch import FetchBlocked, fetch
 from .normalize import domain_is_noise, normalize_email
 from .schema import EmailCandidate, ResolverResult, Source
 
@@ -108,22 +108,19 @@ def _extract_mailto_addresses(html: str) -> list[str]:
 
 
 def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str | None:
-    """Fetch URL body as text. Returns None on 404; raises on connection error."""
-    req = urllib.request.Request(url, headers={"User-Agent": "snoop-skill"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            # Cap response size to avoid pathological downloads.
-            body = resp.read(2_000_000)  # 2MB cap
-            # Best-effort charset detection. Most HTML is utf-8 or ISO-8859-1.
-            charset = resp.headers.get_content_charset() or "utf-8"
-            try:
-                return body.decode(charset, errors="replace")
-            except (LookupError, TypeError):
-                return body.decode("utf-8", errors="replace")
-    except urllib.error.HTTPError as e:
-        if e.code in (404, 410):
-            return None
-        raise
+    """Fetch URL body as text through the SSRF-hardened shared fetch (lib.fetch):
+    HTTPS-only, public-IP-pinned, redirect-revalidated, decompressed-body-capped.
+
+    A target's declared personal domain is untrusted input, so it must never be
+    steerable into the operator's internal network — this is the canonical
+    target-influenced fetch the guard exists for. Returns None on 404/410.
+    FetchBlocked (private host, bad scheme, oversize, disallowed content-type) and
+    network/TLS errors (OSError) propagate to the caller, which records them as a
+    per-domain fetch error."""
+    result = fetch(url, timeout=timeout)
+    if result.status in (404, 410):
+        return None
+    return result.text
 
 
 def fetch_personal_site(
@@ -169,7 +166,10 @@ def fetch_personal_site(
             url = f"https://{domain}{path}"
             try:
                 body = http(url)
-            except (urllib.error.URLError, OSError, TimeoutError) as e:
+            except (FetchBlocked, urllib.error.URLError, OSError, TimeoutError) as e:
+                # FetchBlocked = the SSRF guard refused (private host, redirect to
+                # a private host, oversize). Record it as an honest fetch error,
+                # not a silent skip — and never a connection to an internal host.
                 fetch_errors.append(f"{url}: {type(e).__name__}")
                 continue
             if body is None:
