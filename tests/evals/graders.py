@@ -377,6 +377,16 @@ def g1_verdict_vocabulary(fixture: dict[str, Any],
                 "gives non-email facts no verdict word")
             continue
         data = _cited_data(fact, obs_by_id)
+        # The verdict must be licensed by an observation about THIS fact's address,
+        # not merely any cited obs: a fact citing a verified candidate plus an
+        # unrelated obs about a DIFFERENT address must not borrow that other
+        # address's verified/exists state. Drop cited data whose `address` names a
+        # different mailbox; address-less obs can't misattribute an address they
+        # don't carry, so they stay.
+        fact_addr = _norm_value(value)
+        data = [d for d in data
+                if not d.get("address")
+                or _norm_value(d.get("address")) == fact_addr]
         # Strong positive existence signals are read across the cited obs only to
         # PROHIBIT a too-weak verdict (pattern-guess can't sit on a verified
         # account); the POSITIVE licensing of verified/google-confirmed is per-obs
