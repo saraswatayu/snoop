@@ -40,6 +40,7 @@ the sensors stay decoupled.
 from __future__ import annotations
 
 import json
+import urllib.parse
 from datetime import datetime, timezone
 from email.utils import getaddresses
 from typing import Callable
@@ -246,10 +247,15 @@ def fetch_package_emails(
         if not name or registry not in ("npm", "pypi"):
             continue
 
+        # Encode the name into the path so a stray '?'/'#'/space can't reshape the
+        # request. npm: keep '@' and turn '/' into %2F (the scoped-package form,
+        # @scope%2Fpkg); pypi names have no path structure, so encode fully. The
+        # host is fixed and lib.fetch re-validates it — this hardens against a
+        # malformed name, it is not an SSRF fix.
         if registry == "npm":
-            url = f"https://registry.npmjs.org/{name}"
+            url = f"https://registry.npmjs.org/{urllib.parse.quote(name, safe='@')}"
         else:
-            url = f"https://pypi.org/pypi/{name}/json"
+            url = f"https://pypi.org/pypi/{urllib.parse.quote(name, safe='')}/json"
 
         try:
             data = fetch(url, timeout=_DEFAULT_TIMEOUT_SEC)

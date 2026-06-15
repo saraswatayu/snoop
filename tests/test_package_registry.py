@@ -334,3 +334,36 @@ def test_default_http_get_json_returns_empty_on_block(monkeypatch):
     monkeypatch.setattr(package_registry, "fetch", boom)
     assert package_registry._default_http_get_json(
         "https://registry.npmjs.org/x") == {}
+
+
+# ---- name encoding (path-safety hardening) ----------------------------------
+
+
+def test_npm_scoped_name_is_url_encoded_into_the_path():
+    """A scoped npm name keeps '@' but its '/' becomes %2F (the registry form),
+    so the name lands in the path it's meant to, not a reshaped one."""
+    http = make_http_json({
+        "https://registry.npmjs.org/@scope%2Fpkg": {
+            "maintainers": [{"name": "Dev", "email": "dev@scope.example"}],
+        },
+    })
+    result = fetch_package_emails(
+        [{"registry": "npm", "name": "@scope/pkg"}],
+        http_get_json=http,
+    )
+    assert {c.address for c in result.candidates} == {"dev@scope.example"}
+
+
+def test_npm_name_query_chars_are_encoded_not_reshaping_the_request():
+    """A name carrying '?' must be percent-encoded, never turned into a query."""
+    seen: dict[str, str] = {}
+
+    def get(url, timeout=None):
+        seen["url"] = url
+        return {}
+
+    fetch_package_emails([{"registry": "npm", "name": "pkg?inject=1"}],
+                         http_get_json=get)
+    path = seen["url"].split("registry.npmjs.org/", 1)[1]
+    assert "?" not in path
+    assert "%3F" in seen["url"]
