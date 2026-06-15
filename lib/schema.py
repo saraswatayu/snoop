@@ -139,13 +139,13 @@ class EmailCandidate:
     smtp_verdict: SmtpVerdict = "unprobed"
     mx_provider: str | None = None  # "google" | "microsoft" | "other" | None for renderer hints
     # Independent of SMTP: did the Google People API confirm this account exists?
-    # See AccountExistsVerdict for semantics. The scorer's _score_deliverable
-    # merges signals from both smtp_verdict AND account_exists; either positive
-    # signal lifts deliverable. Set by lib.google_account.fetch_google_account.
+    # See AccountExistsVerdict for semantics. The host-model analyst reads both
+    # smtp_verdict AND account_exists; either positive signal supports
+    # deliverability. Set by lib.google_account.fetch_google_account.
     account_exists: AccountExistsVerdict = "unprobed"
     # When account_exists=="verified" AND Google returned a profile name, this
-    # holds the display name as Google sees it. The scorer compares against
-    # the target's name to bind the name_match anchor (or flag a delta if
+    # holds the display name as Google sees it. Candidate binding compares it
+    # against the target's name to bind the name_match anchor (or flag a delta if
     # Google's name doesn't match the target's).
     account_display_name: str | None = None
     # When account_exists=="verified" AND Google returned a non-default profile

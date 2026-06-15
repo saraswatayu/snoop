@@ -3,7 +3,8 @@
 The deterministic sensors (git_emails, gh_profile, personal_site, pattern_gen,
 verify_smtp, google_account, plus the host model's own WebSearch) gather RAW
 OBSERVATIONS about a person. `build_evidence` flattens the resolved person +
-scored candidates into a numbered, typed, cited list of those observations.
+candidates (raw readings + probe verdicts) into a numbered, typed, cited list
+of those observations.
 
 The host model (already running in Claude Code) reasons over that bundle: it
 picks the email, judges the namesake, builds the profile, writes the prose. It
@@ -62,7 +63,7 @@ class ReasonedProfile:
 
 
 def build_evidence(person: Person, candidates: list[EmailCandidate]) -> list[Observation]:
-    """Flatten the resolved person + scored candidates into a numbered list of
+    """Flatten the resolved person + candidates into a numbered list of
     raw observations. Deterministic and side-effect-free."""
     obs: list[Observation] = []
     n = 0
