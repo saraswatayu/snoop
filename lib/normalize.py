@@ -48,10 +48,18 @@ from dataclasses import dataclass
 # Conservative address shape: dotted TLD, no whitespace. EMAIL_RE matches an
 # address anywhere in text; SYNTAX_RE is the anchored validator (whole string),
 # derived from EMAIL_RE so the two can never drift.
-EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}")
+#
+# Quantifiers are BOUNDED to RFC 5321 limits (localpart <=64, domain <=255,
+# label/TLD <=63) on purpose: an unbounded `+` makes `finditer` over a large,
+# attacker-controlled body (a fetched page/profile with no '@') run in O(n^2)
+# and pin a CPU for minutes — past the wall-clock deadline, which can't kill a
+# blocking C-level regex. Bounding the runs makes per-position work constant, so
+# the scan is linear; no valid (RFC-conformant) address is excluded.
+EMAIL_RE = re.compile(r"[a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,63}")
 SYNTAX_RE = re.compile(f"^{EMAIL_RE.pattern}$")
 MAILTO_RE = re.compile(
-    r"mailto:([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})", re.IGNORECASE)
+    r"mailto:([a-zA-Z0-9._%+\-]{1,64}@[a-zA-Z0-9.\-]{1,255}\.[a-zA-Z]{2,63})",
+    re.IGNORECASE)
 
 # RFC 2606 reserved + obviously-fake domains that no real contact uses.
 RESERVED_NOISE_DOMAINS = frozenset({
