@@ -77,3 +77,25 @@ def test_fact_kinds_match_production_render_enum():
         "lib.render._KIND_SECTION drifted from lib.schema.FACT_KINDS "
         f"(schema-only: {FACT_KINDS - set(render._KIND_SECTION)}; "
         f"render-only: {set(render._KIND_SECTION) - FACT_KINDS})")
+
+
+def test_rank_tables_match_schema_vocabulary():
+    """g2_confidence_ordering ranks facts via hand-written dicts (_VERDICT_RANK /
+    _MARKER_RANK) keyed by the verdict/marker vocabulary. Unlike _FACT_KINDS they
+    do NOT read the schema source, so a renamed/added verdict or marker in
+    lib.schema would leave a stale key here and the grader would mis-rank silently
+    (`.get()` returns None → treated as the weakest). Pin the rank-table keys to
+    the schema vocabulary so a vocabulary change fails HERE, loudly, instead."""
+    import sys
+    if str(_SKILL_ROOT) not in sys.path:
+        sys.path.insert(0, str(_SKILL_ROOT))
+    from lib.schema import BELONGS_MARKERS, EMAIL_VERDICTS  # noqa: E402
+
+    assert set(graders._VERDICT_RANK) == EMAIL_VERDICTS, (
+        "graders._VERDICT_RANK drifted from lib.schema.EMAIL_VERDICTS "
+        f"(rank-only: {set(graders._VERDICT_RANK) - EMAIL_VERDICTS}; "
+        f"schema-only: {EMAIL_VERDICTS - set(graders._VERDICT_RANK)})")
+    assert set(graders._MARKER_RANK) == BELONGS_MARKERS, (
+        "graders._MARKER_RANK drifted from lib.schema.BELONGS_MARKERS "
+        f"(rank-only: {set(graders._MARKER_RANK) - BELONGS_MARKERS}; "
+        f"schema-only: {BELONGS_MARKERS - set(graders._MARKER_RANK)})")
