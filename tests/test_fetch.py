@@ -200,3 +200,80 @@ def test_default_resolve_is_time_bounded(monkeypatch):
     with pytest.raises(OSError):
         fetchmod._default_resolve("slow.example")
     assert _time.monotonic() - start < 5  # returned promptly, didn't hang
+
+
+# ---- is_global-class ranges (CGNAT/benchmarking/doc/IPv4-mapped) --------------
+
+
+@pytest.mark.parametrize("ip", [
+    "100.64.0.1",              # CGNAT / RFC 6598 shared space (Tailscale tailnets)
+    "100.100.100.100",        # Tailscale MagicDNS resolver
+    "198.18.0.5",             # benchmarking (RFC 2544)
+    "192.0.2.1",              # documentation (TEST-NET-1)
+    "::ffff:127.0.0.1",       # IPv4-mapped IPv6 loopback
+    "::ffff:169.254.169.254", # IPv4-mapped IPv6 link-local (cloud metadata)
+])
+def test_non_global_ranges_blocked(ip):
+    # is_global rejects globally-unroutable ranges the hand-rolled is_private/
+    # is_reserved flags miss (CGNAT, benchmarking, documentation). A target-
+    # controlled name resolving here must not reach the operator's overlay
+    # (e.g. Tailscale) or internal network.
+    assert not is_public_host(ip)
+
+
+def test_host_resolving_to_cgnat_is_blocked():
+    # the same guard must hold for a NAME that resolves into CGNAT space
+    assert not is_public_host("tailnet.example", resolve=lambda h: ["100.64.1.2"])
+
+
+# ---- _pinned_https_open: the DNS-rebinding pin (was monkeypatched away) -------
+
+
+def test_pinned_open_blocks_rebind_to_private(monkeypatch):
+    # _pinned_https_open re-resolves and pins to a validated public IP. If the
+    # name now resolves only to a private address (DNS rebinding between the
+    # is_public_host check and the connect), it must raise FetchBlocked rather
+    # than open a socket to the internal host.
+    from lib import fetch as fetchmod
+    monkeypatch.setattr(fetchmod, "_getaddrinfo_bounded",
+                        lambda *a, **k: [(2, 1, 6, "", ("10.0.0.1", 443))])
+    with pytest.raises(fetchmod.FetchBlocked) as e:
+        fetchmod._pinned_https_open("evil.example", 443, "/", 1.0)
+    assert "public address" in str(e.value)
+
+
+# ---- redirect without a Location header --------------------------------------
+
+
+def test_redirect_without_location_blocked():
+    op = _opener(status=302, headers={"Content-Type": "text/html"})  # no Location
+    with pytest.raises(FetchBlocked) as e:
+        fetch("https://example.com/r", opener=op, resolve=_PUB)
+    assert "redirect without Location" in str(e.value)
+
+
+# ---- resolve_public_ip (the pin helper, used by SMTP too) --------------------
+
+
+def test_resolve_public_ip_picks_public_skips_private(monkeypatch):
+    from lib import fetch as fetchmod
+    monkeypatch.setattr(fetchmod, "_getaddrinfo_bounded", lambda *a, **k: [
+        (2, 1, 6, "", ("10.0.0.1", 443)),   # private — skipped
+        (2, 1, 6, "", ("8.8.8.8", 443)),    # public — chosen
+    ])
+    assert fetchmod.resolve_public_ip("mixed.example") == "8.8.8.8"
+
+
+def test_resolve_public_ip_none_when_all_private(monkeypatch):
+    from lib import fetch as fetchmod
+    monkeypatch.setattr(fetchmod, "_getaddrinfo_bounded",
+                        lambda *a, **k: [(2, 1, 6, "", ("10.0.0.1", 443))])
+    assert fetchmod.resolve_public_ip("internal.example") is None
+
+
+def test_resolve_public_ip_none_on_resolver_error(monkeypatch):
+    from lib import fetch as fetchmod
+    def boom(*a, **k):
+        raise OSError("nxdomain")
+    monkeypatch.setattr(fetchmod, "_getaddrinfo_bounded", boom)
+    assert fetchmod.resolve_public_ip("nope.example") is None

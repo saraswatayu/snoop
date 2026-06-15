@@ -38,6 +38,17 @@ def test_syntax_re_is_anchored_email_re():
     assert EMAIL_RE.search("see jane@acme.io now")      # finds it inline
 
 
+def test_email_re_quantifiers_are_bounded():
+    # The localpart/domain runs are bounded to RFC 5321 limits so finditer over a
+    # large no-'@' body stays linear instead of O(n^2) (the ReDoS guard). A
+    # 64-char localpart is the RFC max and must still match; 65 must not.
+    assert SYNTAX_RE.match("a" * 64 + "@b.co")
+    assert SYNTAX_RE.match("a" * 65 + "@b.co") is None
+    # A pathological no-'@' blob must not blow up: with an unbounded `+` this scan
+    # was O(n^2) (~40s at 200KB); bounded it returns instantly with no matches.
+    assert list(EMAIL_RE.finditer("a." * 100_000)) == []
+
+
 def test_domain_is_noise_covers_reserved_and_subdomains():
     assert domain_is_noise("example.com")
     assert domain_is_noise("mail.example.org")   # subdomain of a reserved domain
