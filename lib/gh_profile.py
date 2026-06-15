@@ -35,6 +35,7 @@ from typing import Callable
 
 from . import _gh_api
 from ._gh_api import GhCaller
+from .fetch import USER_AGENT
 from .normalize import EMAIL_RE, MAILTO_RE, domain_is_noise, normalize_email
 from .schema import EmailCandidate, GitHubRepo, ResolverResult, Source
 
@@ -73,7 +74,7 @@ def _default_gh_caller() -> GhCaller | None:
 
 def _default_http_get(url: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> str | None:
     """Fetch URL body as text. Returns None on 404; raises on other errors."""
-    req = urllib.request.Request(url, headers={"User-Agent": "snoop-skill"})
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read().decode("utf-8", errors="replace")

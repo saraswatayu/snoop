@@ -23,6 +23,8 @@ import urllib.request
 from shutil import which
 from typing import Any, Callable
 
+from .fetch import USER_AGENT
+
 _API_BASE = "https://api.github.com"
 DEFAULT_TIMEOUT_SEC = 6.0
 
@@ -57,7 +59,7 @@ def gh_via_http(path: str, *, timeout: float = DEFAULT_TIMEOUT_SEC) -> Any:
     req = urllib.request.Request(
         url,
         headers={
-            "User-Agent": "snoop-skill",
+            "User-Agent": USER_AGENT,
             "Accept": "application/vnd.github+json",
         },
     )

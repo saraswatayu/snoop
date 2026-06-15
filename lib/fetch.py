@@ -46,7 +46,8 @@ _DEFAULT_CONTENT_TYPES = frozenset({
     "text/html", "application/xhtml+xml",
     "text/plain", "application/json",
 })
-_USER_AGENT = "snoop/0.2 (+https://github.com/saraswatayu/snoop)"
+USER_AGENT = "snoop/0.2 (+https://github.com/saraswatayu/snoop)"
+_USER_AGENT = USER_AGENT  # back-compat alias; USER_AGENT is the one home for sensors
 
 
 class FetchBlocked(Exception):
@@ -164,7 +165,12 @@ def fetch(
 
     Raises FetchBlocked when a guard refuses; lets network/TLS errors (OSError,
     ssl.SSLError) propagate so the caller can mark the sensor degraded."""
-    opener = opener or _pinned_https_open
+    if opener is None:
+        # The default opener honours THIS call's max_bytes for the compressed
+        # read (not just the module default); injected test openers keep the
+        # 4-arg (host, port, path, timeout) shape.
+        opener = lambda h, p, pa, t: _pinned_https_open(  # noqa: E731
+            h, p, pa, t, max_bytes=max_bytes)
     current = url
     for _hop in range(max_redirects + 1):
         parsed = urllib.parse.urlparse(current)
@@ -263,8 +269,8 @@ def _gunzip_capped(body: bytes, max_bytes: int) -> bytes:
     return bytes(out)
 
 
-def _pinned_https_open(host: str, port: int, path: str,
-                       timeout: float) -> tuple[int, dict, bytes]:
+def _pinned_https_open(host: str, port: int, path: str, timeout: float,
+                       *, max_bytes: int = _DEFAULT_MAX_BYTES) -> tuple[int, dict, bytes]:
     """Open one HTTPS request to the *resolved, validated* IP for `host`, with
     SNI + Host kept as the hostname so TLS and vhosts still work. Reads up to a
     bounded number of bytes off the socket (the precise cap is enforced after
@@ -297,8 +303,10 @@ def _pinned_https_open(host: str, port: int, path: str,
             "Connection": "close",
         })
         resp = conn.getresponse()
-        # Read a bounded slab; the decompressed cap is enforced downstream.
-        body = resp.read(8 * _DEFAULT_MAX_BYTES)
+        # Read a bounded compressed slab sized off THIS call's max_bytes (8x to
+        # leave room for a reasonable compression ratio); the exact decompressed
+        # cap is enforced downstream in _decode_capped.
+        body = resp.read(8 * max_bytes)
         headers = {k: v for k, v in resp.getheaders()}
         return resp.status, headers, body
     finally:
