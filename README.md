@@ -1,5 +1,7 @@
 # snoop
 
+[![skills.sh](https://skills.sh/b/saraswatayu/snoop)](https://skills.sh/saraswatayu/snoop)
+
 A [Claude Code](https://claude.com/claude-code) **skill** that builds a
 **contact profile for outreach** — who someone is, the best email to reach them,
 and the context for a good first message.
