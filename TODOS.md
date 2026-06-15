@@ -10,6 +10,15 @@ basis, never `✓`), the 4A honest-blank card, T-minor B M365 render separation,
 ENG-7 acceptance test + shared fetch harness, the distribution/README story, and
 the meeting-prep render mode. The only Assignment step left is human-gated (below).
 
+## Landed since (analyst-eval substrate)
+
+The Step-3 analyst now HAS coverage. `tests/evals/` holds the synthetic fixture
+bundles (incl. injection/forgery cases), the deterministic G1/G2 graders with
+SKILL.md quote-anchored drift lint, the privacy gate with a negative self-test,
+and the gate/runner. The live-LLM judge phase (P2) stays conditional per the plan
+(`docs/plans/2026-06-12-analyst-evals.md`, local-only). This supersedes the stale
+"the analyst has none [tests]" framing that used to sit under "Held back."
+
 ## Human-gated (not codeable autonomously)
 
 ### Run the supervised calibration N≥25 and publish the numbers
@@ -42,30 +51,6 @@ the privacy gate a closed allowlist.
 **Blocks:** the `happy-dev` P0 seed fixture of the analyst-evals workstream (below).
 
 ## Held back (lower priority, available next)
-
-### Analyst-layer evals — corpus, graders, harness
-
-**What:** Eval system for the Step-3 reasoning layer (the host model reading
-SKILL.md): ~24–28 synthetic fixture bundles (incl. injection/forgery cases),
-deterministic G1/G2 graders with SKILL.md quote-anchored drift lint, privacy
-gate with negative self-test, concurrent k-trial runner with provenance stamps
-and a two-axis merge gate (hard misattribution axes strict; soft axes one retry).
-
-**Why:** SKILL.md Step 3 is the product's most important module with zero
-coverage — every prose edit is an untested production change. Sensors have 9k
-lines of tests; the analyst has none.
-
-**Context:** Full reviewed plan in `docs/plans/2026-06-12-analyst-evals.md`
-(local-only — this entry is the committed pointer); task breakdown in
-`~/.gstack/projects/saraswatayu-snoop/tasks-eng-review-20260612-111424.jsonl`
-(T1–T7). Phases: P0 fixtures+graders (no LLM cost) → P1 runner+corpus →
-P2 judge (only if G1/G2 prove insufficient). Eng review 2026-06-12: 9 findings
-+ 4 Codex tensions, all folded. The ledger-failure-distillation loop shares the
-4–6-week ledger-data dependency with Ledger phase 2 (below).
-
-**Effort:** M–L (human ~1wk) / M (CC ~1–2d). **Priority:** P1.
-**Depends on:** the human-gated fixture-account registration (above) for the
-`happy-dev` fixture; nothing else.
 
 ### Promote the verdict-word check into `--ground` (runtime)
 
