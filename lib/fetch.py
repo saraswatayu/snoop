@@ -217,13 +217,27 @@ def _inflate_capped(body: bytes, max_bytes: int) -> bytes:
 
 
 def _gunzip_capped(body: bytes, max_bytes: int) -> bytes:
+    """Decompress a Content-Encoding: gzip body with a hard output cap.
+
+    A server that closes the connection mid-body yields a TRUNCATED gzip stream,
+    which gzip.GzipFile.read surfaces as EOFError; a non-gzip body raises
+    gzip.BadGzipFile and a corrupt member raises zlib.error. EOFError and
+    zlib.error are NOT OSError subclasses, so without this guard they escape a
+    sensor's `except (FetchBlocked, OSError)` and crash it (pgp/package_registry
+    have no other net). Convert any decode failure to FetchBlocked, mirroring
+    _inflate_capped's deflate handling."""
     out = bytearray()
-    with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
-        while len(out) <= max_bytes:
-            chunk = gz.read(65536)
-            if not chunk:
-                break
-            out.extend(chunk)
+    try:
+        with gzip.GzipFile(fileobj=io.BytesIO(body)) as gz:
+            while len(out) <= max_bytes:
+                chunk = gz.read(65536)
+                if not chunk:
+                    break
+                out.extend(chunk)
+    except (EOFError, OSError, zlib.error) as exc:
+        # OSError covers gzip.BadGzipFile (a subclass); EOFError = truncated
+        # stream; zlib.error = corrupt deflate member inside the gzip wrapper.
+        raise FetchBlocked("undecodable gzip body") from exc
     return bytes(out)
 
 

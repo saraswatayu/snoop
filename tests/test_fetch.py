@@ -159,6 +159,30 @@ def test_undecodable_deflate_raises_fetchblocked_not_zliberror():
         fetch("https://example.com/d", opener=op, resolve=_PUB)
 
 
+def test_truncated_gzip_raises_fetchblocked_not_eoferror():
+    # A gzip body cut off mid-stream (server closed the connection mid-body) makes
+    # gzip.GzipFile.read raise EOFError, which is NOT an OSError subclass — so
+    # without a guard it escapes a sensor's `except (FetchBlocked, OSError)` and
+    # crashes pgp/package_registry. Like the deflate path it must surface as
+    # FetchBlocked.
+    import gzip as _gz
+    good = _gz.compress(b"A" * 100_000)
+    truncated = good[: len(good) // 2]
+    op = _opener(headers={"Content-Type": "text/plain", "Content-Encoding": "gzip"},
+                 body=truncated)
+    with pytest.raises(FetchBlocked):
+        fetch("https://example.com/g", opener=op, resolve=_PUB)
+
+
+def test_garbage_gzip_raises_fetchblocked():
+    # A body that is not a gzip stream at all raises gzip.BadGzipFile; surface it
+    # as FetchBlocked too (parity with the deflate guard), not a raw decode error.
+    op = _opener(headers={"Content-Type": "text/plain", "Content-Encoding": "gzip"},
+                 body=b"this is plainly not a gzip stream")
+    with pytest.raises(FetchBlocked):
+        fetch("https://example.com/g", opener=op, resolve=_PUB)
+
+
 def test_default_resolve_is_time_bounded(monkeypatch):
     # The default DNS resolver must not hang indefinitely on a slow/blackholing
     # nameserver — getaddrinfo has no timeout of its own, so the helper bounds it.
