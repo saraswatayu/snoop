@@ -10,8 +10,13 @@ __pycache__/
 *.swp
 /tmp_*
 
-# Internal design docs — keep out of the public repo. Local-only.
-docs/plans/
+# Local tooling / scratch dirs — never committed.
+.benchmarks/
+.claude/
+.gstack/
+
+# Internal docs (designs, plans, specs) — keep out of the public repo. Local-only.
+docs/
 
 # Calibration fixture overrides may contain real targets' email addresses.
 # Local-only; never committed.
