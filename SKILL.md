@@ -1,6 +1,6 @@
 ---
 name: snoop
-description: Use when the user wants to find, guess, or verify someone's email address, or build a contact profile for outreach. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify jane@acme.com". snoop is the sensor — it does the I/O you can't (git commits, the GitHub API, personal-site mailto: anchors, the SMTP RCPT handshake, the Google People API, MX lookups) and emits a typed observation bundle. You are the analyst: you reason over the bundle and a tiny deterministic check (`--ground`) verifies your citations.
+description: Use when the user wants to find, guess, or verify someone's email address, or build a contact profile for outreach. Triggers include "snoop", "snoop NAME at COMPANY", "find this person's email", "what's so-and-so's email at company X", a pasted LinkedIn profile URL with "get their email", "figure out the email for X", or "verify jane@acme.com". snoop is the sensor — it does the I/O you can't (git commits, the GitHub API, personal-site mailto links, the SMTP RCPT handshake, the Google People API, MX lookups) and emits a typed observation bundle. You are the analyst — you reason over the bundle and a tiny deterministic check (`--ground`) verifies your citations.
 ---
 
 # snoop
